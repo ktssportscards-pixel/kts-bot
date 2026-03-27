@@ -1,0 +1,6 @@
+discord.py
+anthropic
+gspread
+google-auth
+google-api-python-client
+pandas
