@@ -341,8 +341,18 @@ async def on_message(message):
     # ── CHECK FOR CERT NUMBERS ────────────────────────────────────────────────
     certs = extract_certs(text) if text else []
 
-    # ── WELCOME: send once on first human message ─────────────────────────────
-    if channel_id not in welcomed_tickets:
+    # ── WELCOME: send only if bot hasn't spoken in this channel yet ───────────
+    # Check actual message history so restarts don't cause repeat welcomes
+    bot_already_spoke = False
+    try:
+        async for msg in message.channel.history(limit=50):
+            if msg.author == bot.user:
+                bot_already_spoke = True
+                break
+    except Exception:
+        bot_already_spoke = channel_id in welcomed_tickets
+
+    if not bot_already_spoke:
         welcomed_tickets.add(channel_id)
         await asyncio.sleep(1)
         await message.channel.send(WELCOME_MSG)
