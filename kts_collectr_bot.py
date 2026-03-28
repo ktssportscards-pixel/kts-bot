@@ -47,7 +47,7 @@ TEMPLATE_SHEET_ID       = "1y_jis_knml_UIVWxxtEHrKs_vjkuX97x8Q7u3pVsQVM"
 KTS_FOLDER_ID           = "1Ib1XgsCt9yc8B7EkppSEd97xTWlW8S2y"   # Parent folder
 PSA_FOLDER_ID           = "1ayHilGpXqNQA8RDRSw1igTsCxBEI4hvm"   # PSA Slabs
 COLLECTR_FOLDER_ID      = "1nAUPg7QW7tRzzdiHxG7UYUSPCa8MDZq3"   # Collectr Singles
-APPS_SCRIPT_URL         = "https://script.google.com/macros/s/AKfycbz89bFS6eMJTbDF8CxVTyQem69jyaGvzey5OtnwUQP55NOtgT1vCSrTekcQmtSwJVWNGA/exec"
+APPS_SCRIPT_URL         = "https://script.google.com/macros/s/AKfycbxPenRARSCnPZ6DdwaokcZ24FwvcobgP0ybvvzJR49cCJ_DUcNopRRXDPpyTJA0rJ71Cg/exec"
 YOUR_DISCORD_USER_ID    = 1120958174036500480  # Kevin's Discord user ID
 
 # Raw card payout percentages by lot size
@@ -223,7 +223,7 @@ def create_psa_sheet(username, cert_numbers):
     if not data.get("success"):
         raise Exception(data.get("error", "Unknown error from Apps Script"))
 
-    return data["url"], data["name"]
+    return data["url"], data["name"], data
 
 # ── CERT EXTRACTION ────────────────────────────────────────────────────────────
 def extract_certs(text):
@@ -262,6 +262,8 @@ welcomed_tickets = set()
 
 # Track last offer per channel for negotiation detection
 last_offer = {}  # channel_id -> {"payout": float, "total": float, "rate": float}
+# Track PSA sheet IDs per channel so we can add tracking when they agree
+channel_sheet = {}  # channel_id -> sheet_id
 
 WELCOME_MSG = (
     "👋 Welcome to KTS Collectibles! We buy Pokémon cards — PSA graded slabs and raw singles.\n\n"
@@ -446,7 +448,7 @@ async def on_message(message):
                 await message.channel.send(
                     f"Got it! Setting up your buying sheet for {len(certs)} cert{'s' if len(certs) > 1 else ''}... ⏳"
                 )
-                sheet_url, sheet_name = create_psa_sheet(username, certs)
+                sheet_url, sheet_name, data = create_psa_sheet(username, certs)
                 await message.channel.send(
                     f"✅ Sheet ready! Kevin will check comps on CardLadder and get back to you.\n\n"
                     f"📊 {sheet_url}"
@@ -482,6 +484,25 @@ async def on_message(message):
     if is_agreeing(text):
         await message.channel.send(SHIPPING_MSG)
         await ping_kevin(f"✅ **{username} agreed** — shipping address sent.", message.channel)
+
+        # Add tracking row to PSA sheet if one exists for this channel
+        if channel_id in channel_sheet:
+            try:
+                import urllib.request as urlreq
+                post_data = json.dumps({
+                    "action": "add_tracking",
+                    "sheet_id": channel_sheet[channel_id],
+                    "username": username
+                }).encode("utf-8")
+                req = urlreq.Request(
+                    APPS_SCRIPT_URL,
+                    data=post_data,
+                    headers={"Content-Type": "application/json"}
+                )
+                urlreq.urlopen(req, timeout=15)
+                print(f"Added tracking row for {username}")
+            except Exception as e:
+                print(f"Tracking row error (non-critical): {e}")
         return
 
     # ── EVERYTHING ELSE: STAY SILENT ─────────────────────────────────────────
