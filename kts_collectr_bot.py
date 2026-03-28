@@ -192,13 +192,19 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive"
 ]
 
+def get_credentials():
+    """Load Google credentials from env var (Railway) or file (local)."""
+    creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON")
+    if creds_json:
+        info = json.loads(creds_json)
+        return Credentials.from_service_account_info(info, scopes=SCOPES)
+    return Credentials.from_service_account_file(GOOGLE_CREDENTIALS_FILE, scopes=SCOPES)
+
 def get_gspread_client():
-    creds = Credentials.from_service_account_file(GOOGLE_CREDENTIALS_FILE, scopes=SCOPES)
-    return gspread.authorize(creds)
+    return gspread.authorize(get_credentials())
 
 def get_drive_service():
-    creds = Credentials.from_service_account_file(GOOGLE_CREDENTIALS_FILE, scopes=SCOPES)
-    return build("drive", "v3", credentials=creds)
+    return build("drive", "v3", credentials=get_credentials())
 
 def create_psa_sheet(username, cert_numbers):
     """Create a buying sheet by calling the Google Apps Script web app.
