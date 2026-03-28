@@ -509,24 +509,46 @@ async def on_message(message):
     # ── TRACKING NUMBER FROM CUSTOMER ─────────────────────────────────────────
     # Detect if customer pastes a tracking number (USPS/UPS/FedEx format)
     tracking_match = re.search(r'\b([0-9]{20,22}|1Z[A-Z0-9]{16}|[0-9]{12,15})\b', text)
-    if tracking_match and channel_id in channel_sheet:
+    if tracking_match:
         tracking_num = tracking_match.group(1)
-        try:
-            import urllib.request as urlreq
-            post_data = json.dumps({
-                "action": "update_tracking",
-                "sheet_id": channel_sheet[channel_id],
-                "tracking": tracking_num
-            }).encode("utf-8")
-            req = urlreq.Request(
-                APPS_SCRIPT_URL,
-                data=post_data,
-                headers={"Content-Type": "application/json"}
-            )
-            urlreq.urlopen(req, timeout=15)
-            print(f"Saved tracking {tracking_num} for {username}")
-        except Exception as e:
-            print(f"Tracking save error (non-critical): {e}")
+        # Get sheet_id from memory first, then fall back to Drive lookup by channel name
+        sheet_id = channel_sheet.get(channel_id)
+        if not sheet_id:
+            try:
+                creds = get_credentials()
+                from googleapiclient.discovery import build
+                drive = build("drive", "v3", credentials=creds)
+                channel_name = message.channel.name
+                results = drive.files().list(
+                    q=f"'{PSA_FOLDER_ID}' in parents and name contains '{channel_name}' and trashed=false",
+                    fields="files(id,name)",
+                    orderBy="createdTime desc",
+                    pageSize=1
+                ).execute()
+                files = results.get("files", [])
+                if files:
+                    sheet_id = files[0]["id"]
+                    channel_sheet[channel_id] = sheet_id
+                    print(f"Found sheet for {channel_name} via Drive lookup: {sheet_id}")
+            except Exception as e:
+                print(f"Drive lookup error: {e}")
+        if sheet_id:
+            try:
+                import urllib.request as urlreq
+                post_data = json.dumps({
+                    "action": "update_tracking",
+                    "sheet_id": sheet_id,
+                    "tracking": tracking_num
+                }).encode("utf-8")
+                req = urlreq.Request(
+                    APPS_SCRIPT_URL,
+                    data=post_data,
+                    headers={"Content-Type": "application/json"}
+                )
+                urlreq.urlopen(req, timeout=15)
+                print(f"Saved tracking {tracking_num} for {username}")
+            except Exception as e:
+                print(f"Tracking save error (non-critical): {e}")
         return  # Stay silent after saving
 
     # ── EVERYTHING ELSE: STAY SILENT ─────────────────────────────────────────
