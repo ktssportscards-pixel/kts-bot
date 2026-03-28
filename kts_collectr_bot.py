@@ -273,13 +273,14 @@ WELCOME_MSG = (
 )
 
 SHIPPING_MSG = (
-    "📦 **Paid Upon Arrival** — ship your cards to Kevin first, then payment goes out instantly once received.\n\n"
+    "📦 **Awesome, let's do it!** Ship your cards to Kevin and he'll pay you out instantly upon arrival.\n\n"
     "**Ship to:**\n"
     "Kevin Smith\n"
     "1363 Boylston St\n"
     "Unit 368\n"
     "Boston MA 02215\n\n"
-    "Payment via PayPal F&F or wire ⚡"
+    "Payment via PayPal F&F or wire once received ⚡\n\n"
+    "Once you've shipped, **drop your tracking number here** so Kevin can keep an eye out!"
 )
 
 FIRM_KEYWORDS = [
@@ -504,6 +505,29 @@ async def on_message(message):
             except Exception as e:
                 print(f"Tracking row error (non-critical): {e}")
         return
+
+    # ── TRACKING NUMBER FROM CUSTOMER ─────────────────────────────────────────
+    # Detect if customer pastes a tracking number (USPS/UPS/FedEx format)
+    tracking_match = re.search(r'\b([0-9]{20,22}|1Z[A-Z0-9]{16}|[0-9]{12,15})\b', text)
+    if tracking_match and channel_id in channel_sheet:
+        tracking_num = tracking_match.group(1)
+        try:
+            import urllib.request as urlreq
+            post_data = json.dumps({
+                "action": "update_tracking",
+                "sheet_id": channel_sheet[channel_id],
+                "tracking": tracking_num
+            }).encode("utf-8")
+            req = urlreq.Request(
+                APPS_SCRIPT_URL,
+                data=post_data,
+                headers={"Content-Type": "application/json"}
+            )
+            urlreq.urlopen(req, timeout=15)
+            print(f"Saved tracking {tracking_num} for {username}")
+        except Exception as e:
+            print(f"Tracking save error (non-critical): {e}")
+        return  # Stay silent after saving
 
     # ── EVERYTHING ELSE: STAY SILENT ─────────────────────────────────────────
 
