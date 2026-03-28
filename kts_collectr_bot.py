@@ -47,7 +47,7 @@ TEMPLATE_SHEET_ID       = "1y_jis_knml_UIVWxxtEHrKs_vjkuX97x8Q7u3pVsQVM"
 KTS_FOLDER_ID           = "1Ib1XgsCt9yc8B7EkppSEd97xTWlW8S2y"   # Parent folder
 PSA_FOLDER_ID           = "1ayHilGpXqNQA8RDRSw1igTsCxBEI4hvm"   # PSA Slabs
 COLLECTR_FOLDER_ID      = "1nAUPg7QW7tRzzdiHxG7UYUSPCa8MDZq3"   # Collectr Singles
-APPS_SCRIPT_URL         = "https://script.google.com/macros/s/AKfycbxPenRARSCnPZ6DdwaokcZ24FwvcobgP0ybvvzJR49cCJ_DUcNopRRXDPpyTJA0rJ71Cg/exec"
+APPS_SCRIPT_URL         = "https://script.google.com/macros/s/AKfycbxPenrARSCnPZ6Ddwaokcz24Fwvcobgp0ybvvzJR49cCJ_DUcNoprRXDPpyTJA0rJ71Cg/exec"
 YOUR_DISCORD_USER_ID    = 1120958174036500480  # Kevin's Discord user ID
 
 # Raw card payout percentages by lot size
