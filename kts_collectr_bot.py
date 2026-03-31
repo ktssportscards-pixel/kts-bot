@@ -60,7 +60,7 @@ RAW_PAYOUT_TIERS = [
 
 # VIP clients who always get 87% regardless of lot size
 # Add Discord usernames here (lowercase)
-VIP_CLIENTS = ["nickj1234"]
+VIP_CLIENTS = ["nickj1234", "gbywby"]
 
 # ── PAYOUT CALCULATOR ──────────────────────────────────────────────────────────
 def get_payout_rate(total, username):
