@@ -279,8 +279,14 @@ SHIPPING_MSG = (
     "1363 Boylston St\n"
     "Unit 368\n"
     "Boston MA 02215\n\n"
+    "📝 **Please include a note inside your package with:**\n"
+    "• Your Discord username\n"
+    "• Amount owed\n"
+    "• Preferred payment method (PayPal F&F or Wire)\n\n"
+    "⚠️ If no note is included, payment may be delayed as we won't know who the package is from.\n\n"
     "Payment via PayPal F&F or wire once received ⚡\n\n"
     "Once you've shipped, **drop your tracking number here** so Kevin can keep an eye out!"
+)
 )
 
 FIRM_KEYWORDS = [
