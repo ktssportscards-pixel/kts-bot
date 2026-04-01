@@ -287,7 +287,6 @@ SHIPPING_MSG = (
     "Payment via PayPal F&F or wire once received ⚡\n\n"
     "Once you've shipped, **drop your tracking number here** so Kevin can keep an eye out!"
 )
-)
 
 FIRM_KEYWORDS = [
     "counter", "lower", "less", "more money", "higher", "better offer",
