@@ -482,7 +482,7 @@ async def on_message(message):
         return
 
     # ── AGREED / SHIPPING REQUEST ─────────────────────────────────────────────
-    if is_agreeing(text):
+    if is_agreeing(text) and message.author.id != YOUR_DISCORD_USER_ID:
         await message.channel.send(SHIPPING_MSG)
         await ping_kevin(f"✅ **{username} agreed** — shipping address sent.", message.channel)
 
