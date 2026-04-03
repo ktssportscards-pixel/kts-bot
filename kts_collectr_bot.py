@@ -15,8 +15,8 @@ Handles TWO types of customers automatically:
        $1 - $500    → 84%
        $500 - $1000 → 85%
        $1000 - $2000→ 86%
-       $2000+       → 87%
-       Bulk 87%     → up to 87% (Kevin decides)
+       $2000+ → 87%
+       Bulk 87% → up to 87% (Kevin decides)
    - Sends customer their offer
    - Pings Kevin with breakdown
 
@@ -39,30 +39,29 @@ from datetime import datetime
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 
-# ── CONFIGURATION ──────────────────────────────────────────────────────────────
-DISCORD_BOT_TOKEN       = os.environ.get("DISCORD_BOT_TOKEN", "")
-ANTHROPIC_API_KEY       = os.environ.get("ANTHROPIC_API_KEY", "")
-GOOGLE_CREDENTIALS_FILE = os.environ.get("GOOGLE_CREDENTIALS_FILE", os.path.expanduser("~/Downloads/google_credentials.json"))
-TEMPLATE_SHEET_ID       = "1y_jis_knml_UIVWxxtEHrKs_vjkuX97x8Q7u3pVsQVM"
-KTS_FOLDER_ID           = "1Ib1XgsCt9yc8B7EkppSEd97xTWlW8S2y"   # Parent folder
-PSA_FOLDER_ID           = "1ayHilGpXqNQA8RDRSw1igTsCxBEI4hvm"   # PSA Slabs
-COLLECTR_FOLDER_ID      = "1nAUPg7QW7tRzzdiHxG7UYUSPCa8MDZq3"   # Collectr Singles
-APPS_SCRIPT_URL         = "https://script.google.com/macros/s/AKfycbxPenrARSCnPZ6Ddwaokcz24Fwvcobgp0ybvvzJR49cCJ_DUcNoprRXDPpyTJA0rJ71Cg/exec"
-YOUR_DISCORD_USER_ID    = 1120958174036500480  # Kevin's Discord user ID
+# ── CONFIGURATION ────────────────────────────────────────────────────────────────
+DISCORD_BOT_TOKEN        = os.environ.get("DISCORD_BOT_TOKEN", "")
+ANTHROPIC_API_KEY        = os.environ.get("ANTHROPIC_API_KEY", "")
+GOOGLE_CREDENTIALS_FILE  = os.environ.get("GOOGLE_CREDENTIALS_FILE", os.path.expanduser("~/Downloads/google_credentials.json"))
+TEMPLATE_SHEET_ID        = "1y_jis_knml_UIVWxxtEHrKs_vjkuX97x8Q7u3pVsQVM"
+KTS_FOLDER_ID            = "1Ib1XgsCt9yc8B7EkppSEd97xTWlW8S2y"   # Parent folder
+PSA_FOLDER_ID            = "1ayHilGpXqNQA8RDRSw1igTsCxBEI4hvm"   # PSA Slabs
+COLLECTR_FOLDER_ID       = "1nAUPg7QW7tRzzdiHxG7UYUSPCa8MDZq3"   # Collectr Singles
+APPS_SCRIPT_URL          = "https://script.google.com/macros/s/AKfycbxPenrARSCnPZ6Ddwaokcz24Fwvcobgp0ybvvzJR49cCJ_DUcNoprRXDPpyTJA0rJ71Cg/exec"
+YOUR_DISCORD_USER_ID     = 1120958174036500480  # Kevin's Discord user ID
 
 # Raw card payout percentages by lot size
 RAW_PAYOUT_TIERS = [
-    (0,     500,   0.84),
-    (500,   1000,  0.85),
-    (1000,  2000,  0.86),
-    (2000,  float('inf'), 0.87),
+    (0,    500,          0.84),
+    (500,  1000,         0.85),
+    (1000, 2000,         0.86),
+    (2000, float('inf'), 0.87),
 ]
 
 # VIP clients who always get 87% regardless of lot size
-# Add Discord usernames here (lowercase)
 VIP_CLIENTS = ["nickj1234", "gbywby"]
 
-# ── PAYOUT CALCULATOR ──────────────────────────────────────────────────────────
+# ── PAYOUT CALCULATOR ────────────────────────────────────────────────────────────
 def get_payout_rate(total, username):
     """Return the payout percentage for a given lot total."""
     username_lower = username.lower()
@@ -72,6 +71,7 @@ def get_payout_rate(total, username):
         if low <= total < high:
             return rate, f"${low:,}–{'$'+str(high//1000)+'k' if high != float('inf') else '+'} tier"
     return 0.84, "standard rate"
+
 
 def parse_collectr_csv(content_bytes):
     """
@@ -86,11 +86,11 @@ def parse_collectr_csv(content_bytes):
         if "Market Price" in col:
             price_col = col
             break
-
     if not price_col:
         return None, "Couldn't find market price column in this CSV."
 
     df[price_col] = pd.to_numeric(df[price_col], errors='coerce').fillna(0)
+
     qty_col = 'Quantity' if 'Quantity' in df.columns else None
     if qty_col:
         df[qty_col] = pd.to_numeric(df[qty_col], errors='coerce').fillna(1)
@@ -98,44 +98,35 @@ def parse_collectr_csv(content_bytes):
     else:
         df['_line_total'] = df[price_col]
 
-    # ── VALIDATION ────────────────────────────────────────────────────────────
-    # Tag Team keywords — always allowed
+    # ── VALIDATION ──────────────────────────────────────────────────────────────
     TAG_TEAM_KEYWORDS = [" &", "tag team", "gx tag"]
 
-    # Known PRE-2020 sets to reject (anything NOT in modern era)
-    # We use a blacklist of confirmed old sets rather than guessing by year
     PRE_2020_SETS = {
         "base set", "jungle", "fossil", "base set 2", "team rocket",
         "gym heroes", "gym challenge", "neo genesis", "neo discovery",
-        "neo revelation", "neo destiny", "legendary collection",
-        "expedition", "aquapolis", "skyridge",
-        "ruby & sapphire", "sandstorm", "dragon", "team magma vs team aqua",
-        "hidden legends", "firered & leafgreen", "team rocket returns",
-        "deoxys", "emerald", "unseen forces", "delta species",
-        "legend maker", "holon phantoms", "crystal guardians",
-        "dragon frontiers", "power keepers",
-        "diamond & pearl", "mysterious treasures", "secret wonders",
-        "great encounters", "majestic dawn", "legends awakened",
-        "stormfront", "platinum", "rising rivals", "supreme victors",
-        "arceus", "heartgold & soulsilver", "unleashed", "undaunted",
-        "triumphant", "call of legends",
-        "black & white", "emerging powers", "noble victories",
-        "next destinies", "dark explorers", "dragons exalted",
-        "boundaries crossed", "plasma storm", "plasma freeze",
-        "plasma blast", "legendary treasures",
-        "xy", "flashfire", "furious fists", "phantom forces",
-        "primal clash", "double crisis", "roaring skies",
-        "ancient origins", "breakthrough", "breakpoint",
-        "generations", "fates collide", "steam siege", "evolutions",
-        "sun & moon", "guardians rising", "burning shadows",
-        "shining legends", "crimson invasion", "ultra prism",
-        "forbidden light", "celestial storm", "dragon majesty",
-        "lost thunder", "team up", "detective pikachu",
-        "unbroken bonds", "unified minds", "hidden fates",
+        "neo revelation", "neo destiny", "legendary collection", "expedition",
+        "aquapolis", "skyridge", "ruby & sapphire", "sandstorm", "dragon",
+        "team magma vs team aqua", "hidden legends", "firered & leafgreen",
+        "team rocket returns", "deoxys", "emerald", "unseen forces",
+        "delta species", "legend maker", "holon phantoms", "crystal guardians",
+        "dragon frontiers", "power keepers", "diamond & pearl",
+        "mysterious treasures", "secret wonders", "great encounters",
+        "majestic dawn", "legends awakened", "stormfront", "platinum",
+        "rising rivals", "supreme victors", "arceus", "heartgold & soulsilver",
+        "unleashed", "undaunted", "triumphant", "call of legends",
+        "black & white", "emerging powers", "noble victories", "next destinies",
+        "dark explorers", "dragons exalted", "boundaries crossed",
+        "plasma storm", "plasma freeze", "plasma blast", "legendary treasures",
+        "xy", "flashfire", "furious fists", "phantom forces", "primal clash",
+        "double crisis", "roaring skies", "ancient origins", "breakthrough",
+        "breakpoint", "generations", "fates collide", "steam siege",
+        "evolutions", "sun & moon", "guardians rising", "burning shadows",
+        "shining legends", "crimson invasion", "ultra prism", "forbidden light",
+        "celestial storm", "dragon majesty", "lost thunder", "team up",
+        "detective pikachu", "unbroken bonds", "unified minds", "hidden fates",
         "cosmic eclipse",
     }
 
-    # Check for cards over $100
     over_100 = []
     for _, row in df.iterrows():
         price = float(row[price_col])
@@ -143,22 +134,18 @@ def parse_collectr_csv(content_bytes):
         if price > 100:
             over_100.append(f"• {name} — ${price:.2f}")
 
-    # Check for pre-2020 sets
     pre_2020_found = []
     set_col = 'Set' if 'Set' in df.columns else None
     if set_col:
         for _, row in df.iterrows():
             set_name = str(row.get('Set', '')).lower().strip()
             name = str(row.get('Product Name', 'Unknown'))
-            # Tag teams are always allowed
             is_tag_team = any(t in name.lower() for t in TAG_TEAM_KEYWORDS)
             if is_tag_team:
                 continue
-            # Check against known pre-2020 set list
             if set_name in PRE_2020_SETS:
                 pre_2020_found.append(f"• {name} ({row.get('Set', '')})")
 
-    # Return validation issues if any
     issues = []
     if over_100:
         issues.append(("over_100", over_100))
@@ -168,14 +155,13 @@ def parse_collectr_csv(content_bytes):
     total = df['_line_total'].sum()
     card_count = int(df[qty_col].sum()) if qty_col else len(df)
 
-    # Build a summary of top cards by value
     top_cards = df.nlargest(5, '_line_total')[['Product Name', 'Set', price_col, '_line_total']].copy()
     top_list = []
     for _, row in top_cards.iterrows():
         name = str(row.get('Product Name', 'Unknown'))
         set_name = str(row.get('Set', ''))
         price = row['_line_total']
-        top_list.append(f"  • {name} ({set_name}) — ${price:.2f}")
+        top_list.append(f" • {name} ({set_name}) — ${price:.2f}")
 
     return {
         "total": total,
@@ -187,27 +173,37 @@ def parse_collectr_csv(content_bytes):
 
 
 def check_low_value_cards(df):
-       VSTAR_EXCLUDED = ["drapion", "simisear", "mawile", "regidrago"]
-       RADIANT_EXCLUDED = ["chargabug", "tsareena", "sealeo"]
-       price_col = None
-       for col in df.columns:
-                  if "Market Price" in col:
-                                 price_col = col
-                                 break
-                         if not price_col:
-                                    return []
-                                rejected = []
-              for _, row in df.iterrows():
-                         try:
-                                        price = float(str(row.get(price_col, 0)).replace("$", "").replace(",", "") or 0)
-                                    except:
-                                                   price = 0
-                                               if price >= 5:
-                                                              continue
-                                                          name = str(row.get("Product Name", "")).lower()
+    """
+    For cards under $5, check against KTS buying list.
+    Returns list of rejected card names.
+    """
+    VSTAR_EXCLUDED = ["drapion", "simisear", "mawile", "regidrago"]
+    RADIANT_EXCLUDED = ["chargabug", "tsareena", "sealeo"]
+
+    price_col = None
+    for col in df.columns:
+        if "Market Price" in col:
+            price_col = col
+            break
+    if not price_col:
+        return []
+
+    rejected = []
+
+    for _, row in df.iterrows():
+        try:
+            price = float(str(row.get(price_col, 0)).replace("$", "").replace(",", "") or 0)
+        except:
+            price = 0
+
+        if price >= 5:
+            continue
+
+        name = str(row.get("Product Name", "")).lower()
         rarity = str(row.get("Rarity", "")).lower()
         set_name = str(row.get("Set", "")).lower()
         display_name = str(row.get("Product Name", "unknown card"))
+
         is_vmax = "vmax" in name
         is_vstar = "vstar" in name
         is_full_art_trainer = "full art" in name and rarity == "ultra rare" and not any(x in name for x in ["ex", " v ", "vmax", "vstar"])
@@ -219,24 +215,31 @@ def check_low_value_cards(df):
         is_gold = ("secret rare" in rarity or "hyper rare" in rarity) and "gold" in name and "item" not in name and "energy" not in name
         is_radiant = "radiant rare" in rarity or "radiant" in name
         is_amazing_rare = "amazing rare" in rarity
+
         if is_vstar:
-                       if any(x in name for x in VSTAR_EXCLUDED):
-                                          rejected.append(display_name)
-                                      continue
+            if any(x in name for x in VSTAR_EXCLUDED):
+                rejected.append(display_name)
+            continue
+
         if is_radiant:
-                       if any(x in name for x in RADIANT_EXCLUDED):
-                                          rejected.append(display_name)
-                                      continue
+            if any(x in name for x in RADIANT_EXCLUDED):
+                rejected.append(display_name)
+            continue
+
         if is_gold:
-                       continue
+            continue
+
         if any([is_vmax, is_full_art_trainer, is_full_art_ex_v,
-                                is_illustration_rare, is_trainer_gallery, is_galarian_gallery,
-                                is_rainbow, is_amazing_rare]):
-                                               continue
-                                           rejected.append(display_name)
+                is_illustration_rare, is_trainer_gallery, is_galarian_gallery,
+                is_rainbow, is_amazing_rare]):
+            continue
+
+        rejected.append(display_name)
+
     return rejected
 
-# ── GOOGLE SHEETS ──────────────────────────────────────────────────────────────
+
+# ── GOOGLE SHEETS ────────────────────────────────────────────────────────────────
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive"
@@ -245,8 +248,7 @@ SCOPES = [
 def get_credentials():
     """Load Google credentials from env var (Railway) or file (local)."""
     creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON")
-    if creds_json:189
-       
+    if creds_json:
         info = json.loads(creds_json)
         return Credentials.from_service_account_info(info, scopes=SCOPES)
     return Credentials.from_service_account_file(GOOGLE_CREDENTIALS_FILE, scopes=SCOPES)
@@ -258,40 +260,29 @@ def get_drive_service():
     return build("drive", "v3", credentials=get_credentials())
 
 def create_psa_sheet(username, cert_numbers):
-    """Create a buying sheet by calling the Google Apps Script web app.
-    This runs under Kevin's Google account so no storage quota issues."""
+    """Create a buying sheet by calling the Google Apps Script web app."""
     import urllib.request
     import urllib.parse
-
     certs_str = ",".join([str(c).strip() for c in cert_numbers])
     params = urllib.parse.urlencode({"username": username, "certs": certs_str, "folder_id": PSA_FOLDER_ID})
     url = f"{APPS_SCRIPT_URL}?{params}"
-
     req = urllib.request.Request(url, headers={"User-Agent": "KTS-Bot/1.0"})
     with urllib.request.urlopen(req, timeout=30) as resp:
         data = json.loads(resp.read().decode())
-
     if not data.get("success"):
         raise Exception(data.get("error", "Unknown error from Apps Script"))
-
     return data["url"], data["name"], data
 
-# ── CERT EXTRACTION ────────────────────────────────────────────────────────────
+
+# ── CERT EXTRACTION ──────────────────────────────────────────────────────────────
 def extract_certs(text):
-    """
-    Only treat a message as cert numbers if it's MOSTLY numbers.
-    If someone types "i'll pass on 135540599" we ignore it.
-    A cert-only message is one where numbers make up most of the content.
-    """
     if not text:
         return []
     numbers = re.findall(r'\b\d{7,9}\b', text)
     if not numbers:
         return []
-    # Count non-whitespace, non-number characters
     stripped = re.sub(r'\d', '', text).strip()
     words = [w for w in stripped.split() if re.search(r'[a-zA-Z]', w)]
-    # If there are more than 3 regular words, this is a sentence — ignore certs
     if len(words) > 3:
         return []
     seen = set()
@@ -302,19 +293,15 @@ def extract_certs(text):
             unique.append(n)
     return unique
 
-# ── DISCORD BOT ────────────────────────────────────────────────────────────────
+
+# ── DISCORD BOT ──────────────────────────────────────────────────────────────────
 intents = discord.Intents.default()
 intents.message_content = True
-
 bot = discord.Client(intents=intents)
 
-# Track which tickets have already been welcomed
 welcomed_tickets = set()
-
-# Track last offer per channel for negotiation detection
-last_offer = {}  # channel_id -> {"payout": float, "total": float, "rate": float}
-# Track PSA sheet IDs per channel so we can add tracking when they agree
-channel_sheet = {}  # channel_id -> sheet_id
+last_offer = {}
+channel_sheet = {}
 
 WELCOME_MSG = (
     "👋 Welcome to KTS Collectibles! We buy Pokémon cards — PSA graded slabs and raw singles.\n\n"
@@ -375,11 +362,9 @@ async def on_ready():
 
 @bot.event
 async def on_message(message):
-    # Ignore own messages and other bots (Ticket Tool etc)
     if message.author.bot:
         return
 
-    # Only in ticket channels
     is_ticket = isinstance(message.channel, discord.TextChannel) and "ticket" in message.channel.name.lower()
     if not is_ticket:
         return
@@ -387,21 +372,17 @@ async def on_message(message):
     channel_id = message.channel.id
     username = message.author.name
     text = message.content.strip()
-
     print(f"[{message.channel.name}] {username}: {text[:60]}{' (+attachment)' if message.attachments else ''}")
 
-    # ── CHECK FOR CSV ─────────────────────────────────────────────────────────
     csv_attachment = None
     for att in message.attachments:
         if att.filename.lower().endswith('.csv'):
             csv_attachment = att
             break
 
-    # ── CHECK FOR CERT NUMBERS ────────────────────────────────────────────────
     certs = extract_certs(text) if text else []
 
-    # ── WELCOME: send only if bot hasn't spoken in this channel yet ───────────
-    # Check actual message history so restarts don't cause repeat welcomes
+    # ── WELCOME ──────────────────────────────────────────────────────────────────
     bot_already_spoke = False
     try:
         async for msg in message.channel.history(limit=50):
@@ -417,17 +398,17 @@ async def on_message(message):
         await message.channel.send(WELCOME_MSG)
         return
 
-    # ── COLLECTR CSV ──────────────────────────────────────────────────────────
+    # ── COLLECTR CSV ─────────────────────────────────────────────────────────────
     if csv_attachment:
         async with message.channel.typing():
             try:
                 csv_bytes = await csv_attachment.read()
                 result, error = parse_collectr_csv(csv_bytes)
-
                 if error:
                     await message.channel.send(f"Couldn't read that file — {error}. Try re-exporting from Collectr.")
                     return
-# Check low value cards against buying list
+
+                # Check low value cards against buying list
                 rejected_cards = check_low_value_cards(result["df"])
                 if rejected_cards:
                     card_list = "\n".join(f"• {c}" for c in rejected_cards[:25])
@@ -440,6 +421,7 @@ async def on_message(message):
                         f"Once removed I'll make you an offer! 🙏"
                     )
                     return
+
                 issues = result.get("issues", [])
                 for issue_type, cards in issues:
                     card_list = "\n".join(cards[:5])
@@ -467,10 +449,9 @@ async def on_message(message):
                 card_count = result["card_count"]
                 rate, tier_label = get_payout_rate(total, username)
                 payout = total * rate
-
                 last_offer[channel_id] = {"payout": payout, "total": total, "rate": rate}
 
-                # Save CSV to Google Drive Collectr Singles folder
+                # Save CSV to Google Drive
                 try:
                     import urllib.request as urlreq
                     csv_text = csv_bytes.decode('utf-8', errors='replace')
@@ -494,7 +475,6 @@ async def on_message(message):
                     f"💰 **Payout: ${payout:,.2f}** ({int(rate*100)}%)\n\n"
                     f"Let me know if you'd like to proceed!"
                 )
-
                 kevin_msg = (
                     f"💚 **Collectr offer sent — {username}**\n"
                     f"{card_count} cards | ${total:,.2f} market | {int(rate*100)}% | **${payout:,.2f}**"
@@ -510,7 +490,7 @@ async def on_message(message):
                 await ping_kevin(f"⚠️ Collectr error — **{username}**: {str(e)}", message.channel)
         return
 
-    # ── PSA CERT NUMBERS ──────────────────────────────────────────────────────
+    # ── PSA CERT NUMBERS ─────────────────────────────────────────────────────────
     if certs:
         async with message.channel.typing():
             try:
@@ -536,7 +516,7 @@ async def on_message(message):
                 )
         return
 
-    # ── NEGOTIATION ───────────────────────────────────────────────────────────
+    # ── NEGOTIATION ──────────────────────────────────────────────────────────────
     if channel_id in last_offer and is_negotiating(text):
         offer = last_offer[channel_id]
         await message.channel.send(
@@ -549,12 +529,10 @@ async def on_message(message):
         )
         return
 
-    # ── AGREED / SHIPPING REQUEST ─────────────────────────────────────────────
+    # ── AGREED / SHIPPING ─────────────────────────────────────────────────────────
     if is_agreeing(text) and message.author.id != YOUR_DISCORD_USER_ID:
         await message.channel.send(SHIPPING_MSG)
         await ping_kevin(f"✅ **{username} agreed** — shipping address sent.", message.channel)
-
-        # Add tracking row to PSA sheet if one exists for this channel
         if channel_id in channel_sheet:
             try:
                 import urllib.request as urlreq
@@ -574,12 +552,10 @@ async def on_message(message):
                 print(f"Tracking row error (non-critical): {e}")
         return
 
-    # ── TRACKING NUMBER FROM CUSTOMER ─────────────────────────────────────────
-    # Detect if customer pastes a tracking number (USPS/UPS/FedEx format)
+    # ── TRACKING NUMBER ───────────────────────────────────────────────────────────
     tracking_match = re.search(r'\b([0-9]{20,22}|1Z[A-Z0-9]{16}|[0-9]{12,15})\b', text)
     if tracking_match:
         tracking_num = tracking_match.group(1)
-        # Get sheet_id from memory first, then fall back to Drive lookup by channel name
         sheet_id = channel_sheet.get(channel_id)
         if not sheet_id:
             try:
@@ -617,11 +593,11 @@ async def on_message(message):
                 print(f"Saved tracking {tracking_num} for {username}")
             except Exception as e:
                 print(f"Tracking save error (non-critical): {e}")
-        return  # Stay silent after saving
+        return
 
-    # ── EVERYTHING ELSE: STAY SILENT ─────────────────────────────────────────
+    # ── STAY SILENT ───────────────────────────────────────────────────────────────
 
-# ── RUN ────────────────────────────────────────────────────────────────────────
+# ── RUN ──────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     print("Starting KTS Collectibles Bot...")
     bot.run(DISCORD_BOT_TOKEN)
