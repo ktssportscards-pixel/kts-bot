@@ -186,6 +186,56 @@ def parse_collectr_csv(content_bytes):
     }, None
 
 
+def check_low_value_cards(df):
+       VSTAR_EXCLUDED = ["drapion", "simisear", "mawile", "regidrago"]
+       RADIANT_EXCLUDED = ["chargabug", "tsareena", "sealeo"]
+       price_col = None
+       for col in df.columns:
+                  if "Market Price" in col:
+                                 price_col = col
+                                 break
+                         if not price_col:
+                                    return []
+                                rejected = []
+              for _, row in df.iterrows():
+                         try:
+                                        price = float(str(row.get(price_col, 0)).replace("$", "").replace(",", "") or 0)
+                                    except:
+                                                   price = 0
+                                               if price >= 5:
+                                                              continue
+                                                          name = str(row.get("Product Name", "")).lower()
+        rarity = str(row.get("Rarity", "")).lower()
+        set_name = str(row.get("Set", "")).lower()
+        display_name = str(row.get("Product Name", "unknown card"))
+        is_vmax = "vmax" in name
+        is_vstar = "vstar" in name
+        is_full_art_trainer = "full art" in name and rarity == "ultra rare" and not any(x in name for x in ["ex", " v ", "vmax", "vstar"])
+        is_full_art_ex_v = "full art" in name and ("ex" in name or name.endswith(" v") or " v " in name or "vmax" in name or "vstar" in name)
+        is_illustration_rare = "illustration rare" in rarity or "special illustration rare" in rarity
+        is_trainer_gallery = "trainer gallery" in set_name
+        is_galarian_gallery = "galarian gallery" in set_name
+        is_rainbow = "hyper rare" in rarity
+        is_gold = ("secret rare" in rarity or "hyper rare" in rarity) and "gold" in name and "item" not in name and "energy" not in name
+        is_radiant = "radiant rare" in rarity or "radiant" in name
+        is_amazing_rare = "amazing rare" in rarity
+        if is_vstar:
+                       if any(x in name for x in VSTAR_EXCLUDED):
+                                          rejected.append(display_name)
+                                      continue
+        if is_radiant:
+                       if any(x in name for x in RADIANT_EXCLUDED):
+                                          rejected.append(display_name)
+                                      continue
+        if is_gold:
+                       continue
+        if any([is_vmax, is_full_art_trainer, is_full_art_ex_v,
+                                is_illustration_rare, is_trainer_gallery, is_galarian_gallery,
+                                is_rainbow, is_amazing_rare]):
+                                               continue
+                                           rejected.append(display_name)
+    return rejected
+
 # ── GOOGLE SHEETS ──────────────────────────────────────────────────────────────
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -195,7 +245,8 @@ SCOPES = [
 def get_credentials():
     """Load Google credentials from env var (Railway) or file (local)."""
     creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON")
-    if creds_json:
+    if creds_json:189
+       
         info = json.loads(creds_json)
         return Credentials.from_service_account_info(info, scopes=SCOPES)
     return Credentials.from_service_account_file(GOOGLE_CREDENTIALS_FILE, scopes=SCOPES)
@@ -376,7 +427,19 @@ async def on_message(message):
                 if error:
                     await message.channel.send(f"Couldn't read that file — {error}. Try re-exporting from Collectr.")
                     return
-
+# Check low value cards against buying list
+                rejected_cards = check_low_value_cards(result["df"])
+                if rejected_cards:
+                    card_list = "\n".join(f"• {c}" for c in rejected_cards[:25])
+                    overflow = f"\n*...and {len(rejected_cards) - 25} more*" if len(rejected_cards) > 25 else ""
+                    await message.channel.send(
+                        f"❌ **I can't accept this lot as submitted.**\n\n"
+                        f"The following card(s) are under $5 and don't fit our current buying criteria:\n\n"
+                        f"{card_list}{overflow}\n\n"
+                        f"Please remove these from your Collectr portfolio, re-export the CSV, and re-upload it here. "
+                        f"Once removed I'll make you an offer! 🙏"
+                    )
+                    return
                 issues = result.get("issues", [])
                 for issue_type, cards in issues:
                     card_list = "\n".join(cards[:5])
