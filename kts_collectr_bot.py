@@ -127,6 +127,15 @@ def parse_collectr_csv(content_bytes):
         "cosmic eclipse",
     }
 
+    # Check for non-English cards (Japanese, Korean, Chinese characters in name or set)
+    non_english = []
+    for _, row in df.iterrows():
+        name = str(row.get('Product Name', ''))
+        set_name = str(row.get('Set', ''))
+        combined = name + set_name
+        if any(ord(c) > 127 for c in combined):
+            non_english.append(f"• {name} ({set_name})")
+
     over_100 = []
     for _, row in df.iterrows():
         price = float(row[price_col])
@@ -147,6 +156,8 @@ def parse_collectr_csv(content_bytes):
                 pre_2020_found.append(f"• {name} ({row.get('Set', '')})")
 
     issues = []
+    if non_english:
+        issues.append(("non_english", non_english))
     if over_100:
         issues.append(("over_100", over_100))
     if pre_2020_found:
@@ -427,7 +438,12 @@ async def on_message(message):
                     card_list = "\n".join(cards[:5])
                     if len(cards) > 5:
                         card_list += f"\n• ...and {len(cards)-5} more"
-                    if issue_type == "over_100":
+                    if issue_type == "non_english":
+                        await message.channel.send(
+                            f"❌ **Non-English cards — we only buy English cards:**\n{card_list}\n\n"
+                            f"Please remove these and re-export."
+                        )
+                    elif issue_type == "over_100":
                         await message.channel.send(
                             f"❌ **Cards over $100 — we can't buy these:**\n{card_list}\n\n"
                             f"Our limit is **$1–$100 per card**. Remove these and re-export."
