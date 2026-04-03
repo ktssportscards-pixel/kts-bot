@@ -206,8 +206,8 @@ def check_low_value_cards(df):
 
         is_vmax = "vmax" in name
         is_vstar = "vstar" in name
+        is_ex_or_v = " ex" in name or name.endswith(" ex") or " v " in name or name.endswith(" v")
         is_full_art_trainer = "full art" in name and rarity == "ultra rare" and not any(x in name for x in ["ex", " v ", "vmax", "vstar"])
-        is_full_art_ex_v = "full art" in name and ("ex" in name or name.endswith(" v") or " v " in name or "vmax" in name or "vstar" in name)
         is_illustration_rare = "illustration rare" in rarity or "special illustration rare" in rarity
         is_trainer_gallery = "trainer gallery" in set_name
         is_galarian_gallery = "galarian gallery" in set_name
@@ -229,7 +229,7 @@ def check_low_value_cards(df):
         if is_gold:
             continue
 
-        if any([is_vmax, is_full_art_trainer, is_full_art_ex_v,
+        if any([is_vmax, is_ex_or_v, is_full_art_trainer,
                 is_illustration_rare, is_trainer_gallery, is_galarian_gallery,
                 is_rainbow, is_amazing_rare]):
             continue
