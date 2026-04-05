@@ -127,6 +127,13 @@ def parse_collectr_csv(content_bytes):
         "cosmic eclipse",
     }
 
+    # Check for trainer cards — not buying any trainers for now
+    trainer_cards = []
+    if 'Category' in df.columns:
+        for _, row in df.iterrows():
+            if str(row.get('Category', '')).strip().lower() == 'trainer':
+                trainer_cards.append(f"• {str(row.get('Product Name', 'Unknown'))}")
+
     # Check for non-English cards (Japanese, Korean, Chinese characters in name or set)
     non_english = []
     for _, row in df.iterrows():
@@ -156,6 +163,8 @@ def parse_collectr_csv(content_bytes):
                 pre_2020_found.append(f"• {name} ({row.get('Set', '')})")
 
     issues = []
+    if trainer_cards:
+        issues.append(("trainer", trainer_cards))
     if non_english:
         issues.append(("non_english", non_english))
     if over_100:
@@ -438,7 +447,12 @@ async def on_message(message):
                     card_list = "\n".join(cards[:5])
                     if len(cards) > 5:
                         card_list += f"\n• ...and {len(cards)-5} more"
-                    if issue_type == "non_english":
+                    if issue_type == "trainer":
+                        await message.channel.send(
+                            f"❌ **Trainer cards — we're not buying trainers at this time:**\n{card_list}\n\n"
+                            f"Please remove these and re-export."
+                        )
+                    elif issue_type == "non_english":
                         await message.channel.send(
                             f"❌ **Non-English cards — we only buy English cards:**\n{card_list}\n\n"
                             f"Please remove these and re-export."
