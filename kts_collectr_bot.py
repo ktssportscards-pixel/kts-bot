@@ -60,11 +60,14 @@ RAW_PAYOUT_TIERS = [
 
 # VIP clients who always get 87% regardless of lot size
 VIP_CLIENTS = ["nickj1234", "gbywby"]
+VIP_CLIENTS_89 = ["icevyy"]  # Gets 89% — mod in server
 
 # ── PAYOUT CALCULATOR ────────────────────────────────────────────────────────────
 def get_payout_rate(total, username):
     """Return the payout percentage for a given lot total."""
     username_lower = username.lower()
+    if username_lower in VIP_CLIENTS_89:
+        return 0.89, "VIP rate"
     if username_lower in VIP_CLIENTS:
         return 0.87, "VIP rate"
     for low, high, rate in RAW_PAYOUT_TIERS:
