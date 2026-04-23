@@ -371,8 +371,7 @@ def is_negotiating(text):
     return any(kw in t for kw in FIRM_KEYWORDS)
 
 def is_agreeing(text):
-    t = text.lower().strip()
-    return t == "ship" or t.startswith("ship ") or t.endswith(" ship") or " ship " in t
+    return text.strip().lower() == "ship"
 
 @bot.event
 async def on_ready():
