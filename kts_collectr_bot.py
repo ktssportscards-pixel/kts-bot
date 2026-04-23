@@ -356,12 +356,7 @@ FIRM_KEYWORDS = [
     "go up", "budge", "flexible", "room", "bump"
 ]
 
-AGREE_KEYWORDS = [
-    "deal", "agreed", "sounds good", "let's do it", "i'll take it",
-    "i accept", "proceed", "move forward", "ship", "send address",
-    "where do i send", "shipping address", "what's your address",
-    "how do i send", "where to send"
-]
+AGREE_KEYWORDS = ["ship"]
 
 async def ping_kevin(msg, channel=None):
     try:
