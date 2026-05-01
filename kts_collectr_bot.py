@@ -35,7 +35,7 @@ import io
 import os
 import json
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, date
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 
@@ -381,10 +381,10 @@ def classify_psa_comp(comp):
     if not last_sale:
         return ('rejected', 'no recent sale visible')
     try:
-        last_dt = datetime.strptime(str(last_sale).strip(), '%Y-%m-%d')
+        last_d = datetime.strptime(str(last_sale).strip(), '%Y-%m-%d').date()
     except (ValueError, AttributeError):
         return ('rejected', f"unparseable sale date '{last_sale}'")
-    if (datetime.utcnow() - last_dt).days > PSA_MAX_AGE_DAYS:
+    if (date.today() - last_d).days > PSA_MAX_AGE_DAYS:
         return ('rejected', f"last sale {last_sale} (>{PSA_MAX_AGE_DAYS}d ago)")
     return ('accepted', None)
 
