@@ -340,7 +340,7 @@ def lookup_comps(certs):
             method="POST",
         )
         try:
-            with urlreq.urlopen(req, timeout=90) as resp:
+            with urlreq.urlopen(req, timeout=180) as resp:
                 data = json.loads(resp.read().decode())
             all_results.extend(data.get("results", []))
             print(f"Helper chunk {idx}/{len(chunks)} ok ({len(chunk)} certs)")
