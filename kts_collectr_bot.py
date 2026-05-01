@@ -66,12 +66,28 @@ RAW_PAYOUT_TIERS = [
 PSA_MIN_PRICE = 1
 PSA_MIN_GRADE = 7
 PSA_MAX_AGE_DAYS = 30
-PSA_PAYOUT_RATE = 0.87
 # Per-sport price ceilings — sports not listed here are rejected outright.
 PSA_SPORT_MAX_PRICE = {
     'pokemon': 200,
     'basketball': 250,
 }
+# Pokemon: flat rate. Basketball: tiered by the basketball-only lot total.
+PSA_POKEMON_PAYOUT_RATE = 0.87
+PSA_BASKETBALL_PAYOUT_TIERS = [
+    (0,    1000,         0.93),
+    (1000, 3000,         0.95),
+    (3000, float('inf'), 0.96),
+]
+
+
+def get_psa_payout_rate(sport, sport_lot_total):
+    """Return the payout rate for a given sport's accepted lot total."""
+    if sport == 'basketball':
+        for low, high, rate in PSA_BASKETBALL_PAYOUT_TIERS:
+            if low <= sport_lot_total < high:
+                return rate
+        return PSA_BASKETBALL_PAYOUT_TIERS[-1][2]
+    return PSA_POKEMON_PAYOUT_RATE
 
 # VIP clients who always get 87% regardless of lot size
 VIP_CLIENTS = ["nickj1234", "gbywby"]
@@ -738,8 +754,23 @@ async def on_message(message):
                             rejected.append((cert, reason))
                             kevin_lines.append(f"• `{cert}` — ❌ {reason}")
 
-                    total_comp = sum(float(c['clValue']) for c in accepted)
-                    total_payout = total_comp * PSA_PAYOUT_RATE
+                    sport_groups = {}
+                    for c in accepted:
+                        sp = (c.get('sport') or '').lower().strip()
+                        sport_groups.setdefault(sp, []).append(c)
+                    sport_breakdown = []
+                    for sp, comps_in_sport in sport_groups.items():
+                        sport_total = sum(float(c['clValue']) for c in comps_in_sport)
+                        rate = get_psa_payout_rate(sp, sport_total)
+                        sport_breakdown.append({
+                            'sport': sp,
+                            'count': len(comps_in_sport),
+                            'total': sport_total,
+                            'rate': rate,
+                            'payout': sport_total * rate,
+                        })
+                    total_comp = sum(s['total'] for s in sport_breakdown)
+                    total_payout = sum(s['payout'] for s in sport_breakdown)
                     n_accepted = len(accepted)
                     n_rejected = len(rejected)
 
@@ -747,15 +778,22 @@ async def on_message(message):
                         last_offer[channel_id] = {
                             "payout": total_payout,
                             "total": total_comp,
-                            "rate": PSA_PAYOUT_RATE,
+                            "rate": (total_payout / total_comp) if total_comp else PSA_POKEMON_PAYOUT_RATE,
                         }
+
+                    breakdown_lines = [
+                        f"• {s['sport'].title()}: {s['count']} card{'s' if s['count'] != 1 else ''}, "
+                        f"${s['total']:,.2f} → ${s['payout']:,.2f} ({int(s['rate']*100)}%)"
+                        for s in sport_breakdown
+                    ]
 
                     # Kevin DM
                     summary = (
                         f"📋 **PSA sheet — {username}**\n"
-                        f"{len(certs)} certs | Accepted **{n_accepted}** | Comp **${total_comp:,.2f}** | Payout **${total_payout:,.2f}** ({int(PSA_PAYOUT_RATE*100)}%)"
+                        f"{len(certs)} certs | Accepted **{n_accepted}** | Comp **${total_comp:,.2f}** | Payout **${total_payout:,.2f}**"
                         f"{f' | {n_rejected} rejected' if n_rejected else ''}\n"
-                        f"{sheet_url}\n\n"
+                        f"{sheet_url}\n"
+                        + ("\n".join(breakdown_lines) + "\n\n" if breakdown_lines else "\n")
                     )
                     await ping_kevin(summary + "\n".join(kevin_lines), message.channel)
 
@@ -764,8 +802,11 @@ async def on_message(message):
                     if n_accepted > 0:
                         customer_parts += [
                             f"**Total comp:** ${total_comp:,.2f}",
-                            f"**Total payout:** ${total_payout:,.2f} ({int(PSA_PAYOUT_RATE*100)}%)",
+                            f"**Total payout:** ${total_payout:,.2f}",
                             f"**Number of cards:** {n_accepted}",
+                            "",
+                            "**Breakdown:**",
+                            *breakdown_lines,
                         ]
                     if rejected:
                         customer_parts.append("")
