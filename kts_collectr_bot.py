@@ -308,7 +308,7 @@ def extract_sheet_id(url):
     return m.group(1) if m else None
 
 
-HELPER_CHUNK_SIZE = 25  # Cloudflare in front of the helper times out at ~100s; chunking keeps each request well under that.
+HELPER_CHUNK_SIZE = 10  # Helper takes ~4-5s per uncached cert; 10 keeps each request under the 90s timeout with margin.
 
 def lookup_comps(certs):
     """
