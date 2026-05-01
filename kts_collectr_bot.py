@@ -321,7 +321,7 @@ def lookup_comps(certs):
     req = urlreq.Request(
         f"{HELPER_URL}/comp/batch",
         data=payload,
-        headers={"Content-Type": "application/json", "X-API-Key": HELPER_API_KEY},
+        headers={"Content-Type": "application/json", "X-API-Key": HELPER_API_KEY, "User-Agent": "KTS-Bot/1.0"},
         method="POST",
     )
     with urlreq.urlopen(req, timeout=180) as resp:
