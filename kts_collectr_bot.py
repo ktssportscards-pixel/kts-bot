@@ -450,11 +450,37 @@ FIRM_KEYWORDS = [
 
 AGREE_KEYWORDS = ["ship"]
 
+DISCORD_MAX_LEN = 2000
+
+def _split_for_discord(text, limit=DISCORD_MAX_LEN):
+    """Split text at line boundaries into chunks <= limit chars (Discord's hard cap)."""
+    if len(text) <= limit:
+        return [text]
+    chunks, current = [], ""
+    for line in text.split("\n"):
+        if len(line) > limit:
+            if current:
+                chunks.append(current)
+                current = ""
+            for i in range(0, len(line), limit):
+                chunks.append(line[i:i + limit])
+            continue
+        candidate = f"{current}\n{line}" if current else line
+        if len(candidate) > limit:
+            chunks.append(current)
+            current = line
+        else:
+            current = candidate
+    if current:
+        chunks.append(current)
+    return chunks
+
 async def ping_kevin(msg, channel=None):
     try:
         kevin = await bot.fetch_user(YOUR_DISCORD_USER_ID)
         channel_link = f"\n**Ticket:** <#{channel.id}>" if channel else ""
-        await kevin.send(msg + channel_link)
+        for chunk in _split_for_discord(msg + channel_link):
+            await kevin.send(chunk)
     except Exception as e:
         print(f"Could not ping Kevin: {e}")
 
@@ -662,9 +688,7 @@ async def on_message(message):
                         f"{f' | {not_found} not found' if not_found else ''}\n"
                         f"{sheet_url}\n\n"
                     )
-                    body = "\n".join(lines[:25])
-                    if len(lines) > 25:
-                        body += f"\n• ...and {len(lines) - 25} more (see sheet)"
+                    body = "\n".join(lines)
                     await ping_kevin(summary + body, message.channel)
                 else:
                     # Helper unavailable — fall back to old behavior
