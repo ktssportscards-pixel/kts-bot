@@ -418,7 +418,7 @@ def fill_buying_sheet(sheet_id, comps, sheet_name="Form. Put Date Here."):
     """
     Populate the freshly-created buying sheet with everything the user normally sees:
       A = "PSA", B = cert (already there), C = HYPERLINK to Cardladder,
-      D = card name, E = grade, F = sport, G = CL Value.
+      D = card name, E = grade, F = sport, G = CL Value, J = last sale date.
     Replicates the existing onEdit + cardladder-comp behavior since simple onEdit
     doesn't fire on programmatic writes (so the sheet copy lands empty otherwise).
     """
@@ -456,6 +456,8 @@ def fill_buying_sheet(sheet_id, comps, sheet_name="Form. Put Date Here."):
             updates.append({'range': f'G{row}', 'values': [[c['clValue']]]})
         else:
             updates.append({'range': f'G{row}', 'values': [["not found"]]})
+        if c.get('lastSaleDate'):
+            updates.append({'range': f'J{row}', 'values': [[c['lastSaleDate']]]})
     if updates:
         sheet.batch_update(updates, value_input_option="USER_ENTERED")
 
