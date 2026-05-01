@@ -308,25 +308,41 @@ def extract_sheet_id(url):
     return m.group(1) if m else None
 
 
+HELPER_CHUNK_SIZE = 25  # Cloudflare in front of the helper times out at ~100s; chunking keeps each request well under that.
+
 def lookup_comps(certs):
     """
-    Call helper.ktscollectibles.com/comp/batch and return the results list.
+    Call helper.ktscollectibles.com/comp/batch in chunks and return the merged results list.
     Each result: {cert, found, clValue, cardName, grade, recentSales, avg3Sales, salesCount, note}
-    Returns [] if the helper key isn't set or the call fails — non-fatal.
+    Returns [] if the helper key isn't set. Per-chunk failures are logged; if every chunk
+    fails the last error is re-raised so the caller can surface it.
     """
     if not HELPER_API_KEY or not certs:
         return []
     import urllib.request as urlreq
-    payload = json.dumps({"certs": [str(c).strip() for c in certs]}).encode("utf-8")
-    req = urlreq.Request(
-        f"{HELPER_URL}/comp/batch",
-        data=payload,
-        headers={"Content-Type": "application/json", "X-API-Key": HELPER_API_KEY, "User-Agent": "KTS-Bot/1.0"},
-        method="POST",
-    )
-    with urlreq.urlopen(req, timeout=180) as resp:
-        data = json.loads(resp.read().decode())
-    return data.get("results", [])
+    cert_list = [str(c).strip() for c in certs]
+    chunks = [cert_list[i:i + HELPER_CHUNK_SIZE] for i in range(0, len(cert_list), HELPER_CHUNK_SIZE)]
+    all_results = []
+    last_error = None
+    for idx, chunk in enumerate(chunks, 1):
+        payload = json.dumps({"certs": chunk}).encode("utf-8")
+        req = urlreq.Request(
+            f"{HELPER_URL}/comp/batch",
+            data=payload,
+            headers={"Content-Type": "application/json", "X-API-Key": HELPER_API_KEY, "User-Agent": "KTS-Bot/1.0"},
+            method="POST",
+        )
+        try:
+            with urlreq.urlopen(req, timeout=90) as resp:
+                data = json.loads(resp.read().decode())
+            all_results.extend(data.get("results", []))
+            print(f"Helper chunk {idx}/{len(chunks)} ok ({len(chunk)} certs)")
+        except Exception as e:
+            last_error = e
+            print(f"Helper chunk {idx}/{len(chunks)} failed: {e}")
+    if not all_results and last_error:
+        raise last_error
+    return all_results
 
 
 def fill_buying_sheet(sheet_id, comps, sheet_name="Form. Put Date Here."):
