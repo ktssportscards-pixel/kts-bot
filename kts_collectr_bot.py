@@ -335,7 +335,7 @@ def extract_sheet_id(url):
     return m.group(1) if m else None
 
 
-HELPER_CHUNK_SIZE = 5  # Helper page-load + vision can hit 30-60s per cert under load; chunks of 5 keep each request under Cloudflare tunnel's ~100s timeout.
+HELPER_CHUNK_SIZE = 8  # Matches helper CONCURRENCY=8 so each chunk fully saturates the helper in one batch. Chunks complete in ~max(cert_time) ≈ 10-30s, well under Cloudflare's ~100s tunnel limit.
 
 def lookup_comps(certs):
     """
