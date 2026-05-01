@@ -62,6 +62,13 @@ RAW_PAYOUT_TIERS = [
     (2000, float('inf'), 0.87),
 ]
 
+# PSA slab buying criteria
+PSA_MIN_PRICE = 1
+PSA_MAX_PRICE = 200
+PSA_MIN_GRADE = 7
+PSA_MAX_AGE_DAYS = 30
+PSA_PAYOUT_RATE = 0.87
+
 # VIP clients who always get 87% regardless of lot size
 VIP_CLIENTS = ["nickj1234", "gbywby"]
 VIP_CLIENTS_89 = ["icevyy"]  # Gets 89% — mod in server
@@ -343,6 +350,43 @@ def lookup_comps(certs):
     if not all_results and last_error:
         raise last_error
     return all_results
+
+
+def classify_psa_comp(comp):
+    """
+    Decide whether a helper comp result fits KTS PSA buying criteria.
+    Returns (status, reason): 'accepted'/None or 'rejected'/<short reason>.
+    """
+    if not comp or not comp.get('found'):
+        return ('rejected', 'no comp on CardLadder')
+    cv = comp.get('clValue')
+    try:
+        cv = float(cv) if cv is not None else None
+    except (TypeError, ValueError):
+        cv = None
+    if cv is None:
+        return ('rejected', 'no CL value')
+    if cv > PSA_MAX_PRICE:
+        return ('rejected', f"${cv:,.0f} (over our ${PSA_MAX_PRICE} max)")
+    if cv < PSA_MIN_PRICE:
+        return ('rejected', f"${cv:.2f} (under ${PSA_MIN_PRICE} min)")
+    grade_raw = str(comp.get('grade') or '').replace('PSA', '').strip()
+    try:
+        g = float(grade_raw)
+    except ValueError:
+        return ('rejected', f"grade '{grade_raw}' unrecognized")
+    if g < PSA_MIN_GRADE:
+        return ('rejected', f"PSA {grade_raw} (we buy {PSA_MIN_GRADE}-10 only)")
+    last_sale = comp.get('lastSaleDate')
+    if not last_sale:
+        return ('rejected', 'no recent sale visible')
+    try:
+        last_dt = datetime.strptime(str(last_sale).strip(), '%Y-%m-%d')
+    except (ValueError, AttributeError):
+        return ('rejected', f"unparseable sale date '{last_sale}'")
+    if (datetime.utcnow() - last_dt).days > PSA_MAX_AGE_DAYS:
+        return ('rejected', f"last sale {last_sale} (>{PSA_MAX_AGE_DAYS}d ago)")
+    return ('accepted', None)
 
 
 def fill_buying_sheet(sheet_id, comps, sheet_name="Form. Put Date Here."):
@@ -650,7 +694,7 @@ async def on_message(message):
                 # Tell the customer the sheet is ready BEFORE the slow helper call.
                 # Helper lookup for 50 certs can be 1-2 min; don't make them wait.
                 await message.channel.send(
-                    f"✅ Sheet ready! Kevin will check comps on CardLadder and get back to you.\n\n"
+                    f"✅ Sheet ready! Pulling CardLadder comps now... ⏳\n\n"
                     f"📊 {sheet_url}"
                 )
 
@@ -665,31 +709,77 @@ async def on_message(message):
                     comp_error = str(e)
                     print(f"Helper comp lookup error: {e}")
 
-                # Build Kevin DM with comp summary
                 if comps:
                     by_cert = {str(c.get('cert', '')).strip(): c for c in comps}
-                    total_cl = 0.0
-                    not_found = 0
-                    lines = []
+                    accepted = []
+                    rejected = []
+                    kevin_lines = []
                     for cert in certs:
                         c = by_cert.get(str(cert).strip())
-                        if c and c.get('found') and c.get('clValue') is not None:
+                        status, reason = classify_psa_comp(c)
+                        if status == 'accepted':
+                            accepted.append(c)
                             cv = float(c['clValue'])
-                            total_cl += cv
                             name = (c.get('cardName') or '')[:50]
                             grade = str(c.get('grade') or '').replace('PSA ', '').strip()
-                            lines.append(f"• `{cert}` — **${cv:.2f}** — {name} (PSA {grade})")
+                            kevin_lines.append(f"• `{cert}` — **${cv:.2f}** — {name} (PSA {grade})")
                         else:
-                            not_found += 1
-                            lines.append(f"• `{cert}` — ❌ not found")
+                            rejected.append((cert, reason))
+                            kevin_lines.append(f"• `{cert}` — ❌ {reason}")
+
+                    total_comp = sum(float(c['clValue']) for c in accepted)
+                    total_payout = total_comp * PSA_PAYOUT_RATE
+                    n_accepted = len(accepted)
+                    n_rejected = len(rejected)
+
+                    if n_accepted:
+                        last_offer[channel_id] = {
+                            "payout": total_payout,
+                            "total": total_comp,
+                            "rate": PSA_PAYOUT_RATE,
+                        }
+
+                    # Kevin DM
                     summary = (
                         f"📋 **PSA sheet — {username}**\n"
-                        f"{len(certs)} certs | Total CL Value: **${total_cl:,.2f}**"
-                        f"{f' | {not_found} not found' if not_found else ''}\n"
+                        f"{len(certs)} certs | Accepted **{n_accepted}** | Comp **${total_comp:,.2f}** | Payout **${total_payout:,.2f}** ({int(PSA_PAYOUT_RATE*100)}%)"
+                        f"{f' | {n_rejected} rejected' if n_rejected else ''}\n"
                         f"{sheet_url}\n\n"
                     )
-                    body = "\n".join(lines)
-                    await ping_kevin(summary + body, message.channel)
+                    await ping_kevin(summary + "\n".join(kevin_lines), message.channel)
+
+                    # Customer follow-up
+                    customer_parts = ["✅ All comps loaded!", ""]
+                    if n_accepted > 0:
+                        customer_parts += [
+                            f"**Total comp:** ${total_comp:,.2f}",
+                            f"**Total payout:** ${total_payout:,.2f} ({int(PSA_PAYOUT_RATE*100)}%)",
+                            f"**Number of cards:** {n_accepted}",
+                        ]
+                    if rejected:
+                        customer_parts.append("")
+                        if n_accepted > 0:
+                            customer_parts.append(
+                                f"⚠️ {n_rejected} card{'s' if n_rejected != 1 else ''} don't fit our current buying criteria:"
+                            )
+                        else:
+                            customer_parts.append(
+                                f"⚠️ Unfortunately, none of these {len(certs)} cards fit our current buying criteria:"
+                            )
+                        customer_parts += [f"• `{cert}` — {reason}" for cert, reason in rejected]
+                    if n_accepted > 0:
+                        customer_parts += [
+                            "",
+                            "Let me know if you'd like to proceed!" if not rejected
+                            else f"Let me know if you want to proceed with the {n_accepted} we can take.",
+                        ]
+                    customer_parts += [
+                        "",
+                        "If you want to see where I'm at on each individual card, click the sheet link above and request access.",
+                    ]
+                    customer_msg = "\n".join(customer_parts)
+                    for chunk in _split_for_discord(customer_msg):
+                        await message.channel.send(chunk)
                 else:
                     # Helper unavailable — fall back to old behavior
                     cert_list = "\n".join([f"• `{c}`" for c in certs])
