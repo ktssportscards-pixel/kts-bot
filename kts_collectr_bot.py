@@ -50,6 +50,10 @@ COLLECTR_FOLDER_ID       = "1nAUPg7QW7tRzzdiHxG7UYUSPCa8MDZq3"   # Collectr Sing
 APPS_SCRIPT_URL          = "https://script.google.com/macros/s/AKfycbxPenrARSCnPZ6Ddwaokcz24Fwvcobgp0ybvvzJR49cCJ_DUcNoprRXDPpyTJA0rJ71Cg/exec"
 YOUR_DISCORD_USER_ID     = 1120958174036500480  # Kevin's Discord user ID
 
+# Helper API — Cardladder comp lookup service
+HELPER_URL               = os.environ.get("HELPER_URL", "https://helper.ktscollectibles.com")
+HELPER_API_KEY           = os.environ.get("HELPER_API_KEY", "")
+
 # Raw card payout percentages by lot size
 RAW_PAYOUT_TIERS = [
     (0,    500,          0.84),
@@ -297,6 +301,78 @@ def create_psa_sheet(username, cert_numbers):
     return data["url"], data["name"], data
 
 
+# ── HELPER API (CARDLADDER COMPS) ────────────────────────────────────────────────
+def extract_sheet_id(url):
+    """Pull the sheet ID out of a Google Sheets URL."""
+    m = re.search(r'/d/([a-zA-Z0-9_-]+)', url or "")
+    return m.group(1) if m else None
+
+
+def lookup_comps(certs):
+    """
+    Call helper.ktscollectibles.com/comp/batch and return the results list.
+    Each result: {cert, found, clValue, cardName, grade, recentSales, avg3Sales, salesCount, note}
+    Returns [] if the helper key isn't set or the call fails — non-fatal.
+    """
+    if not HELPER_API_KEY or not certs:
+        return []
+    import urllib.request as urlreq
+    payload = json.dumps({"certs": [str(c).strip() for c in certs]}).encode("utf-8")
+    req = urlreq.Request(
+        f"{HELPER_URL}/comp/batch",
+        data=payload,
+        headers={"Content-Type": "application/json", "X-API-Key": HELPER_API_KEY},
+        method="POST",
+    )
+    with urlreq.urlopen(req, timeout=180) as resp:
+        data = json.loads(resp.read().decode())
+    return data.get("results", [])
+
+
+def fill_buying_sheet(sheet_id, comps, sheet_name="Form. Put Date Here."):
+    """
+    Populate the freshly-created buying sheet with everything the user normally sees:
+      A = "PSA", B = cert (already there), C = HYPERLINK to Cardladder,
+      D = card name, E = grade, G = CL Value.
+    Replicates the existing onEdit + cardladder-comp behavior since simple onEdit
+    doesn't fire on programmatic writes (so the sheet copy lands empty otherwise).
+    """
+    if not comps:
+        return
+    gc = get_gspread_client()
+    ss = gc.open_by_key(sheet_id)
+    try:
+        sheet = ss.worksheet(sheet_name)
+    except Exception:
+        sheet = ss.sheet1
+    cert_col = sheet.col_values(2)  # column B, 1-indexed
+    cert_to_row = {}
+    for i, val in enumerate(cert_col):
+        v = str(val).strip()
+        if v.isdigit() and 6 <= len(v) <= 12:
+            cert_to_row[v] = i + 1
+    updates = []
+    for c in comps:
+        cert = str(c.get('cert', '')).strip()
+        row = cert_to_row.get(cert)
+        if not row:
+            continue
+        link_url = f"https://app.cardladder.com/search?cert={cert}&grader=psa"
+        updates.append({'range': f'A{row}', 'values': [["PSA"]]})
+        updates.append({'range': f'C{row}', 'values': [[f'=HYPERLINK("{link_url}","🔗 CardLadder")']]})
+        if c.get('cardName'):
+            updates.append({'range': f'D{row}', 'values': [[c['cardName']]]})
+        if c.get('grade'):
+            grade_clean = str(c['grade']).replace('PSA ', '').replace('PSA', '').strip()
+            updates.append({'range': f'E{row}', 'values': [[grade_clean]]})
+        if c.get('found') and c.get('clValue') is not None:
+            updates.append({'range': f'G{row}', 'values': [[c['clValue']]]})
+        else:
+            updates.append({'range': f'G{row}', 'values': [["not found"]]})
+    if updates:
+        sheet.batch_update(updates, value_input_option="USER_ENTERED")
+
+
 # ── CERT EXTRACTION ──────────────────────────────────────────────────────────────
 def extract_certs(text):
     if not text:
@@ -525,15 +601,65 @@ async def on_message(message):
                     f"Got it! Setting up your buying sheet for {len(certs)} cert{'s' if len(certs) > 1 else ''}... ⏳"
                 )
                 sheet_url, sheet_name, data = create_psa_sheet(username, certs)
+                sheet_id = data.get("sheet_id") or extract_sheet_id(sheet_url)
+                if sheet_id:
+                    channel_sheet[channel_id] = sheet_id
+
+                # Tell the customer the sheet is ready BEFORE the slow helper call.
+                # Helper lookup for 50 certs can be 1-2 min; don't make them wait.
                 await message.channel.send(
                     f"✅ Sheet ready! Kevin will check comps on CardLadder and get back to you.\n\n"
                     f"📊 {sheet_url}"
                 )
-                cert_list = "\n".join([f"• {c}" for c in certs])
-                await ping_kevin(
-                    f"📋 **PSA sheet — {username}**\n{len(certs)} certs | {sheet_url}\n\n{cert_list}",
-                    message.channel
-                )
+
+                # Now look up comps and fill the sheet (slow path).
+                comps = []
+                comp_error = None
+                try:
+                    comps = await asyncio.to_thread(lookup_comps, certs)
+                    if sheet_id and comps:
+                        await asyncio.to_thread(fill_buying_sheet, sheet_id, comps)
+                except Exception as e:
+                    comp_error = str(e)
+                    print(f"Helper comp lookup error: {e}")
+
+                # Build Kevin DM with comp summary
+                if comps:
+                    by_cert = {str(c.get('cert', '')).strip(): c for c in comps}
+                    total_cl = 0.0
+                    not_found = 0
+                    lines = []
+                    for cert in certs:
+                        c = by_cert.get(str(cert).strip())
+                        if c and c.get('found') and c.get('clValue') is not None:
+                            cv = float(c['clValue'])
+                            total_cl += cv
+                            name = (c.get('cardName') or '')[:50]
+                            grade = str(c.get('grade') or '').replace('PSA ', '').strip()
+                            lines.append(f"• `{cert}` — **${cv:.2f}** — {name} (PSA {grade})")
+                        else:
+                            not_found += 1
+                            lines.append(f"• `{cert}` — ❌ not found")
+                    summary = (
+                        f"📋 **PSA sheet — {username}**\n"
+                        f"{len(certs)} certs | Total CL Value: **${total_cl:,.2f}**"
+                        f"{f' | {not_found} not found' if not_found else ''}\n"
+                        f"{sheet_url}\n\n"
+                    )
+                    body = "\n".join(lines[:25])
+                    if len(lines) > 25:
+                        body += f"\n• ...and {len(lines) - 25} more (see sheet)"
+                    await ping_kevin(summary + body, message.channel)
+                else:
+                    # Helper unavailable — fall back to old behavior
+                    cert_list = "\n".join([f"• `{c}`" for c in certs])
+                    err_note = f"\n\n⚠️ Helper offline ({comp_error})" if comp_error else ""
+                    await ping_kevin(
+                        f"📋 **PSA sheet — {username}**\n"
+                        f"{len(certs)} certs | {sheet_url}{err_note}\n\n"
+                        f"{cert_list}",
+                        message.channel
+                    )
             except Exception as e:
                 print(f"Sheet error: {e}")
                 await message.channel.send("Small hiccup — Kevin will set this up manually and be right with you!")
