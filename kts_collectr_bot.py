@@ -64,10 +64,14 @@ RAW_PAYOUT_TIERS = [
 
 # PSA slab buying criteria
 PSA_MIN_PRICE = 1
-PSA_MAX_PRICE = 200
 PSA_MIN_GRADE = 7
 PSA_MAX_AGE_DAYS = 30
 PSA_PAYOUT_RATE = 0.87
+# Per-sport price ceilings — sports not listed here are rejected outright.
+PSA_SPORT_MAX_PRICE = {
+    'pokemon': 200,
+    'basketball': 250,
+}
 
 # VIP clients who always get 87% regardless of lot size
 VIP_CLIENTS = ["nickj1234", "gbywby"]
@@ -366,8 +370,13 @@ def classify_psa_comp(comp):
         cv = None
     if cv is None:
         return ('rejected', 'no CL value')
-    if cv > PSA_MAX_PRICE:
-        return ('rejected', f"${cv:,.0f} (over our ${PSA_MAX_PRICE} max)")
+    sport = (comp.get('sport') or '').lower().strip()
+    max_price = PSA_SPORT_MAX_PRICE.get(sport)
+    if max_price is None:
+        sport_label = sport or 'unknown sport'
+        return ('rejected', f"{sport_label} (we only buy pokemon and basketball)")
+    if cv > max_price:
+        return ('rejected', f"${cv:,.0f} (over our ${max_price} {sport} max)")
     if cv < PSA_MIN_PRICE:
         return ('rejected', f"${cv:.2f} (under ${PSA_MIN_PRICE} min)")
     grade_raw = str(comp.get('grade') or '').replace('PSA', '').strip()
@@ -393,7 +402,7 @@ def fill_buying_sheet(sheet_id, comps, sheet_name="Form. Put Date Here."):
     """
     Populate the freshly-created buying sheet with everything the user normally sees:
       A = "PSA", B = cert (already there), C = HYPERLINK to Cardladder,
-      D = card name, E = grade, G = CL Value.
+      D = card name, E = grade, F = sport, G = CL Value.
     Replicates the existing onEdit + cardladder-comp behavior since simple onEdit
     doesn't fire on programmatic writes (so the sheet copy lands empty otherwise).
     """
@@ -425,6 +434,8 @@ def fill_buying_sheet(sheet_id, comps, sheet_name="Form. Put Date Here."):
         if c.get('grade'):
             grade_clean = str(c['grade']).replace('PSA ', '').replace('PSA', '').strip()
             updates.append({'range': f'E{row}', 'values': [[grade_clean]]})
+        if c.get('sport'):
+            updates.append({'range': f'F{row}', 'values': [[str(c['sport']).lower().strip()]]})
         if c.get('found') and c.get('clValue') is not None:
             updates.append({'range': f'G{row}', 'values': [[c['clValue']]]})
         else:
