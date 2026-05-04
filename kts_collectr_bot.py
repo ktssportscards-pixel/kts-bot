@@ -335,7 +335,7 @@ def extract_sheet_id(url):
     return m.group(1) if m else None
 
 
-HELPER_CHUNK_SIZE = 8  # Matches helper CONCURRENCY=8 so each chunk fully saturates the helper in one batch. Chunks complete in ~max(cert_time) ≈ 10-30s, well under Cloudflare's ~100s tunnel limit.
+HELPER_CHUNK_SIZE = 4  # Matches helper CONCURRENCY=4. CardLadder under load + Cloudflare challenge can push per-cert time to 60-90s; chunks of 4 (one parallel batch) keep total under the ~100s tunnel timeout.
 
 def lookup_comps(certs):
     """
