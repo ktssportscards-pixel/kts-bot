@@ -80,13 +80,17 @@ PSA_SPORT_MAX_PRICE = {
     'one piece': 500,
 }
 # CardLadder/helper may return One Piece under various names — normalize them all
-# to 'one piece' before lookup.
+# to 'one piece' before lookup. Note: the helper returns 'other' for One Piece
+# slabs (and possibly other non-mainstream TCGs), so we map 'other' → 'one piece'
+# per Kevin's call. If we ever start seeing rogue Magic/Yu-Gi-Oh/Lorcana slabs
+# slip through under 'other', revisit this mapping.
 PSA_SPORT_ALIASES = {
     'onepiece': 'one piece',
     'one piece': 'one piece',
     'popculture': 'one piece',
     'pop culture': 'one piece',
-    'tcg': 'one piece',   # only matched if not already pokemon
+    'tcg': 'one piece',
+    'other': 'one piece',
 }
 
 def normalize_sport(sport_raw):
