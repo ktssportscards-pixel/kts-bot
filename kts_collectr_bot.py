@@ -77,23 +77,73 @@ PSA_MAX_AGE_DAYS = 30
 PSA_SPORT_MAX_PRICE = {
     'pokemon': 200,
     'basketball': 250,
+    'one piece': 500,
 }
+# CardLadder/helper may return One Piece under various names — normalize them all
+# to 'one piece' before lookup.
+PSA_SPORT_ALIASES = {
+    'onepiece': 'one piece',
+    'one piece': 'one piece',
+    'popculture': 'one piece',
+    'pop culture': 'one piece',
+    'tcg': 'one piece',   # only matched if not already pokemon
+}
+
+def normalize_sport(sport_raw):
+    """Map various CardLadder sport strings to our canonical sport keys."""
+    s = (sport_raw or '').lower().strip()
+    if not s:
+        return s
+    # Direct match first
+    if s in PSA_SPORT_MAX_PRICE:
+        return s
+    # Alias lookup
+    if s in PSA_SPORT_ALIASES:
+        return PSA_SPORT_ALIASES[s]
+    return s
+
 # Pokemon: flat rate. Basketball: tiered by the basketball-only lot total.
+# One Piece: tiered per individual card value (not lot total).
 PSA_POKEMON_PAYOUT_RATE = 0.87
 PSA_BASKETBALL_PAYOUT_TIERS = [
     (0,    1000,         0.93),
     (1000, 3000,         0.95),
     (3000, float('inf'), 0.96),
 ]
+PSA_ONE_PIECE_PER_CARD_TIERS = [
+    (0,    100,          0.87),  # $1-$100 → 87%
+    (100,  float('inf'), 0.84),  # $100-$500 → 84%
+]
 
 
-def get_psa_payout_rate(sport, sport_lot_total):
-    """Return the payout rate for a given sport's accepted lot total."""
+def get_psa_payout_rate(sport, sport_lot_total, card_values=None):
+    """
+    Return the payout rate (or effective rate) for a given sport's accepted cards.
+    - basketball: tiered by total sport lot value
+    - one piece: tiered per individual card; returns the effective blended rate
+      across card_values so the breakdown shows one number.
+    - pokemon: flat rate
+    """
     if sport == 'basketball':
         for low, high, rate in PSA_BASKETBALL_PAYOUT_TIERS:
             if low <= sport_lot_total < high:
                 return rate
         return PSA_BASKETBALL_PAYOUT_TIERS[-1][2]
+    if sport == 'one piece':
+        if not card_values:
+            return PSA_ONE_PIECE_PER_CARD_TIERS[0][2]
+        total = sum(card_values)
+        if total <= 0:
+            return PSA_ONE_PIECE_PER_CARD_TIERS[0][2]
+        payout = 0.0
+        for cv in card_values:
+            for low, high, rate in PSA_ONE_PIECE_PER_CARD_TIERS:
+                if low <= cv < high:
+                    payout += cv * rate
+                    break
+            else:
+                payout += cv * PSA_ONE_PIECE_PER_CARD_TIERS[-1][2]
+        return payout / total
     return PSA_POKEMON_PAYOUT_RATE
 
 # VIP rates PAUSED while we're buying One Piece raws (May 2026).
@@ -311,11 +361,11 @@ def classify_psa_comp(comp):
         cv = None
     if cv is None:
         return ('rejected', 'no CL value')
-    sport = (comp.get('sport') or '').lower().strip()
+    sport = normalize_sport(comp.get('sport'))
     max_price = PSA_SPORT_MAX_PRICE.get(sport)
     if max_price is None:
         sport_label = sport or 'unknown sport'
-        return ('rejected', f"{sport_label} (we only buy pokemon and basketball)")
+        return ('rejected', f"{sport_label} (we only buy pokemon, basketball, and one piece)")
     if cv > max_price:
         return ('rejected', f"${cv:,.0f} (over our ${max_price} {sport} max)")
     if cv < PSA_MIN_PRICE:
@@ -419,7 +469,7 @@ channel_sheet = {}
 WELCOME_MSG = (
     "👋 Welcome to KTS Collectibles!\n\n"
     "We're currently buying:\n"
-    "• **PSA graded slabs** (Pokémon & Basketball) → send your cert numbers\n"
+    "• **PSA graded slabs** (Pokémon, Basketball & One Piece) → send your cert numbers\n"
     "• **One Piece raw singles** (English, Near Mint, $1–$99) → upload your Collectr CSV export\n\n"
     "⚠️ We are **not** buying Pokémon raw cards at this time.\n\n"
     "What are you looking to sell?"
@@ -671,12 +721,13 @@ async def on_message(message):
 
                     sport_groups = {}
                     for c in accepted:
-                        sp = (c.get('sport') or '').lower().strip()
+                        sp = normalize_sport(c.get('sport'))
                         sport_groups.setdefault(sp, []).append(c)
                     sport_breakdown = []
                     for sp, comps_in_sport in sport_groups.items():
-                        sport_total = sum(float(c['clValue']) for c in comps_in_sport)
-                        rate = get_psa_payout_rate(sp, sport_total)
+                        card_values = [float(c['clValue']) for c in comps_in_sport]
+                        sport_total = sum(card_values)
+                        rate = get_psa_payout_rate(sp, sport_total, card_values)
                         sport_breakdown.append({
                             'sport': sp,
                             'count': len(comps_in_sport),
