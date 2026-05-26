@@ -223,13 +223,19 @@ def parse_collectr_csv(content_bytes):
             elif game_val and 'one piece' not in game_val:
                 other_game_cards.append(f"• {name} ({set_name}) — {row.get(game_col, '')}")
 
-    # Check for non-English cards (Japanese, Korean, Chinese characters in name or set)
+    # Check for non-English cards. Collectr marks them two ways:
+    #   1. Language tag in the product name: "(JP)", "(KR)", "(CN)", "(TW)", "(KOR)"
+    #   2. Non-ASCII characters in the name or set (for cards that weren't tagged)
+    non_english_tags = ('(jp)', '(kr)', '(cn)', '(tw)', '(kor)', '(jpn)', '(chn)')
     non_english = []
     for _, row in df.iterrows():
         name = str(row.get('Product Name', ''))
         set_name = str(row.get('Set', ''))
         combined = name + set_name
-        if any(ord(c) > 127 for c in combined):
+        name_lower = name.lower()
+        if any(tag in name_lower for tag in non_english_tags):
+            non_english.append(f"• {name} ({set_name})")
+        elif any(ord(c) > 127 for c in combined):
             non_english.append(f"• {name} ({set_name})")
 
     # Per-card price range: $1-$99
