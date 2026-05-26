@@ -531,7 +531,10 @@ async def on_message(message):
         welcomed_tickets.add(channel_id)
         await asyncio.sleep(1)
         await message.channel.send(WELCOME_MSG)
-        return
+        # If they already sent certs or a CSV with their first message,
+        # don't make them re-send — fall through to processing below.
+        if not (certs or csv_attachment):
+            return
 
     # ── COLLECTR CSV (ONE PIECE) ─────────────────────────────────────────────────
     if csv_attachment:
