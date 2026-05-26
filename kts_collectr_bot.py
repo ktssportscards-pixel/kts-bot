@@ -441,13 +441,6 @@ SHIPPING_MSG = (
     "Once you've shipped, **drop your tracking number here** so Kevin can keep an eye out!"
 )
 
-FIRM_KEYWORDS = [
-    "counter", "lower", "less", "more money", "higher", "better offer",
-    "negotiate", "can you do", "how about", "what about", "discount",
-    "too low", "not enough", "worth more", "offer more", "come up",
-    "go up", "budge", "flexible", "room", "bump"
-]
-
 AGREE_KEYWORDS = ["ship"]
 
 DISCORD_MAX_LEN = 2000
@@ -483,10 +476,6 @@ async def ping_kevin(msg, channel=None):
             await kevin.send(chunk)
     except Exception as e:
         print(f"Could not ping Kevin: {e}")
-
-def is_negotiating(text):
-    t = text.lower()
-    return any(kw in t for kw in FIRM_KEYWORDS)
 
 def is_agreeing(text):
     return text.strip().lower() == "ship"
@@ -775,19 +764,6 @@ async def on_message(message):
                     f"⚠️ Sheet failed — **{username}**\nCerts: {', '.join(certs)}\nError: {str(e)}",
                     message.channel
                 )
-        return
-
-    # ── NEGOTIATION ──────────────────────────────────────────────────────────────
-    if channel_id in last_offer and is_negotiating(text):
-        offer = last_offer[channel_id]
-        await message.channel.send(
-            f"We're firm on **${offer['payout']:,.2f}** ({int(offer['rate']*100)}% of market). "
-            f"Our rates are based on live market data and we pay instantly! 🙏"
-        )
-        await ping_kevin(
-            f"🔴 **{username} negotiating** — offered ${offer['payout']:,.2f}\nSaid: \"{text[:100]}\"",
-            message.channel
-        )
         return
 
     # ── AGREED / SHIPPING ─────────────────────────────────────────────────────────
