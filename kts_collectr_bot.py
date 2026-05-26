@@ -8,15 +8,17 @@ Handles TWO types of customers automatically:
    - Bot creates a Google Sheet copy with cert numbers + CardLadder links
    - Pings Kevin with sheet link
 
-2. RAW CARD sellers (Collectr):
+2. RAW CARD sellers (Collectr) — ONE PIECE ONLY (May 2026):
    - Customer uploads their Collectr CSV export in DMs
    - Bot reads it, calculates total market value
+   - One Piece English NM singles, $1-$99 per card
    - Applies correct % based on lot size:
-       $1 - $500    → 84%
-       $500 - $1000 → 85%
-       $1000 - $2000→ 86%
-       $2000+ → 87%
-       Bulk 87% → up to 87% (Kevin decides)
+       $0   - $500   → 80%
+       $500 - $1000  → 82%
+       $1000- $1500  → 83%
+       $1500- $2500  → 84%
+       $2500+        → 85%
+   - Pokémon raws are politely declined (PSA slabs still accepted)
    - Sends customer their offer
    - Pings Kevin with breakdown
 
@@ -54,13 +56,18 @@ YOUR_DISCORD_USER_ID     = 1120958174036500480  # Kevin's Discord user ID
 HELPER_URL               = os.environ.get("HELPER_URL", "https://helper.ktscollectibles.com")
 HELPER_API_KEY           = os.environ.get("HELPER_API_KEY", "")
 
-# Raw card payout percentages by lot size
+# Raw card payout percentages by lot size — ONE PIECE singles
 RAW_PAYOUT_TIERS = [
-    (0,    500,          0.84),
-    (500,  1000,         0.85),
-    (1000, 2000,         0.86),
-    (2000, float('inf'), 0.87),
+    (0,    500,          0.80),
+    (500,  1000,         0.82),
+    (1000, 1500,         0.83),
+    (1500, 2500,         0.84),
+    (2500, float('inf'), 0.85),
 ]
+
+# Raw card per-card price limits (One Piece)
+RAW_MIN_PRICE = 1
+RAW_MAX_PRICE = 99
 
 # PSA slab buying criteria
 PSA_MIN_PRICE = 1
@@ -89,9 +96,11 @@ def get_psa_payout_rate(sport, sport_lot_total):
         return PSA_BASKETBALL_PAYOUT_TIERS[-1][2]
     return PSA_POKEMON_PAYOUT_RATE
 
-# VIP clients who always get 87% regardless of lot size
-VIP_CLIENTS = ["nickj1234", "gbywby"]
-VIP_CLIENTS_89 = ["icevyy"]  # Gets 89% — mod in server
+# VIP rates PAUSED while we're buying One Piece raws (May 2026).
+# Top of standard tier is 85%, so legacy VIP rates of 87/89% would exceed margin.
+# Keep lists here for easy re-enable later; treated as standard tier for now.
+VIP_CLIENTS = []
+VIP_CLIENTS_89 = []
 
 # ── PAYOUT CALCULATOR ────────────────────────────────────────────────────────────
 def get_payout_rate(total, username):
@@ -104,13 +113,17 @@ def get_payout_rate(total, username):
     for low, high, rate in RAW_PAYOUT_TIERS:
         if low <= total < high:
             return rate, f"${low:,}–{'$'+str(high//1000)+'k' if high != float('inf') else '+'} tier"
-    return 0.84, "standard rate"
+    return 0.80, "standard rate"
 
 
 def parse_collectr_csv(content_bytes):
     """
     Parse a Collectr CSV export and return total market value + card list.
-    Also validates cards against KTS buying requirements.
+    Validates cards against KTS One Piece buying requirements:
+      - Must be One Piece TCG (Pokémon politely declined)
+      - English only
+      - $1-$99 per card
+      - Near Mint only
     """
     df = pd.read_csv(io.BytesIO(content_bytes))
 
@@ -133,40 +146,25 @@ def parse_collectr_csv(content_bytes):
         df['_line_total'] = df[price_col]
 
     # ── VALIDATION ──────────────────────────────────────────────────────────────
-    TAG_TEAM_KEYWORDS = [" &", "tag team", "gx tag"]
 
-    PRE_2020_SETS = {
-        "base set", "jungle", "fossil", "base set 2", "team rocket",
-        "gym heroes", "gym challenge", "neo genesis", "neo discovery",
-        "neo revelation", "neo destiny", "legendary collection", "expedition",
-        "aquapolis", "skyridge", "ruby & sapphire", "sandstorm", "dragon",
-        "team magma vs team aqua", "hidden legends", "firered & leafgreen",
-        "team rocket returns", "deoxys", "emerald", "unseen forces",
-        "delta species", "legend maker", "holon phantoms", "crystal guardians",
-        "dragon frontiers", "power keepers", "diamond & pearl",
-        "mysterious treasures", "secret wonders", "great encounters",
-        "majestic dawn", "legends awakened", "stormfront", "platinum",
-        "rising rivals", "supreme victors", "arceus", "heartgold & soulsilver",
-        "unleashed", "undaunted", "triumphant", "call of legends",
-        "black & white", "emerging powers", "noble victories", "next destinies",
-        "dark explorers", "dragons exalted", "boundaries crossed",
-        "plasma storm", "plasma freeze", "plasma blast", "legendary treasures",
-        "xy", "flashfire", "furious fists", "phantom forces", "primal clash",
-        "double crisis", "roaring skies", "ancient origins", "breakthrough",
-        "breakpoint", "generations", "fates collide", "steam siege",
-        "evolutions", "sun & moon", "guardians rising", "burning shadows",
-        "shining legends", "crimson invasion", "ultra prism", "forbidden light",
-        "celestial storm", "dragon majesty", "lost thunder", "team up",
-        "detective pikachu", "unbroken bonds", "unified minds", "hidden fates",
-        "cosmic eclipse",
-    }
+    # Detect game/category — Collectr uses 'Game' or 'Category' column
+    game_col = None
+    for candidate in ['Game', 'TCG', 'Category']:
+        if candidate in df.columns:
+            game_col = candidate
+            break
 
-    # Check for trainer cards — not buying any trainers for now
-    trainer_cards = []
-    if 'Category' in df.columns:
+    pokemon_cards = []
+    other_game_cards = []
+    if game_col:
         for _, row in df.iterrows():
-            if str(row.get('Category', '')).strip().lower() == 'trainer':
-                trainer_cards.append(f"• {str(row.get('Product Name', 'Unknown'))}")
+            game_val = str(row.get(game_col, '')).strip().lower()
+            name = str(row.get('Product Name', 'Unknown'))
+            set_name = str(row.get('Set', ''))
+            if 'pokemon' in game_val or 'pokémon' in game_val:
+                pokemon_cards.append(f"• {name} ({set_name})")
+            elif game_val and 'one piece' not in game_val:
+                other_game_cards.append(f"• {name} ({set_name}) — {row.get(game_col, '')}")
 
     # Check for non-English cards (Japanese, Korean, Chinese characters in name or set)
     non_english = []
@@ -177,34 +175,28 @@ def parse_collectr_csv(content_bytes):
         if any(ord(c) > 127 for c in combined):
             non_english.append(f"• {name} ({set_name})")
 
-    over_100 = []
+    # Per-card price range: $1-$99
+    over_max = []
+    under_min = []
     for _, row in df.iterrows():
         price = float(row[price_col])
         name = str(row.get('Product Name', 'Unknown'))
-        if price > 100:
-            over_100.append(f"• {name} — ${price:.2f}")
-
-    pre_2020_found = []
-    set_col = 'Set' if 'Set' in df.columns else None
-    if set_col:
-        for _, row in df.iterrows():
-            set_name = str(row.get('Set', '')).lower().strip()
-            name = str(row.get('Product Name', 'Unknown'))
-            is_tag_team = any(t in name.lower() for t in TAG_TEAM_KEYWORDS)
-            if is_tag_team:
-                continue
-            if set_name in PRE_2020_SETS:
-                pre_2020_found.append(f"• {name} ({row.get('Set', '')})")
+        if price > RAW_MAX_PRICE:
+            over_max.append(f"• {name} — ${price:.2f}")
+        elif price < RAW_MIN_PRICE:
+            under_min.append(f"• {name} — ${price:.2f}")
 
     issues = []
-    if trainer_cards:
-        issues.append(("trainer", trainer_cards))
+    if pokemon_cards:
+        issues.append(("pokemon", pokemon_cards))
+    if other_game_cards:
+        issues.append(("other_game", other_game_cards))
     if non_english:
         issues.append(("non_english", non_english))
-    if over_100:
-        issues.append(("over_100", over_100))
-    if pre_2020_found:
-        issues.append(("pre_2020", pre_2020_found))
+    if over_max:
+        issues.append(("over_max", over_max))
+    if under_min:
+        issues.append(("under_min", under_min))
 
     total = df['_line_total'].sum()
     card_count = int(df[qty_col].sum()) if qty_col else len(df)
@@ -224,73 +216,6 @@ def parse_collectr_csv(content_bytes):
         "issues": issues,
         "df": df
     }, None
-
-
-def check_low_value_cards(df):
-    """
-    For cards under $5, check against KTS buying list.
-    Returns list of rejected card names.
-    """
-    VSTAR_EXCLUDED = ["drapion", "simisear", "mawile", "regidrago"]
-    RADIANT_EXCLUDED = ["chargabug", "tsareena", "sealeo"]
-
-    price_col = None
-    for col in df.columns:
-        if "Market Price" in col:
-            price_col = col
-            break
-    if not price_col:
-        return []
-
-    rejected = []
-
-    for _, row in df.iterrows():
-        try:
-            price = float(str(row.get(price_col, 0)).replace("$", "").replace(",", "") or 0)
-        except:
-            price = 0
-
-        if price >= 5:
-            continue
-
-        name = str(row.get("Product Name", "")).lower()
-        rarity = str(row.get("Rarity", "")).lower()
-        set_name = str(row.get("Set", "")).lower()
-        display_name = str(row.get("Product Name", "unknown card"))
-
-        is_vmax = "vmax" in name
-        is_vstar = "vstar" in name
-        is_ex_or_v = " ex" in name or name.endswith(" ex") or " v " in name or name.endswith(" v")
-        is_full_art_trainer = "full art" in name and rarity == "ultra rare" and not any(x in name for x in ["ex", " v ", "vmax", "vstar"])
-        is_illustration_rare = "illustration rare" in rarity or "special illustration rare" in rarity
-        is_trainer_gallery = "trainer gallery" in set_name
-        is_galarian_gallery = "galarian gallery" in set_name
-        is_rainbow = "hyper rare" in rarity
-        is_gold = ("secret rare" in rarity or "hyper rare" in rarity) and "gold" in name and "item" not in name and "energy" not in name
-        is_radiant = "radiant rare" in rarity or "radiant" in name
-        is_amazing_rare = "amazing rare" in rarity
-
-        if is_vstar:
-            if any(x in name for x in VSTAR_EXCLUDED):
-                rejected.append(display_name)
-            continue
-
-        if is_radiant:
-            if any(x in name for x in RADIANT_EXCLUDED):
-                rejected.append(display_name)
-            continue
-
-        if is_gold:
-            continue
-
-        if any([is_vmax, is_ex_or_v, is_full_art_trainer,
-                is_illustration_rare, is_trainer_gallery, is_galarian_gallery,
-                is_rainbow, is_amazing_rare]):
-            continue
-
-        rejected.append(display_name)
-
-    return rejected
 
 
 # ── GOOGLE SHEETS ────────────────────────────────────────────────────────────────
@@ -492,10 +417,12 @@ last_offer = {}
 channel_sheet = {}
 
 WELCOME_MSG = (
-    "👋 Welcome to KTS Collectibles! We buy Pokémon cards — PSA graded slabs and raw singles.\n\n"
-    "What are you looking to sell?\n"
-    "• **PSA slabs** → send your cert numbers\n"
-    "• **Raw cards** → upload your Collectr CSV export"
+    "👋 Welcome to KTS Collectibles!\n\n"
+    "We're currently buying:\n"
+    "• **PSA graded slabs** (Pokémon & Basketball) → send your cert numbers\n"
+    "• **One Piece raw singles** (English, Near Mint, $1–$99) → upload your Collectr CSV export\n\n"
+    "⚠️ We are **not** buying Pokémon raw cards at this time.\n\n"
+    "What are you looking to sell?"
 )
 
 SHIPPING_MSG = (
@@ -606,7 +533,7 @@ async def on_message(message):
         await message.channel.send(WELCOME_MSG)
         return
 
-    # ── COLLECTR CSV ─────────────────────────────────────────────────────────────
+    # ── COLLECTR CSV (ONE PIECE) ─────────────────────────────────────────────────
     if csv_attachment:
         async with message.channel.typing():
             try:
@@ -616,44 +543,38 @@ async def on_message(message):
                     await message.channel.send(f"Couldn't read that file — {error}. Try re-exporting from Collectr.")
                     return
 
-                # Check low value cards against buying list
-                rejected_cards = check_low_value_cards(result["df"])
-                if rejected_cards:
-                    card_list = "\n".join(f"• {c}" for c in rejected_cards[:25])
-                    overflow = f"\n*...and {len(rejected_cards) - 25} more*" if len(rejected_cards) > 25 else ""
-                    await message.channel.send(
-                        f"❌ **I can't accept this lot as submitted.**\n\n"
-                        f"The following card(s) are under $5 and don't fit our current buying criteria:\n\n"
-                        f"{card_list}{overflow}\n\n"
-                        f"Please remove these from your Collectr portfolio, re-export the CSV, and re-upload it here. "
-                        f"Once removed I'll make you an offer! 🙏"
-                    )
-                    return
-
                 issues = result.get("issues", [])
                 for issue_type, cards in issues:
                     card_list = "\n".join(cards[:5])
                     if len(cards) > 5:
                         card_list += f"\n• ...and {len(cards)-5} more"
-                    if issue_type == "trainer":
+                    if issue_type == "pokemon":
                         await message.channel.send(
-                            f"❌ **Trainer cards — we're not buying trainers at this time:**\n{card_list}\n\n"
+                            f"❌ **We're not buying Pokémon raw cards right now.**\n\n"
+                            f"Detected Pokémon cards in your CSV:\n{card_list}\n\n"
+                            f"We're currently only buying **One Piece raw singles** (English, NM, $1–$99). "
+                            f"We're still happy to take a look at any **PSA graded Pokémon slabs** you have — "
+                            f"just drop your cert numbers here! 🙏"
+                        )
+                    elif issue_type == "other_game":
+                        await message.channel.send(
+                            f"❌ **We only buy One Piece raw singles right now:**\n{card_list}\n\n"
                             f"Please remove these and re-export."
                         )
                     elif issue_type == "non_english":
                         await message.channel.send(
-                            f"❌ **Non-English cards — we only buy English cards:**\n{card_list}\n\n"
+                            f"❌ **Non-English cards — we only buy English One Piece:**\n{card_list}\n\n"
                             f"Please remove these and re-export."
                         )
-                    elif issue_type == "over_100":
+                    elif issue_type == "over_max":
                         await message.channel.send(
-                            f"❌ **Cards over $100 — we can't buy these:**\n{card_list}\n\n"
-                            f"Our limit is **$1–$100 per card**. Remove these and re-export."
+                            f"❌ **Cards over ${RAW_MAX_PRICE} — we can't buy these as raws:**\n{card_list}\n\n"
+                            f"Our limit is **${RAW_MIN_PRICE}–${RAW_MAX_PRICE} per card**. Remove these and re-export."
                         )
-                    elif issue_type == "pre_2020":
+                    elif issue_type == "under_min":
                         await message.channel.send(
-                            f"❌ **Pre-2020 cards — we can't buy these:**\n{card_list}\n\n"
-                            f"We only buy **2020-present + Tag Teams**, Near Mint only. Remove these and re-export."
+                            f"❌ **Cards under ${RAW_MIN_PRICE} — we can't buy these:**\n{card_list}\n\n"
+                            f"Our minimum is **${RAW_MIN_PRICE} per card**. Remove these and re-export."
                         )
                 if issues:
                     await ping_kevin(
@@ -694,7 +615,7 @@ async def on_message(message):
                     f"Let me know if you'd like to proceed!"
                 )
                 kevin_msg = (
-                    f"💚 **Collectr offer sent — {username}**\n"
+                    f"💚 **Collectr offer sent — {username}** (One Piece)\n"
                     f"{card_count} cards | ${total:,.2f} market | {int(rate*100)}% | **${payout:,.2f}**"
                 )
                 top = "\n".join(result["top_cards"][:3]) if result["top_cards"] else ""
