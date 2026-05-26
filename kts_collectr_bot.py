@@ -102,49 +102,52 @@ def normalize_sport(sport_raw):
         return PSA_SPORT_ALIASES[s]
     return s
 
-# Pokemon: flat rate. Basketball: tiered by the basketball-only lot total.
-# One Piece: tiered per individual card value (not lot total).
-PSA_POKEMON_PAYOUT_RATE = 0.87
-PSA_BASKETBALL_PAYOUT_TIERS = [
-    (0,    1000,         0.93),
-    (1000, 3000,         0.95),
-    (3000, float('inf'), 0.96),
+# Pokemon: tiered per individual card value.
+# Basketball: flat rate.
+# One Piece: tiered per individual card value.
+PSA_POKEMON_PER_CARD_TIERS = [
+    (0,    100,          0.90),  # $1-$100 → 90%
+    (100,  float('inf'), 0.87),  # $100-$200 → 87%
 ]
+PSA_BASKETBALL_PAYOUT_RATE = 0.93
 PSA_ONE_PIECE_PER_CARD_TIERS = [
     (0,    100,          0.87),  # $1-$100 → 87%
     (100,  float('inf'), 0.84),  # $100-$500 → 84%
 ]
 
 
+def _blended_per_card_rate(tiers, card_values):
+    """Blend a per-card tiered rate across a list of card values."""
+    if not card_values:
+        return tiers[0][2]
+    total = sum(card_values)
+    if total <= 0:
+        return tiers[0][2]
+    payout = 0.0
+    for cv in card_values:
+        for low, high, rate in tiers:
+            if low <= cv < high:
+                payout += cv * rate
+                break
+        else:
+            payout += cv * tiers[-1][2]
+    return payout / total
+
+
 def get_psa_payout_rate(sport, sport_lot_total, card_values=None):
     """
     Return the payout rate (or effective rate) for a given sport's accepted cards.
-    - basketball: tiered by total sport lot value
-    - one piece: tiered per individual card; returns the effective blended rate
-      across card_values so the breakdown shows one number.
-    - pokemon: flat rate
+    - pokemon: tiered per individual card; returns the effective blended rate.
+    - basketball: flat rate.
+    - one piece: tiered per individual card; returns the effective blended rate.
     """
+    if sport == 'pokemon':
+        return _blended_per_card_rate(PSA_POKEMON_PER_CARD_TIERS, card_values)
     if sport == 'basketball':
-        for low, high, rate in PSA_BASKETBALL_PAYOUT_TIERS:
-            if low <= sport_lot_total < high:
-                return rate
-        return PSA_BASKETBALL_PAYOUT_TIERS[-1][2]
+        return PSA_BASKETBALL_PAYOUT_RATE
     if sport == 'one piece':
-        if not card_values:
-            return PSA_ONE_PIECE_PER_CARD_TIERS[0][2]
-        total = sum(card_values)
-        if total <= 0:
-            return PSA_ONE_PIECE_PER_CARD_TIERS[0][2]
-        payout = 0.0
-        for cv in card_values:
-            for low, high, rate in PSA_ONE_PIECE_PER_CARD_TIERS:
-                if low <= cv < high:
-                    payout += cv * rate
-                    break
-            else:
-                payout += cv * PSA_ONE_PIECE_PER_CARD_TIERS[-1][2]
-        return payout / total
-    return PSA_POKEMON_PAYOUT_RATE
+        return _blended_per_card_rate(PSA_ONE_PIECE_PER_CARD_TIERS, card_values)
+    return PSA_POKEMON_PER_CARD_TIERS[0][2]
 
 # VIP rates PAUSED while we're buying One Piece raws (May 2026).
 # Top of standard tier is 85%, so legacy VIP rates of 87/89% would exceed margin.
@@ -744,7 +747,7 @@ async def on_message(message):
                         last_offer[channel_id] = {
                             "payout": total_payout,
                             "total": total_comp,
-                            "rate": (total_payout / total_comp) if total_comp else PSA_POKEMON_PAYOUT_RATE,
+                            "rate": (total_payout / total_comp) if total_comp else PSA_POKEMON_PER_CARD_TIERS[0][2],
                         }
 
                     breakdown_lines = [
