@@ -77,7 +77,7 @@ PSA_MAX_AGE_DAYS = 30
 PSA_SPORT_MAX_PRICE = {
     'pokemon': 200,
     'basketball': 250,
-    'one piece': 500,
+    'one piece': 200,
 }
 # CardLadder/helper may return One Piece under various names — normalize them all
 # to 'one piece' before lookup. Note: the helper returns 'other' for One Piece
@@ -116,7 +116,7 @@ PSA_POKEMON_PER_CARD_TIERS = [
 PSA_BASKETBALL_PAYOUT_RATE = 0.93
 PSA_ONE_PIECE_PER_CARD_TIERS = [
     (0,    100,          0.87),  # $1-$100 → 87%
-    (100,  float('inf'), 0.84),  # $100-$500 → 84%
+    (100,  float('inf'), 0.84),  # $100-$200 → 84%
 ]
 
 # ── BASKETBALL-SPECIFIC REJECTION RULES ──────────────────────────────────────────
