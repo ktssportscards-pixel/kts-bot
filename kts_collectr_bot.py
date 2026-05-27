@@ -123,13 +123,13 @@ PSA_ONE_PIECE_PER_CARD_TIERS = [
 # Players we won't buy AT ALL regardless of price.
 BBALL_PLAYERS_REJECT_ALWAYS = [
     "karl malone",
+    "ja morant",
 ]
 # Players we won't buy if the comp is over $200.
 BBALL_PLAYERS_REJECT_OVER_200 = [
     "trae young",
     "jaren jackson jr",
     "jaren jackson",     # catches "Jaren Jackson Jr." after normalization too
-    "ja morant",
     "zion williamson",
 ]
 BBALL_PLAYER_PRICE_CAP = 200
@@ -157,6 +157,22 @@ UNLICENSED_BRAND_KEYWORDS = [
     "chronicles draft picks",
     "bowman u now",
     "bowman university now",
+]
+# Collegiate set keywords — cards featuring NBA players in college/USA Basketball
+# jerseys. Hard-rejected because Kevin doesn't buy the entire product line.
+COLLEGIATE_SET_KEYWORDS = [
+    "bowman university",
+    "bowman u ",            # trailing space avoids matching "Bowman Update"
+    "bowman u'",            # catches "Bowman U's" / possessive forms
+    "topps chrome university",
+    "topps university",
+    "panini prizm draft picks",
+    "prizm draft picks",
+    "panini chronicles draft",
+    "chronicles draft",
+    "stars & stripes",
+    "stars and stripes",
+    "usa basketball",
 ]
 
 
@@ -190,8 +206,13 @@ def check_basketball_rejections(comp):
                 return ('rejected',
                         f"{player.title()} over ${BBALL_PLAYER_PRICE_CAP} (${cv:,.0f})")
 
-    # Unlicensed brand → flag for manual review, don't auto-reject
+    # Collegiate sets — hard reject (NBA players in college jerseys, draft picks lines, USA Basketball)
     combined = name + " " + set_name
+    for keyword in COLLEGIATE_SET_KEYWORDS:
+        if keyword in combined:
+            return ('rejected', f"collegiate set ('{keyword.strip()}') — not buying")
+
+    # Unlicensed brand → flag for manual review, don't auto-reject
     for brand in UNLICENSED_BRAND_KEYWORDS:
         if brand in combined:
             return ('flag', f"possibly unlicensed brand ('{brand}') — verify before payment")
