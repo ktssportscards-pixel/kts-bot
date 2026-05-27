@@ -119,6 +119,85 @@ PSA_ONE_PIECE_PER_CARD_TIERS = [
     (100,  float('inf'), 0.84),  # $100-$500 → 84%
 ]
 
+# ── BASKETBALL-SPECIFIC REJECTION RULES ──────────────────────────────────────────
+# Players we won't buy AT ALL regardless of price.
+BBALL_PLAYERS_REJECT_ALWAYS = [
+    "karl malone",
+]
+# Players we won't buy if the comp is over $200.
+BBALL_PLAYERS_REJECT_OVER_200 = [
+    "trae young",
+    "jaren jackson jr",
+    "jaren jackson",     # catches "Jaren Jackson Jr." after normalization too
+    "ja morant",
+    "zion williamson",
+]
+BBALL_PLAYER_PRICE_CAP = 200
+# WNBA players treated as a separate sport (rejected). CardLadder reports them
+# under sport='basketball', so we match by player name.
+WNBA_PLAYERS = [
+    "caitlin clark",
+    "a'ja wilson",
+    "aja wilson",         # alternate spelling without apostrophe
+    "sabrina ionescu",
+    "angel reese",
+    "paige bueckers",
+    "juju watkins",
+    "breanna stewart",
+    "diana taurasi",
+    "sue bird",
+]
+# Brand/set keywords that indicate unlicensed product (no NBA logo). These flag
+# the lot for Kevin's manual review rather than auto-reject — sometimes legit
+# sub-brands collide. He'll eyeball before paying.
+UNLICENSED_BRAND_KEYWORDS = [
+    "sage",
+    "leaf",
+    "press pass",
+    "chronicles draft picks",
+    "bowman u now",
+    "bowman university now",
+]
+
+
+def check_basketball_rejections(comp):
+    """
+    Apply basketball-specific buying rules. Returns (status, reason) where status
+    is 'accepted', 'rejected', or 'flag' (passes through but Kevin should verify).
+    Called after the standard PSA checks pass.
+    """
+    name = (comp.get('cardName') or '').lower()
+    set_name = (comp.get('setName') or comp.get('set') or '').lower()
+    try:
+        cv = float(comp.get('clValue') or 0)
+    except (TypeError, ValueError):
+        cv = 0.0
+
+    # Always-reject players (any price)
+    for player in BBALL_PLAYERS_REJECT_ALWAYS:
+        if player in name:
+            return ('rejected', f"{player.title()} (not buying)")
+
+    # WNBA players
+    for player in WNBA_PLAYERS:
+        if player in name:
+            return ('rejected', f"WNBA ({player.title()})")
+
+    # Over-$200 player cap
+    if cv > BBALL_PLAYER_PRICE_CAP:
+        for player in BBALL_PLAYERS_REJECT_OVER_200:
+            if player in name:
+                return ('rejected',
+                        f"{player.title()} over ${BBALL_PLAYER_PRICE_CAP} (${cv:,.0f})")
+
+    # Unlicensed brand → flag for manual review, don't auto-reject
+    combined = name + " " + set_name
+    for brand in UNLICENSED_BRAND_KEYWORDS:
+        if brand in combined:
+            return ('flag', f"possibly unlicensed brand ('{brand}') — verify before payment")
+
+    return ('accepted', None)
+
 
 def _blended_per_card_rate(tiers, card_values):
     """Blend a per-card tiered rate across a list of card values."""
@@ -399,6 +478,11 @@ def classify_psa_comp(comp):
         return ('rejected', f"unparseable sale date '{last_sale}'")
     if (date.today() - last_d).days > PSA_MAX_AGE_DAYS:
         return ('rejected', f"last sale {last_sale} (>{PSA_MAX_AGE_DAYS}d ago)")
+
+    # Basketball-specific rejection rules (player bans, WNBA, unlicensed flag)
+    if sport == 'basketball':
+        return check_basketball_rejections(comp)
+
     return ('accepted', None)
 
 
@@ -718,6 +802,7 @@ async def on_message(message):
                     by_cert = {str(c.get('cert', '')).strip(): c for c in comps}
                     accepted = []
                     rejected = []
+                    flagged = []   # accepted cards that need Kevin's manual review
                     kevin_lines = []
                     for cert in certs:
                         c = by_cert.get(str(cert).strip())
@@ -728,6 +813,14 @@ async def on_message(message):
                             name = (c.get('cardName') or '')[:50]
                             grade = str(c.get('grade') or '').replace('PSA ', '').strip()
                             kevin_lines.append(f"• `{cert}` — **${cv:.2f}** — {name} (PSA {grade})")
+                        elif status == 'flag':
+                            # Still accept the card so the lot is priced, but warn Kevin.
+                            accepted.append(c)
+                            flagged.append((cert, c, reason))
+                            cv = float(c['clValue'])
+                            name = (c.get('cardName') or '')[:50]
+                            grade = str(c.get('grade') or '').replace('PSA ', '').strip()
+                            kevin_lines.append(f"• `{cert}` — ⚠️ **${cv:.2f}** — {name} (PSA {grade}) — {reason}")
                         else:
                             rejected.append((cert, reason))
                             kevin_lines.append(f"• `{cert}` — ❌ {reason}")
@@ -767,12 +860,22 @@ async def on_message(message):
                     ]
 
                     # Kevin DM
+                    n_flagged = len(flagged)
+                    flag_warning = ""
+                    if n_flagged:
+                        flag_warning = (
+                            f"\n⚠️ **{n_flagged} card{'s' if n_flagged != 1 else ''} flagged for manual review** — verify licensing before paying!\n"
+                            + "\n".join([f"   - `{cert}`: {reason}" for cert, _, reason in flagged])
+                            + "\n"
+                        )
                     summary = (
                         f"📋 **PSA sheet — {username}**\n"
                         f"{len(certs)} certs | Accepted **{n_accepted}** | Comp **${total_comp:,.2f}** | Payout **${total_payout:,.2f}**"
-                        f"{f' | {n_rejected} rejected' if n_rejected else ''}\n"
+                        f"{f' | {n_rejected} rejected' if n_rejected else ''}"
+                        f"{f' | {n_flagged} ⚠️ flagged' if n_flagged else ''}\n"
                         f"{sheet_url}\n"
                         + ("\n".join(breakdown_lines) + "\n\n" if breakdown_lines else "\n")
+                        + flag_warning
                     )
                     await ping_kevin(summary + "\n".join(kevin_lines), message.channel)
 
