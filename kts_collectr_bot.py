@@ -75,7 +75,7 @@ PSA_MIN_GRADE = 7
 PSA_MAX_AGE_DAYS = 30
 # Per-sport price ceilings — sports not listed here are rejected outright.
 PSA_SPORT_MAX_PRICE = {
-    'pokemon': 200,
+    'pokemon': 175,
     'basketball': 250,
     'one piece': 200,
 }
@@ -111,7 +111,7 @@ def normalize_sport(sport_raw):
 # One Piece: tiered per individual card value.
 PSA_POKEMON_PER_CARD_TIERS = [
     (0,    100,          0.90),  # $1-$100 → 90%
-    (100,  float('inf'), 0.87),  # $100-$200 → 87%
+    (100,  float('inf'), 0.87),  # $100-$175 → 87%
 ]
 PSA_BASKETBALL_PAYOUT_RATE = 0.93
 PSA_ONE_PIECE_PER_CARD_TIERS = [
