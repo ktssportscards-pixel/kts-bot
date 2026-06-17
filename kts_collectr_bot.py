@@ -648,22 +648,80 @@ async def ping_kevin(msg, channel=None):
 def is_agreeing(text):
     return text.strip().lower() == "ship"
 
+import aiohttp.web as _ow_web
+
+# ── OWED / PACKAGES — the bot stores deals and serves them to the local tracker ──
+OWED_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "owed_store.json")
+try:
+    with open(OWED_FILE) as _f:
+        OWED_STORE = json.load(_f)
+except Exception:
+    OWED_STORE = []
+
+def _save_owed():
+    try:
+        with open(OWED_FILE, "w") as _f:
+            json.dump(OWED_STORE, _f)
+    except Exception as e:
+        print(f"owed store save failed (non-critical): {e}")
+
+def upsert_owed(rec):
+    for i, o in enumerate(OWED_STORE):
+        if o.get("id") == rec["id"]:
+            OWED_STORE[i] = {**o, **rec}
+            _save_owed()
+            return
+    OWED_STORE.append(rec)
+    _save_owed()
+
+def _cors(resp):
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    return resp
+
+async def _owed_get(request):
+    show_all = request.query.get("all") == "1"
+    data = OWED_STORE if show_all else [o for o in OWED_STORE if o.get("status") != "paid"]
+    return _cors(_ow_web.json_response(data))
+
+async def _owed_paid(request):
+    oid = request.query.get("id")
+    for o in OWED_STORE:
+        if o.get("id") == oid:
+            o["status"] = "paid"
+            o["date_paid"] = date.today().isoformat()
+            _save_owed()
+            return _cors(_ow_web.json_response({"ok": True}))
+    return _cors(_ow_web.json_response({"ok": False, "error": "not found"}, status=404))
+
+async def _owed_root(request):
+    return _cors(_ow_web.Response(text="KTS bot owed endpoint OK"))
+
+async def start_owed_webserver():
+    app = _ow_web.Application()
+    app.add_routes([
+        _ow_web.get("/", _owed_root),
+        _ow_web.get("/health", _owed_root),
+        _ow_web.get("/owed", _owed_get),
+        _ow_web.get("/owed/paid", _owed_paid),
+    ])
+    runner = _ow_web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", "8080"))
+    await _ow_web.TCPSite(runner, "0.0.0.0", port).start()
+    print(f"✅ Owed web endpoint listening on 0.0.0.0:{port}  (GET /owed)")
+
+_OWED_WEB_STARTED = False
+
 @bot.event
 async def on_ready():
+    global _OWED_WEB_STARTED
     print(f"✅ KTS Collectibles Bot online as {bot.user}")
-
-def post_owed_to_helper(rec):
-    """POST an owed/package deal to the helper so the local tracker can sync it."""
-    import urllib.request as urlreq
-    data = json.dumps(rec).encode("utf-8")
-    req = urlreq.Request(
-        f"{HELPER_URL}/owed",
-        data=data,
-        headers={"Content-Type": "application/json", "X-API-Key": HELPER_API_KEY, "User-Agent": "KTS-Bot/1.0"},
-        method="POST",
-    )
-    with urlreq.urlopen(req, timeout=15) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    if not _OWED_WEB_STARTED:
+        _OWED_WEB_STARTED = True
+        try:
+            await start_owed_webserver()
+        except Exception as e:
+            print(f"owed web server failed to start: {e}")
 
 async def handle_owe(message):
     """!owe <@seller|name> <amount> [paypal] [note...] — log a package Kevin owes (default Wire)."""
@@ -682,17 +740,15 @@ async def handle_owe(message):
         return
     amount = float(m.group(1).replace(',', ''))
     method = 'PayPal' if 'paypal' in body.lower() else 'Wire'
-    note = _re.sub(r'\b(paypal|wire)\b', '', body.replace(m.group(0), '', 1), flags=_re.I).strip(' -–')
+    note = _re.sub(r'\b(paypal|wire)\b', '', body.replace(m.group(0), '', 1), flags=_re.I).strip(' -')
     rec = {"id": f"owed_{message.id}", "discord": seller, "amount": amount,
-           "method": method, "note": note, "source": "bot"}
-    try:
-        post_owed_to_helper(rec)
-        await message.channel.send(
-            f"✅ Logged: owe **{seller}** ${amount:,.2f} via {method}"
-            + (f" — {note}" if note else "")
-            + ".  Hit **Sync from bot** in the tracker.")
-    except Exception as e:
-        await message.channel.send(f"⚠️ Couldn't reach the tracker helper: {e}")
+           "method": method, "date": date.today().isoformat(), "note": note,
+           "status": "owed", "date_paid": None, "source": "bot"}
+    upsert_owed(rec)
+    await message.channel.send(
+        f"✅ Logged: owe **{seller}** ${amount:,.2f} via {method}"
+        + (f" — {note}" if note else "")
+        + ".  Open the tracker → **Sync from bot**.")
 
 @bot.event
 async def on_message(message):
