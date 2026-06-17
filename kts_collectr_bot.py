@@ -652,9 +652,57 @@ def is_agreeing(text):
 async def on_ready():
     print(f"✅ KTS Collectibles Bot online as {bot.user}")
 
+def post_owed_to_helper(rec):
+    """POST an owed/package deal to the helper so the local tracker can sync it."""
+    import urllib.request as urlreq
+    data = json.dumps(rec).encode("utf-8")
+    req = urlreq.Request(
+        f"{HELPER_URL}/owed",
+        data=data,
+        headers={"Content-Type": "application/json", "X-API-Key": HELPER_API_KEY, "User-Agent": "KTS-Bot/1.0"},
+        method="POST",
+    )
+    with urlreq.urlopen(req, timeout=15) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+async def handle_owe(message):
+    """!owe <@seller|name> <amount> [paypal] [note...] — log a package Kevin owes (default Wire)."""
+    import re as _re
+    body = message.content.strip()[4:].strip()  # drop '!owe'
+    if message.mentions:
+        seller = message.mentions[0].display_name or message.mentions[0].name
+        body = _re.sub(r'<@!?\d+>', '', body).strip()
+    else:
+        toks = body.split()
+        seller = toks[0] if toks else ''
+        body = ' '.join(toks[1:])
+    m = _re.search(r'\$?\s*([\d,]+(?:\.\d{1,2})?)', body)
+    if not seller or not m:
+        await message.channel.send("Usage: `!owe @seller 2400 [paypal] [note]`  (defaults to Wire)")
+        return
+    amount = float(m.group(1).replace(',', ''))
+    method = 'PayPal' if 'paypal' in body.lower() else 'Wire'
+    note = _re.sub(r'\b(paypal|wire)\b', '', body.replace(m.group(0), '', 1), flags=_re.I).strip(' -–')
+    rec = {"id": f"owed_{message.id}", "discord": seller, "amount": amount,
+           "method": method, "note": note, "source": "bot"}
+    try:
+        post_owed_to_helper(rec)
+        await message.channel.send(
+            f"✅ Logged: owe **{seller}** ${amount:,.2f} via {method}"
+            + (f" — {note}" if note else "")
+            + ".  Hit **Sync from bot** in the tracker.")
+    except Exception as e:
+        await message.channel.send(f"⚠️ Couldn't reach the tracker helper: {e}")
+
 @bot.event
 async def on_message(message):
     if message.author.bot:
+        return
+
+    # ── !owe command (Kevin only) — log a package he owes, anywhere ──
+    if message.content.strip().lower().startswith('!owe'):
+        if message.author.id == YOUR_DISCORD_USER_ID:
+            await handle_owe(message)
         return
 
     is_ticket = isinstance(message.channel, discord.TextChannel) and "ticket" in message.channel.name.lower()
