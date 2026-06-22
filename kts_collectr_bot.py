@@ -110,12 +110,23 @@ def normalize_sport(sport_raw):
         return PSA_SPORT_ALIASES[s]
     return s
 
-# Pokemon: tiered per individual card value.
-# Basketball: flat rate.
-# One Piece: tiered per individual card value.
-PSA_POKEMON_PER_CARD_TIERS = [
-    (0,    100,          0.90),  # $1-$100 → 90%
-    (100,  float('inf'), 0.87),  # $100-$175 → 87%
+# Pokemon payout:
+#   $1-$100 cards  : rate scales with the TOTAL value of the $1-$100 Pokemon bucket
+#                    in this lot (lot-size tiers below). Any grade (see grade rules).
+#   $100-$175 cards: flat 87%, PSA 7+ (grade enforced in classify_psa_comp).
+# Basketball: flat rate.  One Piece: tiered per individual card value.
+PSA_POKEMON_LOW_MAX = 100        # cards under $100 use the lot-size tiers; $100+ → high rate
+PSA_POKEMON_HIGH_RATE = 0.87     # $100-$175 Pokemon
+
+# Lot-size tiers for the $1-$100 Pokemon bucket — rate is chosen by the TOTAL
+# value of just the $1-$100 Pokemon cards in the lot.
+PSA_POKEMON_LOW_LOT_TIERS = [
+    (0,     1500,         0.90),   # under $1,500    → 90% (base)
+    (1500,  3000,         0.91),   # $1,500-$3,000   → 91%
+    (3000,  5000,         0.915),  # $3,000-$5,000   → 91.5%
+    (5000,  10000,        0.92),   # $5,000-$10,000  → 92%
+    (10000, 15000,        0.925),  # $10,000-$15,000 → 92.5%
+    (15000, float('inf'), 0.93),   # $15,000+        → 93%
 ]
 PSA_BASKETBALL_PAYOUT_RATE = 0.93
 PSA_ONE_PIECE_PER_CARD_TIERS = [
@@ -224,6 +235,12 @@ def check_basketball_rejections(comp):
     return ('accepted', None)
 
 
+def _fmt_pct(rate):
+    """Format a rate as a percent, trimming a trailing .0 (e.g. 0.915 -> '91.5%')."""
+    s = f"{rate * 100:.1f}".rstrip('0').rstrip('.')
+    return f"{s}%"
+
+
 def _blended_per_card_rate(tiers, card_values):
     """Blend a per-card tiered rate across a list of card values."""
     if not card_values:
@@ -242,20 +259,47 @@ def _blended_per_card_rate(tiers, card_values):
     return payout / total
 
 
+def pokemon_low_lot_rate(low_bucket_total):
+    """Rate for the $1-$100 Pokemon bucket, chosen by that bucket's TOTAL value."""
+    for low, high, rate in PSA_POKEMON_LOW_LOT_TIERS:
+        if low <= low_bucket_total < high:
+            return rate
+    return PSA_POKEMON_LOW_LOT_TIERS[-1][2]
+
+
+def _pokemon_effective_rate(card_values):
+    """
+    Blend the Pokemon payout: the $1-$100 bucket gets a rate based on its TOTAL
+    value (lot-size tiers); $100-$175 cards get the flat high rate. Returns the
+    effective blended rate so sport_total * rate == total payout.
+    """
+    if not card_values:
+        return PSA_POKEMON_LOW_LOT_TIERS[0][2]
+    low_total = sum(cv for cv in card_values if cv < PSA_POKEMON_LOW_MAX)
+    high_total = sum(cv for cv in card_values if cv >= PSA_POKEMON_LOW_MAX)
+    total = low_total + high_total
+    if total <= 0:
+        return PSA_POKEMON_LOW_LOT_TIERS[0][2]
+    low_rate = pokemon_low_lot_rate(low_total)
+    payout = low_total * low_rate + high_total * PSA_POKEMON_HIGH_RATE
+    return payout / total
+
+
 def get_psa_payout_rate(sport, sport_lot_total, card_values=None):
     """
-    Return the payout rate (or effective rate) for a given sport's accepted cards.
-    - pokemon: tiered per individual card; returns the effective blended rate.
+    Return the effective (blended) payout rate for a sport's accepted cards.
+    - pokemon: $1-$100 cards use a lot-size tier (rate scales with that bucket's
+      total value); $100-$175 cards are flat 87%.
     - basketball: flat rate.
     - one piece: tiered per individual card; returns the effective blended rate.
     """
     if sport == 'pokemon':
-        return _blended_per_card_rate(PSA_POKEMON_PER_CARD_TIERS, card_values)
+        return _pokemon_effective_rate(card_values)
     if sport == 'basketball':
         return PSA_BASKETBALL_PAYOUT_RATE
     if sport == 'one piece':
         return _blended_per_card_rate(PSA_ONE_PIECE_PER_CARD_TIERS, card_values)
-    return PSA_POKEMON_PER_CARD_TIERS[0][2]
+    return PSA_POKEMON_LOW_LOT_TIERS[0][2]
 
 # VIP rates PAUSED while we're buying One Piece raws (May 2026).
 # Top of standard tier is 85%, so legacy VIP rates of 87/89% would exceed margin.
@@ -705,6 +749,8 @@ SHIPPING_MSG = (
     "1363 Boylston St\n"
     "Unit 368\n"
     "Boston MA 02215\n\n"
+    "🚚 **Shipping method — required:** All lots must be sent **UPS Overnight** (strongly preferred) "
+    "or **UPS 2-Day** at the latest. Please **do not** use ground or any slower service.\n\n"
     "📝 **Please include a note inside your package with:**\n"
     "• Your Discord username\n"
     "• Amount owed\n"
@@ -715,6 +761,11 @@ SHIPPING_MSG = (
     "• **No note** (or missing required info above) = **2% deducted** from payout.\n\n"
     "⚠️ Without a note we also won't know who the package is from, so payment may be delayed on top of the deduction.\n\n"
     "⏱️ **Payout timing:** Most payouts are completed within **24–72 hours** of your package arriving, depending on arrival time. Payment via PayPal F&F or wire ⚡\n\n"
+    "🗓️ **Want your payout the same week? Delivery day matters:**\n"
+    "• **Arrives Mon or Tue** → guaranteed same-week payout ✅\n"
+    "• **Arrives Wed** → usually same week, but there's a chance it slips ⚠️\n"
+    "• **Arrives Thu or Fri** → payout may be delayed up to a full week ⏳\n\n"
+    "👉 To **guarantee** same-week payment, time your shipment so it lands **Monday or Tuesday**.\n\n"
     "Once you've shipped, **drop your tracking number here** so Kevin can keep an eye out!"
 )
 
@@ -1093,7 +1144,7 @@ async def on_message(message):
                         last_offer[channel_id] = {
                             "payout": total_payout,
                             "total": total_comp,
-                            "rate": (total_payout / total_comp) if total_comp else PSA_POKEMON_PER_CARD_TIERS[0][2],
+                            "rate": (total_payout / total_comp) if total_comp else PSA_POKEMON_LOW_LOT_TIERS[0][2],
                         }
 
                     # Record accepted slab comp values toward the $3k combined-lot minimum.
@@ -1105,7 +1156,7 @@ async def on_message(message):
 
                     breakdown_lines = [
                         f"• {s['sport'].title()}: {s['count']} card{'s' if s['count'] != 1 else ''}, "
-                        f"${s['total']:,.2f} → ${s['payout']:,.2f} ({int(s['rate']*100)}%)"
+                        f"${s['total']:,.2f} → ${s['payout']:,.2f} ({_fmt_pct(s['rate'])})"
                         for s in sport_breakdown
                     ]
 
