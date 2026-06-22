@@ -612,7 +612,6 @@ SHIPPING_MSG = (
     "⏱️ **Payout timing:** Most payouts are completed within **24–72 hours** of your package arriving, depending on arrival time. Payment via PayPal F&F or wire ⚡\n\n"
     "Once you've shipped, **drop your tracking number here** so Kevin can keep an eye out!"
 )
-)
 
 AGREE_KEYWORDS = ["ship"]
 
