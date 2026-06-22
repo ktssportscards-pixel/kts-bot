@@ -13,11 +13,9 @@ Handles TWO types of customers automatically:
    - Bot reads it, calculates total market value
    - One Piece English NM singles, $1-$99 per card
    - Applies correct % based on lot size:
-       $0   - $500   → 80%
-       $500 - $1000  → 82%
-       $1000- $1500  → 83%
-       $1500- $2500  → 84%
-       $2500+        → 85%
+       $3000 - $4000  → 86%
+       $4000 - $5000  → 87%
+       $5000+         → 88%
    - Pokémon raws are politely declined (PSA slabs still accepted)
    - Sends customer their offer
    - Pings Kevin with breakdown
@@ -56,13 +54,14 @@ YOUR_DISCORD_USER_ID     = 1120958174036500480  # Kevin's Discord user ID
 HELPER_URL               = os.environ.get("HELPER_URL", "https://helper.ktscollectibles.com")
 HELPER_API_KEY           = os.environ.get("HELPER_API_KEY", "")
 
-# Raw card payout percentages by lot size — ONE PIECE singles
+# Raw card payout percentages by lot size — ONE PIECE singles.
+# Singles-only lots have a $3,000 minimum (see MIN_LOT_VALUE), so the $0–$4k band
+# is really the "$3,000–$4,000" tier; it only shows on sub-minimum (held) lots,
+# which aren't actually paid out.
 RAW_PAYOUT_TIERS = [
-    (0,    500,          0.80),
-    (500,  1000,         0.82),
-    (1000, 1500,         0.83),
-    (1500, 2500,         0.84),
-    (2500, float('inf'), 0.85),
+    (0,    4000,         0.86),   # $3,000–$4,000 → 86%
+    (4000, 5000,         0.87),   # $4,000–$5,000 → 87%
+    (5000, float('inf'), 0.88),   # $5,000+       → 88%
 ]
 
 # Raw card per-card price limits (One Piece)
@@ -73,6 +72,11 @@ RAW_MAX_PRICE = 99
 PSA_MIN_PRICE = 1
 PSA_MIN_GRADE = 7
 PSA_MAX_AGE_DAYS = 30
+# Pokémon priced under $100 are bought at ANY grade (grade floor waived). Pokémon
+# $100–$175, plus all basketball and one piece, still require PSA_MIN_GRADE+.
+# The $100 boundary mirrors the Pokémon payout-tier split so a card's grade rule
+# and its payout rate stay consistent.
+POKEMON_ANY_GRADE_MAX_PRICE = 100
 # Per-sport price ceilings — sports not listed here are rejected outright.
 PSA_SPORT_MAX_PRICE = {
     'pokemon': 175,
@@ -488,7 +492,10 @@ def classify_psa_comp(comp):
         g = float(grade_raw)
     except ValueError:
         return ('rejected', f"grade '{grade_raw}' unrecognized")
-    if g < PSA_MIN_GRADE:
+    # Grade floor. Pokémon under $100 → ANY grade accepted; everything else
+    # (Pokémon $100+, basketball, one piece) → PSA_MIN_GRADE+.
+    pokemon_any_grade = (sport == 'pokemon' and cv < POKEMON_ANY_GRADE_MAX_PRICE)
+    if not pokemon_any_grade and g < PSA_MIN_GRADE:
         return ('rejected', f"PSA {grade_raw} (we buy {PSA_MIN_GRADE}-10 only)")
     last_sale = comp.get('lastSaleDate')
     if not last_sale:
@@ -584,16 +591,110 @@ welcomed_tickets = set()
 last_offer = {}
 channel_sheet = {}
 
+# ── BUYING MINIMUMS ───────────────────────────────────────────────────────────
+# Two qualifying paths for a lot:
+#   1. Lot CONTAINS PSA slabs  -> need >=15 accepted slabs AND >=$3,000 combined
+#      value (slab CardLadder comp + any One Piece singles market value).
+#   2. One Piece singles ONLY  -> Collectr export must be >=$3,000 in value.
+# Slabs and singles can arrive in either order / separate messages, so we keep a
+# running per-ticket total and only let a seller proceed/ship once it qualifies.
+MIN_LOT_VALUE = 3000
+MIN_SLAB_COUNT = 15
+
+# Per-ticket running lot.  channel_id -> {"singles": float, "slab_certs": {cert: comp_value}}
+#   singles    : market value of the latest valid Collectr CSV (replaced on re-upload)
+#   slab_certs : accepted PSA certs -> comp value, accumulated & deduped by cert
+lot_state = {}
+
+def _lot_entry(channel_id):
+    return lot_state.setdefault(channel_id, {"singles": 0.0, "slab_certs": {}})
+
+def set_singles_value(channel_id, value):
+    """Latest Collectr CSV is the current truth for singles — replace, don't add."""
+    _lot_entry(channel_id)["singles"] = float(value or 0)
+
+def add_slab_values(channel_id, cert_value_map):
+    """Accumulate accepted slab certs (deduped by cert so re-sends don't double-count)."""
+    entry = _lot_entry(channel_id)
+    for cert, val in cert_value_map.items():
+        entry["slab_certs"][str(cert)] = float(val or 0)
+
+def lot_summary(channel_id):
+    """Return (slab_count, slab_value, singles_value, combined_value)."""
+    entry = lot_state.get(channel_id) or {"singles": 0.0, "slab_certs": {}}
+    slab_value = sum(entry["slab_certs"].values())
+    slab_count = len(entry["slab_certs"])
+    singles = entry["singles"]
+    return slab_count, slab_value, singles, slab_value + singles
+
+def lot_qualifies(channel_id):
+    """True if the running lot meets the buying minimums for its path."""
+    slab_count, slab_value, singles, combined = lot_summary(channel_id)
+    # One Piece singles alone at $3,000+ qualifies the whole lot — we'll take any
+    # slabs included regardless of slab count.
+    if singles >= MIN_LOT_VALUE:
+        return True
+    # Otherwise, any lot containing slabs needs 15+ slabs AND $3,000+ combined.
+    if slab_count > 0:
+        return combined >= MIN_LOT_VALUE and slab_count >= MIN_SLAB_COUNT
+    # Singles-only and under $3,000.
+    return False
+
+def proceed_or_hold_tail(channel_id):
+    """
+    Return None if the lot qualifies (caller shows its normal 'proceed' prompt).
+    Otherwise return a customer-facing message listing exactly what's missing,
+    to use INSTEAD of the proceed prompt.
+    """
+    if lot_qualifies(channel_id):
+        return None
+    slab_count, slab_value, singles, combined = lot_summary(channel_id)
+    lines = ["📊 **Heads up — this lot doesn't meet our buying minimums yet.**", ""]
+    if slab_count and singles:
+        lines.append(
+            f"PSA slabs: **{slab_count}** (${slab_value:,.2f})  •  "
+            f"One Piece singles: **${singles:,.2f}**  •  Combined: **${combined:,.2f}**"
+        )
+    elif slab_count:
+        lines.append(f"PSA slabs: **{slab_count}** (${slab_value:,.2f})")
+    else:
+        lines.append(f"One Piece singles: **${singles:,.2f}**")
+    lines.append("")
+    if slab_count > 0:
+        if slab_count < MIN_SLAB_COUNT:
+            lines.append(
+                f"• We require at least **{MIN_SLAB_COUNT} PSA slabs** — you have **{slab_count}**, "
+                f"so **{MIN_SLAB_COUNT - slab_count}** more needed."
+            )
+        if combined < MIN_LOT_VALUE:
+            lines.append(
+                f"• Combined value must be **${MIN_LOT_VALUE:,}+** — you're **${MIN_LOT_VALUE - combined:,.2f}** short."
+            )
+        lines += [
+            "",
+            "We prioritize **quantity** — we don't take just a few big slabs. Either add more **PSA slab certs** "
+            "to reach 15, **or** get your **One Piece singles alone to $3,000+** (upload your Collectr CSV) and "
+            "we'll take the slabs regardless of count. Then I'll get you set up to ship! 🙌",
+        ]
+    else:
+        lines += [
+            f"• For a One Piece singles-only lot, your Collectr export must be **${MIN_LOT_VALUE:,}+** in value — "
+            f"you're **${MIN_LOT_VALUE - singles:,.2f}** short.",
+            "",
+            "Add more **One Piece raw singles** and re-upload your Collectr CSV (or add **PSA slabs** — "
+            f"note that any lot containing slabs needs **{MIN_SLAB_COUNT}+** of them). 🙌",
+        ]
+    return "\n".join(lines)
 WELCOME_MSG = (
     "👋 Welcome to KTS Collectibles!\n\n"
     "We're currently buying:\n"
     "• **PSA graded slabs** (Pokémon, Basketball & One Piece) → send your cert numbers\n"
     "• **One Piece raw singles** (English, Near Mint, $1–$99) → upload your Collectr CSV export\n\n"
     "⚠️ We are **not** buying Pokémon raw cards at this time.\n\n"
-    "📊 **Minimum lot requirement:** We only buy lots totaling **$3,000+** in combined value (slabs + singles together). "
-    "Anything under $3,000 total we won't be able to accept.\n\n"
-    "🔢 **We prioritize quantity.** We're looking for volume — we will **not** take a lot that's just 1–3 big-ticket slabs. "
-    "Spread it across a real quantity of cards.\n\n"
+    "📊 **Minimum lot requirements:**\n"
+    "• Lots **with PSA slabs:** at least **15 slabs** AND **$3,000+** total value (slabs + any One Piece singles combined).\n"
+    "• **One Piece singles only:** your Collectr export must be **$3,000+** in value.\n\n"
+    "🔢 We prioritize **quantity** — we won't take a lot that's just a few big-ticket slabs.\n\n"
     "What are you looking to sell?"
 )
 
@@ -862,6 +963,10 @@ async def on_message(message):
                 payout = total * rate
                 last_offer[channel_id] = {"payout": payout, "total": total, "rate": rate}
 
+                # Record singles value toward the buying minimums.
+                set_singles_value(channel_id, total)
+                _sc, _sv, combined_singles, combined = lot_summary(channel_id)
+
                 # Save CSV to Google Drive
                 try:
                     import urllib.request as urlreq
@@ -880,15 +985,20 @@ async def on_message(message):
                 except Exception as e:
                     print(f"CSV Drive save error (non-critical): {e}")
 
-                await message.channel.send(
+                hold_tail = proceed_or_hold_tail(channel_id)
+                offer_body = (
                     f"✅ **Your offer:**\n\n"
                     f"📦 **{card_count} cards** | Market value: **${total:,.2f}**\n"
                     f"💰 **Payout: ${payout:,.2f}** ({int(rate*100)}%)\n\n"
-                    f"Let me know if you'd like to proceed!"
                 )
+                offer_body += hold_tail if hold_tail else "Let me know if you'd like to proceed!"
+                for chunk in _split_for_discord(offer_body):
+                    await message.channel.send(chunk)
+                kevin_prefix = "" if lot_qualifies(channel_id) else f"⏳ **[BELOW MINIMUM — HOLD]** "
                 kevin_msg = (
-                    f"💚 **Collectr offer sent — {username}** (One Piece)\n"
+                    f"{kevin_prefix}💚 **Collectr offer sent — {username}** (One Piece)\n"
                     f"{card_count} cards | ${total:,.2f} market | {int(rate*100)}% | **${payout:,.2f}**"
+                    + (f" | combined ${combined:,.2f}" if combined != total else "")
                 )
                 top = "\n".join(result["top_cards"][:3]) if result["top_cards"] else ""
                 if top:
@@ -986,6 +1096,13 @@ async def on_message(message):
                             "rate": (total_payout / total_comp) if total_comp else PSA_POKEMON_PER_CARD_TIERS[0][2],
                         }
 
+                    # Record accepted slab comp values toward the $3k combined-lot minimum.
+                    slab_value_map = {
+                        str(c.get('cert', '')).strip(): float(c['clValue'])
+                        for c in accepted if c.get('clValue') is not None
+                    }
+                    add_slab_values(channel_id, slab_value_map)
+
                     breakdown_lines = [
                         f"• {s['sport'].title()}: {s['count']} card{'s' if s['count'] != 1 else ''}, "
                         f"${s['total']:,.2f} → ${s['payout']:,.2f} ({int(s['rate']*100)}%)"
@@ -1010,6 +1127,9 @@ async def on_message(message):
                         + ("\n".join(breakdown_lines) + "\n\n" if breakdown_lines else "\n")
                         + flag_warning
                     )
+                    if n_accepted and not lot_qualifies(channel_id):
+                        _sc, _sv, _si, _cb = lot_summary(channel_id)
+                        summary = f"⏳ **[BELOW MINIMUM — HOLD]** {_sc} slab(s), combined ${_cb:,.2f}\n" + summary
                     await ping_kevin(summary + "\n".join(kevin_lines), message.channel)
 
                     # Customer follow-up
@@ -1035,11 +1155,15 @@ async def on_message(message):
                             )
                         customer_parts += [f"• `{cert}` — {reason}" for cert, reason in rejected]
                     if n_accepted > 0:
-                        customer_parts += [
-                            "",
-                            "Let me know if you'd like to proceed!" if not rejected
-                            else f"Let me know if you want to proceed with the {n_accepted} we can take.",
-                        ]
+                        hold_tail = proceed_or_hold_tail(channel_id)
+                        if hold_tail:
+                            customer_parts += ["", hold_tail]
+                        else:
+                            customer_parts += [
+                                "",
+                                "Let me know if you'd like to proceed!" if not rejected
+                                else f"Let me know if you want to proceed with the {n_accepted} we can take.",
+                            ]
                     customer_parts += [
                         "",
                         "If you want to see where I'm at on each individual card, click the sheet link above and request access.",
@@ -1068,6 +1192,18 @@ async def on_message(message):
 
     # ── AGREED / SHIPPING ─────────────────────────────────────────────────────────
     if is_agreeing(text):
+        # Block shipping unless the recorded lot meets the buying minimums.
+        # Fail OPEN when we have no recorded lot (e.g. bot was redeployed and lost
+        # in-memory state) so we never stonewall a seller who already got an offer.
+        if channel_id in lot_state and not lot_qualifies(channel_id):
+            _sc, _sv, _si, _cb = lot_summary(channel_id)
+            await message.channel.send(proceed_or_hold_tail(channel_id))
+            await ping_kevin(
+                f"⏳ **{username} typed 'ship' but lot is below minimum** "
+                f"({_sc} slab(s), combined ${_cb:,.2f}) — address NOT sent.",
+                message.channel
+            )
+            return
         await message.channel.send(SHIPPING_MSG)
         await ping_kevin(f"✅ **{username} agreed** — shipping address sent.", message.channel)
         if channel_id in channel_sheet:
