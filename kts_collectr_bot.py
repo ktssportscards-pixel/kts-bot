@@ -590,6 +590,10 @@ WELCOME_MSG = (
     "• **PSA graded slabs** (Pokémon, Basketball & One Piece) → send your cert numbers\n"
     "• **One Piece raw singles** (English, Near Mint, $1–$99) → upload your Collectr CSV export\n\n"
     "⚠️ We are **not** buying Pokémon raw cards at this time.\n\n"
+    "📊 **Minimum lot requirement:** We only buy lots totaling **$3,000+** in combined value (slabs + singles together). "
+    "Anything under $3,000 total we won't be able to accept.\n\n"
+    "🔢 **We prioritize quantity.** We're looking for volume — we will **not** take a lot that's just 1–3 big-ticket slabs. "
+    "Spread it across a real quantity of cards.\n\n"
     "What are you looking to sell?"
 )
 
