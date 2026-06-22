@@ -80,9 +80,18 @@ POKEMON_ANY_GRADE_MAX_PRICE = 100
 # Per-sport price ceilings — sports not listed here are rejected outright.
 PSA_SPORT_MAX_PRICE = {
     'pokemon': 175,
-    'basketball': 250,
+    'basketball': 900,
     'one piece': 200,
+    'mlb': 1000,
 }
+# Per-sport max age of last sale (days). Default is PSA_MAX_AGE_DAYS; MLB allows
+# sales within the last 3 months.
+PSA_SPORT_MAX_AGE_DAYS = {
+    'mlb': 90,
+    'basketball': 90,
+}
+# MLB cards at/above this value are accepted but FLAGGED for Kevin's manual review.
+MLB_MANUAL_REVIEW_PRICE = 500
 # CardLadder/helper may return One Piece under various names — normalize them all
 # to 'one piece' before lookup. Note: the helper returns 'other' for One Piece
 # slabs (and possibly other non-mainstream TCGs), so we map 'other' → 'one piece'
@@ -95,6 +104,8 @@ PSA_SPORT_ALIASES = {
     'pop culture': 'one piece',
     'tcg': 'one piece',
     'other': 'one piece',
+    'baseball': 'mlb',
+    'mlb': 'mlb',
 }
 
 def normalize_sport(sport_raw):
@@ -109,6 +120,37 @@ def normalize_sport(sport_raw):
     if s in PSA_SPORT_ALIASES:
         return PSA_SPORT_ALIASES[s]
     return s
+
+
+def apply_avg3_value(comp, threshold=0):
+    """
+    Set comp['clValue'] to the AVERAGE OF THE LAST 3 SALES, except when that
+    average is HIGHER than the CardLadder value — then keep the CardLadder value.
+    i.e. value = min(avg3Sales, clValue). Only applied when the CardLadder value
+    is ABOVE `threshold`; at/below threshold the CardLadder value is kept as-is.
+        MLB        -> threshold=0   (always use the avg-3 logic)
+        NBA $250+  -> threshold=250 ($1-$250 keep direct CardLadder value)
+    Mutates comp['clValue'] so every downstream step (price caps, payout, the
+    sheet's "Our comp" column G) uses this value. The original CardLadder value is
+    kept in comp['clValueRaw']. If avg3Sales isn't available, the CardLadder value
+    is left in place.
+    """
+    try:
+        cl = float(comp.get('clValue')) if comp.get('clValue') is not None else None
+    except (TypeError, ValueError):
+        cl = None
+    try:
+        avg3 = float(comp.get('avg3Sales')) if comp.get('avg3Sales') is not None else None
+    except (TypeError, ValueError):
+        avg3 = None
+    comp['clValueRaw'] = cl
+    if avg3 is not None and avg3 > 0:
+        if cl is None or cl <= 0:
+            comp['clValue'] = avg3
+        elif cl > threshold:
+            comp['clValue'] = min(avg3, cl)
+        # else cl <= threshold: keep the direct CardLadder value
+    return comp
 
 # Pokemon payout:
 #   $1-$100 cards  : rate scales with the TOTAL value of the $1-$100 Pokemon bucket
@@ -128,7 +170,14 @@ PSA_POKEMON_LOW_LOT_TIERS = [
     (10000, 15000,        0.925),  # $10,000-$15,000 → 92.5%
     (15000, float('inf'), 0.93),   # $15,000+        → 93%
 ]
-PSA_BASKETBALL_PAYOUT_RATE = 0.93
+# Basketball (NBA): $1-$250 → 95%, $250-$900 → 90%, by individual card value.
+PSA_BASKETBALL_LOW_MAX = 250
+PSA_BASKETBALL_LOW_RATE = 0.95
+PSA_BASKETBALL_HIGH_RATE = 0.90
+PSA_MLB_PER_CARD_TIERS = [
+    (0,    100,          0.95),   # $1-$100   → 95%
+    (100,  float('inf'), 0.90),   # $100-$1000 → 90%
+]
 PSA_ONE_PIECE_PER_CARD_TIERS = [
     (0,    100,          0.87),  # $1-$100 → 87%
     (100,  float('inf'), 0.84),  # $100-$200 → 84%
@@ -241,6 +290,11 @@ def _fmt_pct(rate):
     return f"{s}%"
 
 
+def _sport_label(sport):
+    """Display name for a canonical sport key (e.g. 'mlb' -> 'MLB')."""
+    return {'mlb': 'MLB', 'one piece': 'One Piece'}.get(sport, (sport or '').title())
+
+
 def _blended_per_card_rate(tiers, card_values):
     """Blend a per-card tiered rate across a list of card values."""
     if not card_values:
@@ -285,6 +339,19 @@ def _pokemon_effective_rate(card_values):
     return payout / total
 
 
+def _basketball_effective_rate(card_values):
+    """NBA: $1-$250 → 95%, $250-$900 → 90% by card value. Returns blended rate."""
+    if not card_values:
+        return PSA_BASKETBALL_LOW_RATE
+    total = sum(card_values)
+    if total <= 0:
+        return PSA_BASKETBALL_LOW_RATE
+    payout = 0.0
+    for cv in card_values:
+        payout += cv * (PSA_BASKETBALL_LOW_RATE if cv <= PSA_BASKETBALL_LOW_MAX else PSA_BASKETBALL_HIGH_RATE)
+    return payout / total
+
+
 def get_psa_payout_rate(sport, sport_lot_total, card_values=None):
     """
     Return the effective (blended) payout rate for a sport's accepted cards.
@@ -296,9 +363,11 @@ def get_psa_payout_rate(sport, sport_lot_total, card_values=None):
     if sport == 'pokemon':
         return _pokemon_effective_rate(card_values)
     if sport == 'basketball':
-        return PSA_BASKETBALL_PAYOUT_RATE
+        return _basketball_effective_rate(card_values)
     if sport == 'one piece':
         return _blended_per_card_rate(PSA_ONE_PIECE_PER_CARD_TIERS, card_values)
+    if sport == 'mlb':
+        return _blended_per_card_rate(PSA_MLB_PER_CARD_TIERS, card_values)
     return PSA_POKEMON_LOW_LOT_TIERS[0][2]
 
 # VIP rates PAUSED while we're buying One Piece raws (May 2026).
@@ -526,7 +595,7 @@ def classify_psa_comp(comp):
     max_price = PSA_SPORT_MAX_PRICE.get(sport)
     if max_price is None:
         sport_label = sport or 'unknown sport'
-        return ('rejected', f"{sport_label} (we only buy pokemon, basketball, and one piece)")
+        return ('rejected', f"{sport_label} (we only buy pokemon, basketball, mlb, and one piece)")
     if cv > max_price:
         return ('rejected', f"${cv:,.0f} (over our ${max_price} {sport} max)")
     if cv < PSA_MIN_PRICE:
@@ -548,12 +617,17 @@ def classify_psa_comp(comp):
         last_d = datetime.strptime(str(last_sale).strip(), '%Y-%m-%d').date()
     except (ValueError, AttributeError):
         return ('rejected', f"unparseable sale date '{last_sale}'")
-    if (date.today() - last_d).days > PSA_MAX_AGE_DAYS:
-        return ('rejected', f"last sale {last_sale} (>{PSA_MAX_AGE_DAYS}d ago)")
+    max_age = PSA_SPORT_MAX_AGE_DAYS.get(sport, PSA_MAX_AGE_DAYS)
+    if (date.today() - last_d).days > max_age:
+        return ('rejected', f"last sale {last_sale} (>{max_age}d ago)")
 
     # Basketball-specific rejection rules (player bans, WNBA, unlicensed flag)
     if sport == 'basketball':
         return check_basketball_rejections(comp)
+
+    # MLB: $500+ is accepted but flagged for Kevin's manual review.
+    if sport == 'mlb' and cv >= MLB_MANUAL_REVIEW_PRICE:
+        return ('flag', f"${cv:,.0f} — $500+ MLB, verify sales before paying")
 
     return ('accepted', None)
 
@@ -732,7 +806,7 @@ def proceed_or_hold_tail(channel_id):
 WELCOME_MSG = (
     "👋 Welcome to KTS Collectibles!\n\n"
     "We're currently buying:\n"
-    "• **PSA graded slabs** (Pokémon, Basketball & One Piece) → send your cert numbers\n"
+    "• **PSA graded slabs** (Pokémon, Basketball, MLB & One Piece) → send your cert numbers\n"
     "• **One Piece raw singles** (English, Near Mint, $1–$99) → upload your Collectr CSV export\n\n"
     "⚠️ We are **not** buying Pokémon raw cards at this time.\n\n"
     "📊 **Minimum lot requirements:**\n"
@@ -1086,6 +1160,15 @@ async def on_message(message):
                 comp_error = None
                 try:
                     comps = await asyncio.to_thread(lookup_comps, certs)
+                    # MLB: replace CL value with min(avg-of-last-3-sales, CL value)
+                    # BEFORE filling the sheet or classifying, so the sheet's
+                    # "Our comp" and all pricing use that value.
+                    for _c in comps:
+                        _sp = normalize_sport(_c.get('sport'))
+                        if _sp == 'mlb':
+                            apply_avg3_value(_c, threshold=0)        # MLB: always
+                        elif _sp == 'basketball':
+                            apply_avg3_value(_c, threshold=250)      # NBA: $250+ only
                     if sheet_id and comps:
                         await asyncio.to_thread(fill_buying_sheet, sheet_id, comps)
                 except Exception as e:
@@ -1155,7 +1238,7 @@ async def on_message(message):
                     add_slab_values(channel_id, slab_value_map)
 
                     breakdown_lines = [
-                        f"• {s['sport'].title()}: {s['count']} card{'s' if s['count'] != 1 else ''}, "
+                        f"• {_sport_label(s['sport'])}: {s['count']} card{'s' if s['count'] != 1 else ''}, "
                         f"${s['total']:,.2f} → ${s['payout']:,.2f} ({_fmt_pct(s['rate'])})"
                         for s in sport_breakdown
                     ]
