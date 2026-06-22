@@ -594,7 +594,7 @@ WELCOME_MSG = (
 )
 
 SHIPPING_MSG = (
-    "📦 **Awesome, let's do it!** Ship your cards to Kevin and he'll pay you out instantly upon arrival.\n\n"
+    "📦 **Awesome, let's do it!** Ship your cards to Kevin and you'll be paid out once your package arrives and is processed.\n\n"
     "**Ship to:**\n"
     "Kevin Smith\n"
     "1363 Boylston St\n"
@@ -604,9 +604,14 @@ SHIPPING_MSG = (
     "• Your Discord username\n"
     "• Amount owed\n"
     "• Preferred payment method (PayPal F&F or Wire)\n\n"
-    "⚠️ If no note is included, payment may be delayed as we won't know who the package is from.\n\n"
-    "Payment via PayPal F&F or wire once received ⚡\n\n"
+    "📥 **Packaging requirements — please read, these affect your payout:**\n"
+    "• **Raw cards:** penny sleeve only — **no top loaders.** Cards shipped in top loaders = **2% deducted** from payout.\n"
+    "• **Slabs:** ship as-is — **no sleeves.** Slabs shipped in sleeves = **2% deducted** from payout.\n"
+    "• **No note** (or missing required info above) = **2% deducted** from payout.\n\n"
+    "⚠️ Without a note we also won't know who the package is from, so payment may be delayed on top of the deduction.\n\n"
+    "⏱️ **Payout timing:** Most payouts are completed within **24–72 hours** of your package arriving, depending on arrival time. Payment via PayPal F&F or wire ⚡\n\n"
     "Once you've shipped, **drop your tracking number here** so Kevin can keep an eye out!"
+)
 )
 
 AGREE_KEYWORDS = ["ship"]
