@@ -11,11 +11,10 @@ Handles TWO types of customers automatically:
 2. RAW CARD sellers (Collectr) — ONE PIECE ONLY (May 2026):
    - Customer uploads their Collectr CSV export in DMs
    - Bot reads it, calculates total market value
-   - One Piece English NM singles, $1-$99 per card
-   - Applies correct % based on lot size:
-       $3000 - $4000  → 86%
-       $4000 - $5000  → 87%
-       $5000+         → 88%
+   - One Piece English NM singles, $1-$150 per card
+   - Applies correct % based on lot size (low end of the range):
+       under $10k     → 85%
+       $10k+          → 88%
    - Pokémon raws are politely declined (PSA slabs still accepted)
    - Sends customer their offer
    - Pings Kevin with breakdown
@@ -54,19 +53,17 @@ YOUR_DISCORD_USER_ID     = 1120958174036500480  # Kevin's Discord user ID
 HELPER_URL               = os.environ.get("HELPER_URL", "https://helper.ktscollectibles.com")
 HELPER_API_KEY           = os.environ.get("HELPER_API_KEY", "")
 
-# Raw card payout percentages by lot size — ONE PIECE singles.
-# Singles-only lots have a $3,000 minimum (see MIN_LOT_VALUE), so the $0–$4k band
-# is really the "$3,000–$4,000" tier; it only shows on sub-minimum (held) lots,
-# which aren't actually paid out.
+# Raw card payout percentages by lot size — ONE PIECE singles (flyer Jun 2026).
+# 85% base, 88% on 10k+ lots. Always quote the low end of the range. Singles-only
+# lots still have a $3,000 minimum (see MIN_LOT_VALUE); sub-minimum lots are held.
 RAW_PAYOUT_TIERS = [
-    (0,    4000,         0.86),   # $3,000–$4,000 → 86%
-    (4000, 5000,         0.87),   # $4,000–$5,000 → 87%
-    (5000, float('inf'), 0.88),   # $5,000+       → 88%
+    (0,     10000,        0.85),   # under $10k lot → 85%
+    (10000, float('inf'), 0.88),   # $10k+ lot      → 88%
 ]
 
 # Raw card per-card price limits (One Piece)
 RAW_MIN_PRICE = 1
-RAW_MAX_PRICE = 99
+RAW_MAX_PRICE = 150
 
 # PSA slab buying criteria
 PSA_MIN_PRICE = 1
@@ -78,10 +75,12 @@ PSA_MAX_AGE_DAYS = 30
 # and its payout rate stay consistent.
 POKEMON_ANY_GRADE_MAX_PRICE = 100
 # Per-sport price ceilings — sports not listed here are rejected outright.
+# pokemon: no hard ceiling — slabs over $200 are pulled for manual pricing.
+# basketball: $1,600 top of flyer's NBA range. one piece: $100 (flyer only buys $1-$100 slabs).
 PSA_SPORT_MAX_PRICE = {
-    'pokemon': 175,
-    'basketball': 900,
-    'one piece': 200,
+    'pokemon': float('inf'),
+    'basketball': 1600,
+    'one piece': 100,
     'mlb': 1000,
 }
 # Per-sport max age of last sale (days). Default is PSA_MAX_AGE_DAYS; MLB allows
@@ -92,6 +91,10 @@ PSA_SPORT_MAX_AGE_DAYS = {
 }
 # MLB cards at/above this value are accepted but FLAGGED for Kevin's manual review.
 MLB_MANUAL_REVIEW_PRICE = 500
+# Pokémon slabs over this value are pulled OUT of the auto-quote (priced at 0%) and
+# highlighted orange on the sheet for Kevin to price by hand — the flyer's $1,000+
+# band needs modern-PSA-10 / no-BS judgment the bot can't make.
+PSA_POKEMON_MANUAL_REVIEW_OVER = 200
 # CardLadder/helper may return One Piece under various names — normalize them all
 # to 'one piece' before lookup. Note: the helper returns 'other' for One Piece
 # slabs (and possibly other non-mainstream TCGs), so we map 'other' → 'one piece'
@@ -152,35 +155,29 @@ def apply_avg3_value(comp, threshold=0):
         # else cl <= threshold: keep the direct CardLadder value
     return comp
 
-# Pokemon payout:
-#   $1-$100 cards  : rate scales with the TOTAL value of the $1-$100 Pokemon bucket
-#                    in this lot (lot-size tiers below). Any grade (see grade rules).
-#   $100-$175 cards: flat 87%, PSA 7+ (grade enforced in classify_psa_comp).
-# Basketball: flat rate.  One Piece: tiered per individual card value.
-PSA_POKEMON_LOW_MAX = 100        # cards under $100 use the lot-size tiers; $100+ → high rate
-PSA_POKEMON_HIGH_RATE = 0.87     # $100-$175 Pokemon
+# Pokemon payout (flyer Jun 2026):
+#   $1-$100 cards  : flat 91%. Any grade (see grade rules).
+#   $100-$200 cards: flat 89%, PSA 7+ (grade enforced in classify_psa_comp).
+#   over $200      : pulled for manual pricing (see PSA_POKEMON_MANUAL_REVIEW_OVER).
+# Basketball: tiered per card.  One Piece: $1-$100 → 87%.
+PSA_POKEMON_LOW_MAX = 100        # split between the two Pokémon rate tiers
+PSA_POKEMON_HIGH_RATE = 0.89     # $100-$200 Pokemon
 
-# Lot-size tiers for the $1-$100 Pokemon bucket — rate is chosen by the TOTAL
-# value of just the $1-$100 Pokemon cards in the lot.
+# Flyer pays a flat 91% on $1-$100 Pokémon — no lot-size scaling. Kept as a tier
+# table (single tier) so per-lot scaling can be re-enabled later if desired.
 PSA_POKEMON_LOW_LOT_TIERS = [
-    (0,     1500,         0.90),   # under $1,500    → 90% (base)
-    (1500,  3000,         0.91),   # $1,500-$3,000   → 91%
-    (3000,  5000,         0.915),  # $3,000-$5,000   → 91.5%
-    (5000,  10000,        0.92),   # $5,000-$10,000  → 92%
-    (10000, 15000,        0.925),  # $10,000-$15,000 → 92.5%
-    (15000, float('inf'), 0.93),   # $15,000+        → 93%
+    (0, float('inf'), 0.91),   # $1-$100 Pokémon → 91%
 ]
-# Basketball (NBA): $1-$250 → 95%, $250-$900 → 90%, by individual card value.
-PSA_BASKETBALL_LOW_MAX = 250
+# Basketball (NBA): $1-$600 → 95%, $600-$1,600 → 93%, by individual card value.
+PSA_BASKETBALL_LOW_MAX = 600
 PSA_BASKETBALL_LOW_RATE = 0.95
-PSA_BASKETBALL_HIGH_RATE = 0.90
+PSA_BASKETBALL_HIGH_RATE = 0.93
 PSA_MLB_PER_CARD_TIERS = [
     (0,    100,          0.95),   # $1-$100   → 95%
     (100,  float('inf'), 0.90),   # $100-$1000 → 90%
 ]
 PSA_ONE_PIECE_PER_CARD_TIERS = [
-    (0,    100,          0.87),  # $1-$100 → 87%
-    (100,  float('inf'), 0.84),  # $100-$200 → 84%
+    (0, 100, 0.87),  # $1-$100 → 87% (slabs over $100 rejected at the ceiling)
 ]
 
 # ── BASKETBALL-SPECIFIC REJECTION RULES ──────────────────────────────────────────
@@ -340,7 +337,8 @@ def _pokemon_effective_rate(card_values):
 
 
 def _basketball_effective_rate(card_values):
-    """NBA: $1-$250 → 95%, $250-$900 → 90% by card value. Returns blended rate."""
+    """NBA: $1-$600 → 95%, $600-$1,600 → 93% by card value. Returns blended rate.
+    A card exactly at the $600 boundary takes the lower (93%) rate."""
     if not card_values:
         return PSA_BASKETBALL_LOW_RATE
     total = sum(card_values)
@@ -348,17 +346,17 @@ def _basketball_effective_rate(card_values):
         return PSA_BASKETBALL_LOW_RATE
     payout = 0.0
     for cv in card_values:
-        payout += cv * (PSA_BASKETBALL_LOW_RATE if cv <= PSA_BASKETBALL_LOW_MAX else PSA_BASKETBALL_HIGH_RATE)
+        payout += cv * (PSA_BASKETBALL_LOW_RATE if cv < PSA_BASKETBALL_LOW_MAX else PSA_BASKETBALL_HIGH_RATE)
     return payout / total
 
 
 def get_psa_payout_rate(sport, sport_lot_total, card_values=None):
     """
     Return the effective (blended) payout rate for a sport's accepted cards.
-    - pokemon: $1-$100 cards use a lot-size tier (rate scales with that bucket's
-      total value); $100-$175 cards are flat 87%.
-    - basketball: flat rate.
-    - one piece: tiered per individual card; returns the effective blended rate.
+    - pokemon: $1-$100 → 91%, $100-$200 → 89% (over $200 pulled for manual pricing).
+    - basketball: $1-$600 → 95%, $600-$1,600 → 93%.
+    - one piece: $1-$100 → 87%.
+    - mlb: $1-$100 → 95%, $100-$1,000 → 90% (unchanged; not on the flyer).
     """
     if sport == 'pokemon':
         return _pokemon_effective_rate(card_values)
@@ -629,6 +627,12 @@ def classify_psa_comp(comp):
     if sport == 'mlb' and cv >= MLB_MANUAL_REVIEW_PRICE:
         return ('flag', f"${cv:,.0f} — $500+ MLB, verify sales before paying")
 
+    # Pokémon over $200 — pulled OUT of the auto-quote (0%) and highlighted orange
+    # on the sheet for Kevin to price by hand (flyer's high-value band needs
+    # modern-PSA-10 / no-BS judgment the bot can't make).
+    if sport == 'pokemon' and cv > PSA_POKEMON_MANUAL_REVIEW_OVER:
+        return ('review', f"${cv:,.0f} Pokémon — over ${PSA_POKEMON_MANUAL_REVIEW_OVER}, price manually")
+
     return ('accepted', None)
 
 
@@ -678,6 +682,25 @@ def fill_buying_sheet(sheet_id, comps, sheet_name="Form. Put Date Here."):
             updates.append({'range': f'J{row}', 'values': [[c['lastSaleDate']]]})
     if updates:
         sheet.batch_update(updates, value_input_option="USER_ENTERED")
+
+
+def highlight_certs_review(sheet_id, certs, sheet_name="Form. Put Date Here."):
+    """Shade the rows of the given certs bright orange so Kevin can't miss them and
+    knows to price them by hand (Pokémon slabs over $200 — see classify_psa_comp).
+    Best-effort: a failure to format must never block the quote."""
+    if not certs:
+        return
+    gc = get_gspread_client()
+    ss = gc.open_by_key(sheet_id)
+    try:
+        sheet = ss.worksheet(sheet_name)
+    except Exception:
+        sheet = ss.sheet1
+    cert_set = {str(c).strip() for c in certs}
+    orange = {"backgroundColor": {"red": 1.0, "green": 0.6, "blue": 0.0}}
+    for i, val in enumerate(sheet.col_values(2)):  # column B = cert
+        if str(val).strip() in cert_set:
+            sheet.format(f"A{i + 1}:J{i + 1}", orange)
 
 
 # ── CERT EXTRACTION ──────────────────────────────────────────────────────────────
@@ -1192,11 +1215,22 @@ async def on_message(message):
                     accepted = []
                     rejected = []
                     flagged = []   # accepted cards that need Kevin's manual review
+                    review = []    # Pokémon over $200 — priced by hand, not auto-quoted
+                    review_certs = []
                     kevin_lines = []
                     for cert in certs:
                         c = by_cert.get(str(cert).strip())
                         status, reason = classify_psa_comp(c)
-                        if status == 'accepted':
+                        if status == 'review':
+                            # Over $200 Pokémon: keep out of the auto-priced lot (0%),
+                            # highlight orange on the sheet for Kevin to quote by hand.
+                            review.append((cert, reason))
+                            review_certs.append(cert)
+                            cv = float(c['clValue'])
+                            name = (c.get('cardName') or '')[:50]
+                            grade = str(c.get('grade') or '').replace('PSA ', '').strip()
+                            kevin_lines.append(f"• `{cert}` — 🟠 **${cv:.2f}** — {name} (PSA {grade}) — {reason}")
+                        elif status == 'accepted':
                             accepted.append(c)
                             cv = float(c['clValue'])
                             name = (c.get('cardName') or '')[:50]
@@ -1213,6 +1247,13 @@ async def on_message(message):
                         else:
                             rejected.append((cert, reason))
                             kevin_lines.append(f"• `{cert}` — ❌ {reason}")
+
+                    # Shade over-$200 Pokémon orange so Kevin knows to price them by hand.
+                    if review_certs and sheet_id:
+                        try:
+                            await asyncio.to_thread(highlight_certs_review, sheet_id, review_certs)
+                        except Exception as e:
+                            print(f"Review-highlight error: {e}")
 
                     sport_groups = {}
                     for c in accepted:
@@ -1257,6 +1298,7 @@ async def on_message(message):
 
                     # Kevin DM
                     n_flagged = len(flagged)
+                    n_review = len(review)
                     flag_warning = ""
                     if n_flagged:
                         flag_warning = (
@@ -1264,14 +1306,23 @@ async def on_message(message):
                             + "\n".join([f"   - `{cert}`: {reason}" for cert, _, reason in flagged])
                             + "\n"
                         )
+                    review_warning = ""
+                    if n_review:
+                        review_warning = (
+                            f"\n🟠 **{n_review} Pokémon over $200 — price by hand** (highlighted orange on the sheet, not in the auto-quote):\n"
+                            + "\n".join([f"   - `{cert}`: {reason}" for cert, reason in review])
+                            + "\n"
+                        )
                     summary = (
                         f"📋 **PSA sheet — {username}**\n"
                         f"{len(certs)} certs | Accepted **{n_accepted}** | Comp **${total_comp:,.2f}** | Payout **${total_payout:,.2f}**"
                         f"{f' | {n_rejected} rejected' if n_rejected else ''}"
-                        f"{f' | {n_flagged} ⚠️ flagged' if n_flagged else ''}\n"
+                        f"{f' | {n_flagged} ⚠️ flagged' if n_flagged else ''}"
+                        f"{f' | {n_review} 🟠 manual' if n_review else ''}\n"
                         f"{sheet_url}\n"
                         + ("\n".join(breakdown_lines) + "\n\n" if breakdown_lines else "\n")
                         + flag_warning
+                        + review_warning
                     )
                     if n_accepted and not lot_qualifies(channel_id):
                         _sc, _sv, _si, _cb = lot_summary(channel_id)
@@ -1300,6 +1351,12 @@ async def on_message(message):
                                 f"⚠️ Unfortunately, none of these {len(certs)} cards fit our current buying criteria:"
                             )
                         customer_parts += [f"• `{cert}` — {reason}" for cert, reason in rejected]
+                    if n_review:
+                        customer_parts += [
+                            "",
+                            f"💎 {n_review} card{'s' if n_review != 1 else ''} over $200 — we'll quote {'these' if n_review != 1 else 'this'} by hand and get right back to you:",
+                            *[f"• `{cert}`" for cert, _ in review],
+                        ]
                     if n_accepted > 0:
                         hold_tail = proceed_or_hold_tail(channel_id)
                         if hold_tail:
