@@ -684,6 +684,11 @@ def fill_buying_sheet(sheet_id, comps, sheet_name="Form. Put Date Here."):
 def extract_certs(text):
     if not text:
         return []
+    # Strip out any URLs FIRST. GIF links (Tenor, Giphy, etc.) end in long numeric
+    # IDs (e.g. tenor.com/view/funny-cat-gif-25649837) that otherwise get mistaken
+    # for cert numbers. A real cert is always sent as a plain number, never in a link.
+    text = re.sub(r'https?://\S+', ' ', text)
+    text = re.sub(r'www\.\S+', ' ', text)
     numbers = re.findall(r'\b\d{7,9}\b', text)
     if not numbers:
         return []
@@ -1013,23 +1018,27 @@ async def on_message(message):
     certs = extract_certs(text) if text else []
 
     # ── WELCOME ──────────────────────────────────────────────────────────────────
-    bot_already_spoke = False
-    try:
-        async for msg in message.channel.history(limit=50):
-            if msg.author == bot.user:
-                bot_already_spoke = True
-                break
-    except Exception:
-        bot_already_spoke = channel_id in welcomed_tickets
-
-    if not bot_already_spoke:
+    # Send the welcome EXACTLY ONCE, at the very start of the ticket. We look at the
+    # OLDEST messages (where the welcome always lives) instead of the most recent —
+    # so the check never scrolls off no matter how long the ticket gets, and it
+    # still works after a bot restart (in-memory set would be empty then).
+    if channel_id not in welcomed_tickets:
+        already_welcomed = False
+        try:
+            async for msg in message.channel.history(limit=25, oldest_first=True):
+                if msg.author == bot.user and "Welcome to KTS Collectibles" in (msg.content or ""):
+                    already_welcomed = True
+                    break
+        except Exception:
+            pass
         welcomed_tickets.add(channel_id)
-        await asyncio.sleep(1)
-        await message.channel.send(WELCOME_MSG)
-        # If they already sent certs or a CSV with their first message,
-        # don't make them re-send — fall through to processing below.
-        if not (certs or csv_attachment):
-            return
+        if not already_welcomed:
+            await asyncio.sleep(1)
+            await message.channel.send(WELCOME_MSG)
+            # If they already sent certs or a CSV with their first message,
+            # don't make them re-send — fall through to processing below.
+            if not (certs or csv_attachment):
+                return
 
     # ── COLLECTR CSV (ONE PIECE) ─────────────────────────────────────────────────
     if csv_attachment:
