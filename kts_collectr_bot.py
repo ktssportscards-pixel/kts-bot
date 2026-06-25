@@ -848,7 +848,7 @@ SHIPPING_MSG = (
     "Once you've shipped, **drop your tracking number here** so Kevin can keep an eye out!"
 )
 
-AGREE_KEYWORDS = ["ship"]
+AGREE_KEYWORDS = ["ship", "proceed"]
 
 DISCORD_MAX_LEN = 2000
 
@@ -885,7 +885,10 @@ async def ping_kevin(msg, channel=None):
         print(f"Could not ping Kevin: {e}")
 
 def is_agreeing(text):
-    return text.strip().lower() == "ship"
+    # Trigger shipping when the message is just an agree word by itself
+    # ("ship" or "proceed"), tolerating trailing punctuation/spaces.
+    cleaned = text.strip().lower().strip(".!?, ")
+    return cleaned in AGREE_KEYWORDS
 
 import aiohttp.web as _ow_web
 
