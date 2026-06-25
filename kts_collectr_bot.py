@@ -77,11 +77,13 @@ POKEMON_ANY_GRADE_MAX_PRICE = 100
 # Per-sport price ceilings — sports not listed here are rejected outright.
 # pokemon: no hard ceiling — slabs over $200 are pulled for manual pricing.
 # basketball: $1,600 top of flyer's NBA range. one piece: $100 (flyer only buys $1-$100 slabs).
+# MLB is PAUSED (not buying right now). Leaving 'mlb' out of this dict makes the bot
+# reject MLB/baseball slabs. Re-add  'mlb': 1000  here to turn it back on — the MLB
+# tier/age/avg3 logic below is left dormant for exactly that.
 PSA_SPORT_MAX_PRICE = {
     'pokemon': float('inf'),
     'basketball': 1600,
     'one piece': 100,
-    'mlb': 1000,
 }
 # Per-sport max age of last sale (days). Default is PSA_MAX_AGE_DAYS; MLB allows
 # sales within the last 3 months.
@@ -90,6 +92,7 @@ PSA_SPORT_MAX_AGE_DAYS = {
     'basketball': 90,
 }
 # MLB cards at/above this value are accepted but FLAGGED for Kevin's manual review.
+# (Dormant — MLB is paused; see PSA_SPORT_MAX_PRICE.)
 MLB_MANUAL_REVIEW_PRICE = 500
 # Pokémon slabs over this value are pulled OUT of the auto-quote (priced at 0%) and
 # highlighted orange on the sheet for Kevin to price by hand — the flyer's $1,000+
@@ -107,8 +110,8 @@ PSA_SPORT_ALIASES = {
     'pop culture': 'one piece',
     'tcg': 'one piece',
     'other': 'one piece',
-    'baseball': 'mlb',
-    'mlb': 'mlb',
+    # 'baseball'/'mlb' aliases removed while MLB is paused — these now fall through
+    # and get rejected as unsupported sports. Re-add to re-enable MLB.
 }
 
 def normalize_sport(sport_raw):
@@ -172,6 +175,8 @@ PSA_POKEMON_LOW_LOT_TIERS = [
 PSA_BASKETBALL_LOW_MAX = 600
 PSA_BASKETBALL_LOW_RATE = 0.95
 PSA_BASKETBALL_HIGH_RATE = 0.93
+# MLB PAUSED — not buying MLB right now (it's left out of PSA_SPORT_MAX_PRICE, so
+# MLB slabs are rejected). These tiers stay so MLB can be switched back on later.
 PSA_MLB_PER_CARD_TIERS = [
     (0,    100,          0.95),   # $1-$100   → 95%
     (100,  float('inf'), 0.90),   # $100-$1000 → 90%
@@ -356,7 +361,7 @@ def get_psa_payout_rate(sport, sport_lot_total, card_values=None):
     - pokemon: $1-$100 → 91%, $100-$200 → 89% (over $200 pulled for manual pricing).
     - basketball: $1-$600 → 95%, $600-$1,600 → 93%.
     - one piece: $1-$100 → 87%.
-    - mlb: $1-$100 → 95%, $100-$1,000 → 90% (unchanged; not on the flyer).
+    - mlb: PAUSED — not buying MLB right now; logic kept dormant.
     """
     if sport == 'pokemon':
         return _pokemon_effective_rate(card_values)
@@ -593,7 +598,7 @@ def classify_psa_comp(comp):
     max_price = PSA_SPORT_MAX_PRICE.get(sport)
     if max_price is None:
         sport_label = sport or 'unknown sport'
-        return ('rejected', f"{sport_label} (we only buy pokemon, basketball, mlb, and one piece)")
+        return ('rejected', f"{sport_label} (we only buy pokemon, basketball, and one piece)")
     if cv > max_price:
         return ('rejected', f"${cv:,.0f} (over our ${max_price} {sport} max)")
     if cv < PSA_MIN_PRICE:
@@ -834,7 +839,7 @@ def proceed_or_hold_tail(channel_id):
 WELCOME_MSG = (
     "👋 Welcome to KTS Collectibles!\n\n"
     "We're currently buying:\n"
-    "• **PSA graded slabs** (Pokémon, Basketball, MLB & One Piece) → send your cert numbers\n"
+    "• **PSA graded slabs** (Pokémon, Basketball & One Piece) → send your cert numbers\n"
     "• **One Piece raw singles** (English, Near Mint, $1–$99) → upload your Collectr CSV export\n\n"
     "⚠️ We are **not** buying Pokémon raw cards at this time.\n\n"
     "📊 **Minimum lot requirements:**\n"
