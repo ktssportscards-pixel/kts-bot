@@ -833,18 +833,16 @@ SHIPPING_MSG = (
     "📝 **Please include a note inside your package with:**\n"
     "• Your Discord username\n"
     "• Amount owed\n"
-    "• Preferred payment method (PayPal F&F or Wire)\n\n"
+    "• Preferred payment method (Wire or ACH)\n\n"
     "📥 **Packaging requirements — please read, these affect your payout:**\n"
     "• **Raw cards:** penny sleeve only — **no top loaders.** Cards shipped in top loaders = **2% deducted** from payout.\n"
     "• **Slabs:** ship as-is — **no sleeves.** Slabs shipped in sleeves = **2% deducted** from payout.\n"
     "• **No note** (or missing required info above) = **2% deducted** from payout.\n\n"
     "⚠️ Without a note we also won't know who the package is from, so payment may be delayed on top of the deduction.\n\n"
-    "⏱️ **Payout timing:** Most payouts are completed within **24–72 hours** of your package arriving, depending on arrival time. Payment via PayPal F&F or wire ⚡\n\n"
-    "🗓️ **Want your payout the same week? Delivery day matters:**\n"
-    "• **Arrives Mon or Tue** → guaranteed same-week payout ✅\n"
-    "• **Arrives Wed** → usually same week, but there's a chance it slips ⚠️\n"
-    "• **Arrives Thu or Fri** → payout may be delayed up to a full week ⏳\n\n"
-    "👉 To **guarantee** same-week payment, time your shipment so it lands **Monday or Tuesday**.\n\n"
+    "🗓️ **Payouts run Mondays & Tuesdays only.**\n"
+    "• To get paid that week, your package needs to **arrive by Tuesday.**\n"
+    "• Arrives **Wednesday or later** → it rolls into the **next** Monday/Tuesday payout.\n\n"
+    "👉 Best move: **overnight it Monday so it lands Tuesday** — that locks in that week's payout. Payment via wire or ACH ⚡\n\n"
     "Once you've shipped, **drop your tracking number here** so Kevin can keep an eye out!"
 )
 
@@ -966,7 +964,7 @@ async def on_ready():
             print(f"owed web server failed to start: {e}")
 
 async def handle_owe(message):
-    """!owe <@seller|name> <amount> [paypal] [note...] — log a package Kevin owes (default Wire)."""
+    """!owe <@seller|name> <amount> [ach] [note...] — log a package Kevin owes (default Wire)."""
     import re as _re
     body = message.content.strip()[4:].strip()  # drop '!owe'
     if message.mentions:
@@ -978,11 +976,11 @@ async def handle_owe(message):
         body = ' '.join(toks[1:])
     m = _re.search(r'\$?\s*([\d,]+(?:\.\d{1,2})?)', body)
     if not seller or not m:
-        await message.channel.send("Usage: `!owe @seller 2400 [paypal] [note]`  (defaults to Wire)")
+        await message.channel.send("Usage: `!owe @seller 2400 [ach] [note]`  (defaults to Wire)")
         return
     amount = float(m.group(1).replace(',', ''))
-    method = 'PayPal' if 'paypal' in body.lower() else 'Wire'
-    note = _re.sub(r'\b(paypal|wire)\b', '', body.replace(m.group(0), '', 1), flags=_re.I).strip(' -')
+    method = 'ACH' if 'ach' in body.lower() else 'Wire'
+    note = _re.sub(r'\b(ach|wire)\b', '', body.replace(m.group(0), '', 1), flags=_re.I).strip(' -')
     rec = {"id": f"owed_{message.id}", "discord": seller, "amount": amount,
            "method": method, "date": date.today().isoformat(), "note": note,
            "status": "owed", "date_paid": None, "source": "bot"}
