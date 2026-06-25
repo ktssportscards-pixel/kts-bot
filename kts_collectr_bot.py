@@ -836,7 +836,7 @@ SHIPPING_MSG = (
     "• Preferred payment method (Wire or ACH)\n\n"
     "📥 **Packaging requirements — please read, these affect your payout:**\n"
     "• **Raw cards:** penny sleeve only — **no top loaders.** Cards shipped in top loaders = **2% deducted** from payout.\n"
-    "• **Slabs:** ship as-is — **no sleeves.** Slabs shipped in sleeves = **2% deducted** from payout.\n"
+    "• **Slabs:** ship as-is — **no sleeves or stickers.** Slabs shipped in sleeves or with stickers = **2% deducted** from payout.\n"
     "• **No note** (or missing required info above) = **2% deducted** from payout.\n\n"
     "⚠️ Without a note we also won't know who the package is from, so payment may be delayed on top of the deduction.\n\n"
     "🗓️ **Payouts run Thursdays & Fridays only.**\n"
