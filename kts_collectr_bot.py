@@ -839,10 +839,12 @@ SHIPPING_MSG = (
     "• **Slabs:** ship as-is — **no sleeves.** Slabs shipped in sleeves = **2% deducted** from payout.\n"
     "• **No note** (or missing required info above) = **2% deducted** from payout.\n\n"
     "⚠️ Without a note we also won't know who the package is from, so payment may be delayed on top of the deduction.\n\n"
-    "🗓️ **Payouts run Mondays & Tuesdays only.**\n"
-    "• To get paid that week, your package needs to **arrive by Tuesday.**\n"
-    "• Arrives **Wednesday or later** → it rolls into the **next** Monday/Tuesday payout.\n\n"
-    "👉 Best move: **overnight it Monday so it lands Tuesday** — that locks in that week's payout. Payment via wire or ACH ⚡\n\n"
+    "🗓️ **Payouts run Thursdays & Fridays only.**\n"
+    "It's **first come, first serve** — you join the payout queue the moment your package is scanned in on arrival.\n"
+    "• Package in **Monday** → usually paid **Thursday**\n"
+    "• Package in **Tuesday** → usually paid **Friday**\n"
+    "• Arrives later in the week → rolls into the **next** Thursday/Friday payout.\n\n"
+    "👉 Best move: **overnight it Monday so it lands Tuesday** to make that week's queue. Payment via wire or ACH ⚡\n\n"
     "Once you've shipped, **drop your tracking number here** so Kevin can keep an eye out!"
 )
 
