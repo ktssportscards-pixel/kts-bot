@@ -1077,8 +1077,8 @@ async def on_message(message):
             await handle_owe(message)
         return
 
-    # ── leaderboard command (open to anyone) — public top-suppliers board ──
-    if message.content.strip().lower() in ('!leaderboard', '!leaderboards', '!top', '!ranks', '!rankings'):
+    # ── suppliers board (open to anyone) — renamed off !leaderboard/!top to avoid Carl-bot ──
+    if message.content.strip().lower() in ('!suppliers', '!topguys', '!plugs'):
         await message.channel.send(format_leaderboard())
         return
 
