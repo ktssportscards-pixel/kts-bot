@@ -1080,6 +1080,8 @@ def format_leaderboard():
     return "\n".join(lines)
 async def _leaderboard_get(request):
     return _cors(_ow_web.json_response(LEADERBOARD))
+async def _links_get(request):
+    return _cors(_ow_web.json_response(SUPPLIER_LINKS))
 async def _leaderboard_set(request):
     try:
         body = await request.json()
@@ -1087,6 +1089,12 @@ async def _leaderboard_set(request):
         body = {}
     if body.get("key") != LEADERBOARD_KEY:
         return _cors(_ow_web.json_response({"ok": False, "error": "bad key"}, status=403))
+    # restore baked-in supplier→Discord links so they survive Railway redeploys
+    incoming_links = body.get("links")
+    if isinstance(incoming_links, dict):
+        for _k, _v in incoming_links.items():
+            SUPPLIER_LINKS[str(_k)] = _v
+        _save_links()
     new_entries = body.get("entries", [])
     # detect tier-ups vs the previously stored board
     old_tier = {e.get("name"): e.get("tier") for e in (LEADERBOARD.get("entries") or [])}
@@ -1124,6 +1132,7 @@ async def start_owed_webserver():
         _ow_web.get("/owed/paid", _owed_paid),
         _ow_web.get("/leaderboard", _leaderboard_get),
         _ow_web.post("/leaderboard", _leaderboard_set),
+        _ow_web.get("/links", _links_get),
     ])
     runner = _ow_web.AppRunner(app)
     await runner.setup()
