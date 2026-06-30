@@ -966,6 +966,50 @@ async def _owed_paid(request):
 async def _owed_root(request):
     return _cors(_ow_web.Response(text="KTS bot owed endpoint OK"))
 
+# ── LEADERBOARD (public top-suppliers board, tier-only — no dollars exposed) ──
+LEADERBOARD_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "leaderboard_store.json")
+LEADERBOARD_KEY = os.environ.get("LEADERBOARD_KEY", "kts-lb-2026")
+try:
+    with open(LEADERBOARD_FILE) as _f:
+        LEADERBOARD = json.load(_f)
+except Exception:
+    LEADERBOARD = {"updated": None, "entries": []}
+def _save_leaderboard():
+    try:
+        with open(LEADERBOARD_FILE, "w") as _f:
+            json.dump(LEADERBOARD, _f)
+    except Exception as e:
+        print(f"leaderboard save failed (non-critical): {e}")
+TIER_EMOJI = {"Diamond": "💎", "Gold": "🥇", "Silver": "🥈", "Bronze": "🥉"}
+def format_leaderboard():
+    entries = LEADERBOARD.get("entries") or []
+    if not entries:
+        return "No leaderboard yet — check back soon."
+    lines = ["🏆 **KTS Top Suppliers** 🏆"]
+    cur = None
+    for e in entries:
+        t = e.get("tier", "")
+        if t != cur:
+            cur = t
+            lines.append(f"\n{TIER_EMOJI.get(t, '•')} **{t}**")
+        lines.append(f"`#{e.get('rank',0):>2}`  {e.get('name','')}")
+    if LEADERBOARD.get("updated"):
+        lines.append(f"\n_Updated {LEADERBOARD['updated']} · ranked by all-time volume_")
+    return "\n".join(lines)
+async def _leaderboard_get(request):
+    return _cors(_ow_web.json_response(LEADERBOARD))
+async def _leaderboard_set(request):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if body.get("key") != LEADERBOARD_KEY:
+        return _cors(_ow_web.json_response({"ok": False, "error": "bad key"}, status=403))
+    LEADERBOARD["entries"] = body.get("entries", [])
+    LEADERBOARD["updated"] = body.get("updated") or date.today().isoformat()
+    _save_leaderboard()
+    return _cors(_ow_web.json_response({"ok": True, "count": len(LEADERBOARD["entries"])}))
+
 async def start_owed_webserver():
     app = _ow_web.Application()
     app.add_routes([
@@ -973,6 +1017,8 @@ async def start_owed_webserver():
         _ow_web.get("/health", _owed_root),
         _ow_web.get("/owed", _owed_get),
         _ow_web.get("/owed/paid", _owed_paid),
+        _ow_web.get("/leaderboard", _leaderboard_get),
+        _ow_web.post("/leaderboard", _leaderboard_set),
     ])
     runner = _ow_web.AppRunner(app)
     await runner.setup()
@@ -1029,6 +1075,11 @@ async def on_message(message):
     if message.content.strip().lower().startswith('!owe'):
         if message.author.id == YOUR_DISCORD_USER_ID:
             await handle_owe(message)
+        return
+
+    # ── leaderboard command (open to anyone) — public top-suppliers board ──
+    if message.content.strip().lower() in ('!leaderboard', '!leaderboards', '!top', '!ranks', '!rankings'):
+        await message.channel.send(format_leaderboard())
         return
 
     is_ticket = isinstance(message.channel, discord.TextChannel) and "ticket" in message.channel.name.lower()
