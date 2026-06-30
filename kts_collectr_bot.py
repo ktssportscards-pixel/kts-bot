@@ -736,6 +736,7 @@ def extract_certs(text):
 # ── DISCORD BOT ──────────────────────────────────────────────────────────────────
 intents = discord.Intents.default()
 intents.message_content = True
+intents.members = True  # needed to read server members + assign tier roles (enable "Server Members Intent" in the Dev Portal)
 bot = discord.Client(intents=intents)
 
 welcomed_tickets = set()
@@ -982,6 +983,80 @@ def _save_leaderboard():
         print(f"leaderboard save failed (non-critical): {e}")
 TIER_EMOJI = {"Diamond": "💎", "Gold": "🥇", "Silver": "🥈", "Bronze": "🥉"}
 TIER_RANK = {"Bronze": 1, "Silver": 2, "Gold": 3, "Diamond": 4}
+
+# ── SUPPLIER TIER ROLES (auto-assigned to the top-10 board members) ──
+LINK_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "supplier_links.json")
+try:
+    with open(LINK_FILE) as _f:
+        SUPPLIER_LINKS = json.load(_f)   # {normalized board name: discord user_id}
+except Exception:
+    SUPPLIER_LINKS = {}
+def _save_links():
+    try:
+        with open(LINK_FILE, "w") as _f:
+            json.dump(SUPPLIER_LINKS, _f)
+    except Exception as e:
+        print(f"links save failed (non-critical): {e}")
+TIER_ROLE_NAMES = {"Diamond": "💎 Diamond Supplier", "Gold": "🥇 Gold Supplier", "Silver": "🥈 Silver Supplier"}
+TIER_ROLE_COLORS = {"Diamond": 0x4DD0E1, "Gold": 0xF1C40F, "Silver": 0xBDC3C7}
+def _norm_name(s):
+    import re as _re
+    return _re.sub(r'[^a-z0-9]', '', (s or '').lower())
+def _resolve_member(guild, name):
+    """Find a guild member for a board display name: explicit link first, else username/nick match."""
+    key = _norm_name(name)
+    uid = SUPPLIER_LINKS.get(key)
+    if uid:
+        m = guild.get_member(int(uid))
+        if m:
+            return m
+    for m in guild.members:
+        if key in (_norm_name(m.name), _norm_name(getattr(m, 'global_name', '') or ''), _norm_name(m.display_name)):
+            return m
+    return None
+async def _ensure_tier_roles(guild):
+    roles = {}
+    for tier, rname in TIER_ROLE_NAMES.items():
+        role = discord.utils.get(guild.roles, name=rname)
+        if role is None:
+            try:
+                role = await guild.create_role(name=rname, colour=discord.Colour(TIER_ROLE_COLORS[tier]),
+                                                hoist=True, mentionable=False, reason="KTS supplier tier role")
+            except Exception as e:
+                print(f"could not create role {rname}: {e}")
+        roles[tier] = role
+    return roles
+async def sync_supplier_roles():
+    """Give each top-10 board member their tier role; strip tier roles from anyone who dropped off."""
+    gid = LEADERBOARD.get("guild_id")
+    guild = bot.get_guild(int(gid)) if gid else (bot.guilds[0] if bot.guilds else None)
+    if guild is None:
+        return {"ok": False, "error": "bot isn't in a server yet", "unmatched": []}
+    roles = await _ensure_tier_roles(guild)
+    all_tier_roles = {r for r in roles.values() if r}
+    desired = {}   # member.id -> tier role they should have
+    unmatched = []
+    for e in (LEADERBOARD.get("entries") or [])[:10]:
+        role = roles.get(e.get("tier"))
+        if role is None:
+            continue
+        m = _resolve_member(guild, e.get("name", ""))
+        if m is None:
+            unmatched.append(e.get("name", ""))
+            continue
+        desired[m.id] = role
+    for m in guild.members:
+        has = all_tier_roles & set(m.roles)
+        want = desired.get(m.id)
+        try:
+            if want and want not in has:
+                await m.add_roles(want, reason="KTS supplier tier")
+            for r in has:
+                if r != want:
+                    await m.remove_roles(r, reason="KTS supplier tier update")
+        except Exception as ex:
+            print(f"role update failed for {m}: {ex}")
+    return {"ok": True, "assigned": len(desired), "unmatched": unmatched}
 def _move_arrow(m):
     if m is None: return ""
     if m == "new": return "  🆕"
@@ -1029,7 +1104,16 @@ async def _leaderboard_set(request):
                     await ch.send(f"🎉 **{nm}** just climbed to {TIER_EMOJI.get(nt,'')} **{nt}** tier — up from {ot}! 🔥")
                 except Exception as ex:
                     print(f"tier-up announce failed: {ex}")
-    return _cors(_ow_web.json_response({"ok": True, "count": len(new_entries), "promos": len(promos)}))
+    role_res = {}
+    try:
+        role_res = await sync_supplier_roles()
+        if role_res.get("unmatched"):
+            print(f"role sync — unmatched (need !link): {role_res['unmatched']}")
+    except Exception as ex:
+        print(f"role sync failed: {ex}")
+    return _cors(_ow_web.json_response({"ok": True, "count": len(new_entries), "promos": len(promos),
+                                        "roles_assigned": role_res.get("assigned", 0),
+                                        "roles_unmatched": role_res.get("unmatched", [])}))
 
 async def start_owed_webserver():
     app = _ow_web.Application()
@@ -1107,8 +1191,43 @@ async def on_message(message):
     if message.content.strip().lower() == '!setboardchannel':
         if message.author.id == YOUR_DISCORD_USER_ID:
             LEADERBOARD["channel_id"] = message.channel.id
+            if message.guild:
+                LEADERBOARD["guild_id"] = message.guild.id
             _save_leaderboard()
             await message.channel.send("✅ Tier-up announcements will post in this channel.")
+        return
+
+    # ── link a board name to a Discord member, for role assignment (Kevin only) ──
+    if message.content.strip().lower().startswith('!link'):
+        if message.author.id == YOUR_DISCORD_USER_ID:
+            if message.guild:
+                LEADERBOARD["guild_id"] = message.guild.id; _save_leaderboard()
+            if not message.mentions:
+                await message.channel.send("Usage: `!link @user <board name>`  e.g. `!link @someone Valcon Vault`")
+            else:
+                import re as _re
+                nm = _re.sub(r'<@!?\d+>', '', message.content.strip()[5:]).strip()
+                if not nm:
+                    await message.channel.send("Add the board name: `!link @user Valcon Vault`")
+                else:
+                    SUPPLIER_LINKS[_norm_name(nm)] = message.mentions[0].id
+                    _save_links()
+                    await message.channel.send(f"🔗 Linked **{nm}** → {message.mentions[0].mention}. Run `!syncroles` to apply.")
+        return
+
+    # ── (re)assign supplier tier roles now (Kevin only) ──
+    if message.content.strip().lower() == '!syncroles':
+        if message.author.id == YOUR_DISCORD_USER_ID:
+            if message.guild:
+                LEADERBOARD["guild_id"] = message.guild.id; _save_leaderboard()
+            res = await sync_supplier_roles()
+            if not res.get("ok"):
+                await message.channel.send(f"⚠️ {res.get('error')}")
+            else:
+                out = f"✅ Tier roles applied to **{res.get('assigned',0)}** suppliers."
+                if res.get("unmatched"):
+                    out += "\n❓ Couldn't auto-match (tag with `!link @user <name>`): " + ", ".join(res["unmatched"])
+                await message.channel.send(out)
         return
 
     is_ticket = isinstance(message.channel, discord.TextChannel) and "ticket" in message.channel.name.lower()
