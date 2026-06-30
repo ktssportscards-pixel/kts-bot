@@ -981,6 +981,13 @@ def _save_leaderboard():
     except Exception as e:
         print(f"leaderboard save failed (non-critical): {e}")
 TIER_EMOJI = {"Diamond": "💎", "Gold": "🥇", "Silver": "🥈", "Bronze": "🥉"}
+TIER_RANK = {"Bronze": 1, "Silver": 2, "Gold": 3, "Diamond": 4}
+def _move_arrow(m):
+    if m is None: return ""
+    if m == "new": return "  🆕"
+    if isinstance(m, int) and m > 0: return f"  ▲{m}"
+    if isinstance(m, int) and m < 0: return f"  ▼{abs(m)}"
+    return "  —"
 def format_leaderboard():
     entries = LEADERBOARD.get("entries") or []
     if not entries:
@@ -992,9 +999,9 @@ def format_leaderboard():
         if t != cur:
             cur = t
             lines.append(f"\n{TIER_EMOJI.get(t, '•')} **{t}**")
-        lines.append(f"`#{e.get('rank',0):>2}`  {e.get('name','')}")
+        lines.append(f"`#{e.get('rank',0):>2}`  {e.get('name','')}{_move_arrow(e.get('move'))}")
     if LEADERBOARD.get("updated"):
-        lines.append(f"\n_Updated {LEADERBOARD['updated']} · ranked by all-time volume_")
+        lines.append(f"\n_Updated {LEADERBOARD['updated']} · ▲▼ vs last week_")
     return "\n".join(lines)
 async def _leaderboard_get(request):
     return _cors(_ow_web.json_response(LEADERBOARD))
@@ -1005,10 +1012,24 @@ async def _leaderboard_set(request):
         body = {}
     if body.get("key") != LEADERBOARD_KEY:
         return _cors(_ow_web.json_response({"ok": False, "error": "bad key"}, status=403))
-    LEADERBOARD["entries"] = body.get("entries", [])
+    new_entries = body.get("entries", [])
+    # detect tier-ups vs the previously stored board
+    old_tier = {e.get("name"): e.get("tier") for e in (LEADERBOARD.get("entries") or [])}
+    promos = [(e.get("name"), old_tier[e.get("name")], e.get("tier")) for e in new_entries
+              if e.get("name") in old_tier and TIER_RANK.get(e.get("tier"), 0) > TIER_RANK.get(old_tier[e.get("name")], 0)]
+    LEADERBOARD["entries"] = new_entries
     LEADERBOARD["updated"] = body.get("updated") or date.today().isoformat()
     _save_leaderboard()
-    return _cors(_ow_web.json_response({"ok": True, "count": len(LEADERBOARD["entries"])}))
+    cid = LEADERBOARD.get("channel_id")
+    if cid and promos:
+        ch = bot.get_channel(cid)
+        if ch:
+            for nm, ot, nt in promos:
+                try:
+                    await ch.send(f"🎉 **{nm}** just climbed to {TIER_EMOJI.get(nt,'')} **{nt}** tier — up from {ot}! 🔥")
+                except Exception as ex:
+                    print(f"tier-up announce failed: {ex}")
+    return _cors(_ow_web.json_response({"ok": True, "count": len(new_entries), "promos": len(promos)}))
 
 async def start_owed_webserver():
     app = _ow_web.Application()
@@ -1080,6 +1101,14 @@ async def on_message(message):
     # ── suppliers board (open to anyone) — renamed off !leaderboard/!top to avoid Carl-bot ──
     if message.content.strip().lower() in ('!suppliers', '!topguys', '!plugs'):
         await message.channel.send(format_leaderboard())
+        return
+
+    # ── set this channel for tier-up announcements (Kevin only) ──
+    if message.content.strip().lower() == '!setboardchannel':
+        if message.author.id == YOUR_DISCORD_USER_ID:
+            LEADERBOARD["channel_id"] = message.channel.id
+            _save_leaderboard()
+            await message.channel.send("✅ Tier-up announcements will post in this channel.")
         return
 
     is_ticket = isinstance(message.channel, discord.TextChannel) and "ticket" in message.channel.name.lower()
