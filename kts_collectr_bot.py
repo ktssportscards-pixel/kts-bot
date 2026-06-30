@@ -1036,7 +1036,7 @@ async def sync_supplier_roles():
     all_tier_roles = {r for r in roles.values() if r}
     desired = {}   # member.id -> tier role they should have
     unmatched = []
-    for e in (LEADERBOARD.get("entries") or [])[:10]:
+    for e in (LEADERBOARD.get("entries") or []):   # roles for EVERYONE over the tier bar, not just top 10
         role = roles.get(e.get("tier"))
         if role is None:
             continue
@@ -1069,7 +1069,7 @@ def format_leaderboard():
         return "No leaderboard yet — check back soon."
     lines = ["🏆 **KTS Top Suppliers** 🏆"]
     cur = None
-    for e in entries:
+    for e in entries[:10]:   # public board shows top 10 only (roles still go to everyone over the tier bar)
         t = e.get("tier", "")
         if t != cur:
             cur = t
