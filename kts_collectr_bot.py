@@ -84,9 +84,11 @@ PSA_SPORT_MAX_PRICE = {
     'pokemon': float('inf'),
     'basketball': 1600,
     'one piece': 100,
+    'football': 500,   # NFL slabs, approved Jul 2026
 }
 # Per-sport max age of last sale (days). Default is PSA_MAX_AGE_DAYS; MLB allows
-# sales within the last 3 months.
+# sales within the last 3 months. NFL/football age is value-dependent — handled
+# directly in classify_psa_comp, not here.
 PSA_SPORT_MAX_AGE_DAYS = {
     'mlb': 90,
     'basketball': 90,
@@ -110,6 +112,8 @@ PSA_SPORT_ALIASES = {
     'pop culture': 'one piece',
     'tcg': 'one piece',
     'other': 'one piece',
+    'nfl': 'football',
+    'football': 'football',
     # 'baseball'/'mlb' aliases removed while MLB is paused — these now fall through
     # and get rejected as unsupported sports. Re-add to re-enable MLB.
 }
@@ -183,6 +187,14 @@ PSA_MLB_PER_CARD_TIERS = [
 ]
 PSA_ONE_PIECE_PER_CARD_TIERS = [
     (0, 100, 0.87),  # $1-$100 → 87% (slabs over $100 rejected at the ceiling)
+]
+# NFL / football (approved Jul 2026). PSA 7+. Ceiling $500. Under $100 just needs
+# one recorded sale (any date); $100-$500 needs a sale within 90 days — the age
+# rule is value-dependent and enforced in classify_psa_comp.
+PSA_FOOTBALL_PER_CARD_TIERS = [
+    (0,   30,           1.00),   # $1-$30    → 100%
+    (30,  100,          0.95),   # $30-$100  → 95%
+    (100, float('inf'), 0.90),   # $100-$500 → 90%
 ]
 
 # ── BASKETBALL-SPECIFIC REJECTION RULES ──────────────────────────────────────────
@@ -361,6 +373,7 @@ def get_psa_payout_rate(sport, sport_lot_total, card_values=None):
     - pokemon: $1-$100 → 91%, $100-$200 → 89% (over $200 pulled for manual pricing).
     - basketball: $1-$600 → 95%, $600-$1,600 → 93%.
     - one piece: $1-$100 → 87%.
+    - football: $1-$30 → 100%, $30-$100 → 95%, $100-$500 → 90%.
     - mlb: PAUSED — not buying MLB right now; logic kept dormant.
     """
     if sport == 'pokemon':
@@ -369,6 +382,8 @@ def get_psa_payout_rate(sport, sport_lot_total, card_values=None):
         return _basketball_effective_rate(card_values)
     if sport == 'one piece':
         return _blended_per_card_rate(PSA_ONE_PIECE_PER_CARD_TIERS, card_values)
+    if sport == 'football':
+        return _blended_per_card_rate(PSA_FOOTBALL_PER_CARD_TIERS, card_values)
     if sport == 'mlb':
         return _blended_per_card_rate(PSA_MLB_PER_CARD_TIERS, card_values)
     return PSA_POKEMON_LOW_LOT_TIERS[0][2]
@@ -598,7 +613,7 @@ def classify_psa_comp(comp):
     max_price = PSA_SPORT_MAX_PRICE.get(sport)
     if max_price is None:
         sport_label = sport or 'unknown sport'
-        return ('rejected', f"{sport_label} (we only buy pokemon, basketball, and one piece)")
+        return ('rejected', f"{sport_label} (we only buy pokemon, basketball, football, and one piece)")
     if cv > max_price:
         return ('rejected', f"${cv:,.0f} (over our ${max_price} {sport} max)")
     if cv < PSA_MIN_PRICE:
@@ -620,9 +635,14 @@ def classify_psa_comp(comp):
         last_d = datetime.strptime(str(last_sale).strip(), '%Y-%m-%d').date()
     except (ValueError, AttributeError):
         return ('rejected', f"unparseable sale date '{last_sale}'")
-    max_age = PSA_SPORT_MAX_AGE_DAYS.get(sport, PSA_MAX_AGE_DAYS)
+    if sport == 'football':
+        # NFL: no sale-age limit under $100 (just needs one sale on record);
+        # $100-$500 must have sold within the last 90 days.
+        max_age = float('inf') if cv < 100 else 90
+    else:
+        max_age = PSA_SPORT_MAX_AGE_DAYS.get(sport, PSA_MAX_AGE_DAYS)
     if (date.today() - last_d).days > max_age:
-        return ('rejected', f"last sale {last_sale} (>{max_age}d ago)")
+        return ('rejected', f"last sale {last_sale} (>{max_age:g}d ago)")
 
     # Basketball-specific rejection rules (player bans, WNBA, unlicensed flag)
     if sport == 'basketball':
@@ -840,7 +860,7 @@ def proceed_or_hold_tail(channel_id):
 WELCOME_MSG = (
     "👋 Welcome to KTS Collectibles!\n\n"
     "We're currently buying:\n"
-    "• **PSA graded slabs** (Pokémon, Basketball & One Piece) → send your cert numbers\n"
+    "• **PSA graded slabs** (Pokémon, Basketball, Football & One Piece) → send your cert numbers\n"
     "• **One Piece raw singles** (English, Near Mint, $1–$99) → upload your Collectr CSV export\n\n"
     "⚠️ We are **not** buying Pokémon raw cards at this time.\n\n"
     "📊 **Minimum lot requirements:**\n"
