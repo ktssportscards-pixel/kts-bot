@@ -69,37 +69,33 @@ RAW_MAX_PRICE = 150
 PSA_MIN_PRICE = 1
 PSA_MIN_GRADE = 7
 PSA_MAX_AGE_DAYS = 30
-# Pokémon priced under $100 are bought at ANY grade (grade floor waived). Pokémon
-# $100–$175, plus all basketball and one piece, still require PSA_MIN_GRADE+.
-# The $100 boundary mirrors the Pokémon payout-tier split so a card's grade rule
-# and its payout rate stay consistent.
-POKEMON_ANY_GRADE_MAX_PRICE = 100
+# NBA slabs under $400 are bought at ANY grade (grade floor waived); everything else
+# (NBA $400+, all Pokémon, football, one piece) still requires PSA_MIN_GRADE+.
+NBA_ANY_GRADE_MAX_PRICE = 400
 # Per-sport price ceilings — sports not listed here are rejected outright.
-# pokemon: no hard ceiling — slabs over $200 are pulled for manual pricing.
-# basketball: $1,600 top of flyer's NBA range. one piece: $100 (flyer only buys $1-$100 slabs).
+# pokemon: no hard ceiling — slabs over $1,000 are pulled for manual pricing.
+# basketball: $1,500 (NBA tops out at the $1,000-$1,500 band). one piece: $100. football: $500.
 # MLB is PAUSED (not buying right now). Leaving 'mlb' out of this dict makes the bot
 # reject MLB/baseball slabs. Re-add  'mlb': 1000  here to turn it back on — the MLB
 # tier/age/avg3 logic below is left dormant for exactly that.
 PSA_SPORT_MAX_PRICE = {
     'pokemon': float('inf'),
-    'basketball': 1600,
+    'basketball': 1500,
     'one piece': 100,
     'football': 500,   # NFL slabs, approved Jul 2026
 }
-# Per-sport max age of last sale (days). Default is PSA_MAX_AGE_DAYS; MLB allows
-# sales within the last 3 months. NFL/football age is value-dependent — handled
-# directly in classify_psa_comp, not here.
+# Per-sport max age of last sale (days). pokemon / basketball / football are
+# value-dependent and handled directly in classify_psa_comp; the rest use this dict.
 PSA_SPORT_MAX_AGE_DAYS = {
     'mlb': 90,
-    'basketball': 90,
+    'one piece': 60,   # sale within the past 2 months
 }
 # MLB cards at/above this value are accepted but FLAGGED for Kevin's manual review.
 # (Dormant — MLB is paused; see PSA_SPORT_MAX_PRICE.)
 MLB_MANUAL_REVIEW_PRICE = 500
 # Pokémon slabs over this value are pulled OUT of the auto-quote (priced at 0%) and
-# highlighted orange on the sheet for Kevin to price by hand — the flyer's $1,000+
-# band needs modern-PSA-10 / no-BS judgment the bot can't make.
-PSA_POKEMON_MANUAL_REVIEW_OVER = 200
+# highlighted orange on the sheet for Kevin to price by hand.
+PSA_POKEMON_MANUAL_REVIEW_OVER = 1000
 # CardLadder/helper may return One Piece under various names — normalize them all
 # to 'one piece' before lookup. Note: the helper returns 'other' for One Piece
 # slabs (and possibly other non-mainstream TCGs), so we map 'other' → 'one piece'
@@ -162,23 +158,24 @@ def apply_avg3_value(comp, threshold=0):
         # else cl <= threshold: keep the direct CardLadder value
     return comp
 
-# Pokemon payout (flyer Jun 2026):
-#   $1-$100 cards  : flat 91%. Any grade (see grade rules).
-#   $100-$200 cards: flat 89%, PSA 7+ (grade enforced in classify_psa_comp).
-#   over $200      : pulled for manual pricing (see PSA_POKEMON_MANUAL_REVIEW_OVER).
-# Basketball: tiered per card.  One Piece: $1-$100 → 87%.
-PSA_POKEMON_LOW_MAX = 100        # split between the two Pokémon rate tiers
-PSA_POKEMON_HIGH_RATE = 0.89     # $100-$200 Pokemon
-
-# Flyer pays a flat 91% on $1-$100 Pokémon — no lot-size scaling. Kept as a tier
-# table (single tier) so per-lot scaling can be re-enabled later if desired.
-PSA_POKEMON_LOW_LOT_TIERS = [
-    (0, float('inf'), 0.91),   # $1-$100 Pokémon → 91%
+# ── PER-CARD PAYOUT TIERS BY SPORT (weekend rates, Jul 2026) ──────────────────────
+# All PSA 7-10. Reject-gaps and manual buckets are enforced in classify_psa_comp,
+# so rejected/flagged cards never reach these blends.
+# Pokémon: $1-100 → 90%, $100-175 → 88%, $225-275 → 88%, $300-1000 → 85%
+#          (reject $175-225 & $275-300; over $1000 = manual). Age: <$100 within
+#          2 months, else 1 month.
+PSA_POKEMON_PER_CARD_TIERS = [
+    (0,   100,          0.90),   # $1-$100 → 90%
+    (100, 300,          0.88),   # $100-$175 & $225-$275 → 88% (gaps rejected upstream)
+    (300, float('inf'), 0.85),   # $300-$1000 → 85% (over $1000 pulled for manual)
 ]
-# Basketball (NBA): $1-$600 → 95%, $600-$1,600 → 93%, by individual card value.
-PSA_BASKETBALL_LOW_MAX = 600
-PSA_BASKETBALL_LOW_RATE = 0.95
-PSA_BASKETBALL_HIGH_RATE = 0.93
+# Basketball (NBA): $1-400 → 95% (any grade, one sale ever), $400-600 → 92%,
+#          $1000-1500 → 92% (reject $600-1000 and over $1500). $400+ needs a sale
+#          within 90 days.
+PSA_BASKETBALL_PER_CARD_TIERS = [
+    (0,   400,          0.95),   # $1-$400 → 95%
+    (400, float('inf'), 0.92),   # $400-$600 & $1000-$1500 → 92% (gaps rejected upstream)
+]
 # MLB PAUSED — not buying MLB right now (it's left out of PSA_SPORT_MAX_PRICE, so
 # MLB slabs are rejected). These tiers stay so MLB can be switched back on later.
 PSA_MLB_PER_CARD_TIERS = [
@@ -186,7 +183,7 @@ PSA_MLB_PER_CARD_TIERS = [
     (100,  float('inf'), 0.90),   # $100-$1000 → 90%
 ]
 PSA_ONE_PIECE_PER_CARD_TIERS = [
-    (0, 100, 0.87),  # $1-$100 → 87% (slabs over $100 rejected at the ceiling)
+    (0, 100, 0.88),  # $1-$100 → 88% (slabs over $100 rejected at the ceiling)
 ]
 # NFL / football (approved Jul 2026). PSA 7+. Ceiling $500. Under $100 just needs
 # one recorded sale (any date); $100-$500 needs a sale within 90 days — the age
@@ -327,66 +324,28 @@ def _blended_per_card_rate(tiers, card_values):
     return payout / total
 
 
-def pokemon_low_lot_rate(low_bucket_total):
-    """Rate for the $1-$100 Pokemon bucket, chosen by that bucket's TOTAL value."""
-    for low, high, rate in PSA_POKEMON_LOW_LOT_TIERS:
-        if low <= low_bucket_total < high:
-            return rate
-    return PSA_POKEMON_LOW_LOT_TIERS[-1][2]
-
-
-def _pokemon_effective_rate(card_values):
-    """
-    Blend the Pokemon payout: the $1-$100 bucket gets a rate based on its TOTAL
-    value (lot-size tiers); $100-$175 cards get the flat high rate. Returns the
-    effective blended rate so sport_total * rate == total payout.
-    """
-    if not card_values:
-        return PSA_POKEMON_LOW_LOT_TIERS[0][2]
-    low_total = sum(cv for cv in card_values if cv < PSA_POKEMON_LOW_MAX)
-    high_total = sum(cv for cv in card_values if cv >= PSA_POKEMON_LOW_MAX)
-    total = low_total + high_total
-    if total <= 0:
-        return PSA_POKEMON_LOW_LOT_TIERS[0][2]
-    low_rate = pokemon_low_lot_rate(low_total)
-    payout = low_total * low_rate + high_total * PSA_POKEMON_HIGH_RATE
-    return payout / total
-
-
-def _basketball_effective_rate(card_values):
-    """NBA: $1-$600 → 95%, $600-$1,600 → 93% by card value. Returns blended rate.
-    A card exactly at the $600 boundary takes the lower (93%) rate."""
-    if not card_values:
-        return PSA_BASKETBALL_LOW_RATE
-    total = sum(card_values)
-    if total <= 0:
-        return PSA_BASKETBALL_LOW_RATE
-    payout = 0.0
-    for cv in card_values:
-        payout += cv * (PSA_BASKETBALL_LOW_RATE if cv < PSA_BASKETBALL_LOW_MAX else PSA_BASKETBALL_HIGH_RATE)
-    return payout / total
-
-
 def get_psa_payout_rate(sport, sport_lot_total, card_values=None):
     """
-    Return the effective (blended) payout rate for a sport's accepted cards.
-    - pokemon: $1-$100 → 91%, $100-$200 → 89% (over $200 pulled for manual pricing).
-    - basketball: $1-$600 → 95%, $600-$1,600 → 93%.
-    - one piece: $1-$100 → 87%.
-    - football: $1-$30 → 100%, $30-$100 → 95%, $100-$500 → 90%.
+    Return the effective (blended) per-card payout rate for a sport's accepted cards.
+    - pokemon: $1-100 → 90%, $100-175 & $225-275 → 88%, $300-1000 → 85%.
+    - basketball: $1-400 → 95%, $400-600 & $1000-1500 → 92%.
+    - one piece: $1-100 → 88%.
+    - football: $1-30 → 100%, $30-100 → 95%, $100-500 → 90%.
     - mlb: PAUSED — not buying MLB right now; logic kept dormant.
+    Reject-gaps / manual buckets are filtered in classify_psa_comp, so only in-band
+    cards reach these blends.
     """
     if sport == 'pokemon':
-        return _pokemon_effective_rate(card_values)
+        return _blended_per_card_rate(PSA_POKEMON_PER_CARD_TIERS, card_values)
     if sport == 'basketball':
-        return _basketball_effective_rate(card_values)
+        return _blended_per_card_rate(PSA_BASKETBALL_PER_CARD_TIERS, card_values)
     if sport == 'one piece':
         return _blended_per_card_rate(PSA_ONE_PIECE_PER_CARD_TIERS, card_values)
     if sport == 'football':
         return _blended_per_card_rate(PSA_FOOTBALL_PER_CARD_TIERS, card_values)
     if sport == 'mlb':
         return _blended_per_card_rate(PSA_MLB_PER_CARD_TIERS, card_values)
-    return PSA_POKEMON_LOW_LOT_TIERS[0][2]
+    return PSA_POKEMON_PER_CARD_TIERS[0][2]
 
 # VIP rates PAUSED while we're buying One Piece raws (May 2026).
 # Top of standard tier is 85%, so legacy VIP rates of 87/89% would exceed margin.
@@ -623,10 +582,10 @@ def classify_psa_comp(comp):
         g = float(grade_raw)
     except ValueError:
         return ('rejected', f"grade '{grade_raw}' unrecognized")
-    # Grade floor. Pokémon under $100 → ANY grade accepted; everything else
-    # (Pokémon $100+, basketball, one piece) → PSA_MIN_GRADE+.
-    pokemon_any_grade = (sport == 'pokemon' and cv < POKEMON_ANY_GRADE_MAX_PRICE)
-    if not pokemon_any_grade and g < PSA_MIN_GRADE:
+    # Grade floor. NBA under $400 → ANY grade accepted; everything else
+    # (NBA $400+, all Pokémon, football, one piece) → PSA_MIN_GRADE+.
+    nba_any_grade = (sport == 'basketball' and cv < NBA_ANY_GRADE_MAX_PRICE)
+    if not nba_any_grade and g < PSA_MIN_GRADE:
         return ('rejected', f"PSA {grade_raw} (we buy {PSA_MIN_GRADE}-10 only)")
     last_sale = comp.get('lastSaleDate')
     if not last_sale:
@@ -635,28 +594,35 @@ def classify_psa_comp(comp):
         last_d = datetime.strptime(str(last_sale).strip(), '%Y-%m-%d').date()
     except (ValueError, AttributeError):
         return ('rejected', f"unparseable sale date '{last_sale}'")
-    if sport == 'football':
-        # NFL: no sale-age limit under $100 (just needs one sale on record);
-        # $100-$500 must have sold within the last 90 days.
-        max_age = float('inf') if cv < 100 else 90
+    # Sale-age limit (days). Value-dependent for pokemon / basketball / football.
+    if sport == 'pokemon':
+        max_age = 60 if cv < 100 else 30                                    # $1-100 within 2 months, else 1 month
+    elif sport == 'basketball':
+        max_age = float('inf') if cv < NBA_ANY_GRADE_MAX_PRICE else 90      # $1-400 just needs one sale ever
+    elif sport == 'football':
+        max_age = float('inf') if cv < 100 else 90                         # $1-100 just needs one sale on record
     else:
         max_age = PSA_SPORT_MAX_AGE_DAYS.get(sport, PSA_MAX_AGE_DAYS)
     if (date.today() - last_d).days > max_age:
         return ('rejected', f"last sale {last_sale} (>{max_age:g}d ago)")
 
-    # Basketball-specific rejection rules (player bans, WNBA, unlicensed flag)
+    # NBA: reject the $600-$1000 dead zone (not a buy band), then apply player/set bans.
     if sport == 'basketball':
+        if 600 < cv < 1000:
+            return ('rejected', f"${cv:,.0f} — outside our NBA buy ranges ($600-$1,000)")
         return check_basketball_rejections(comp)
 
     # MLB: $500+ is accepted but flagged for Kevin's manual review.
     if sport == 'mlb' and cv >= MLB_MANUAL_REVIEW_PRICE:
         return ('flag', f"${cv:,.0f} — $500+ MLB, verify sales before paying")
 
-    # Pokémon over $200 — pulled OUT of the auto-quote (0%) and highlighted orange
-    # on the sheet for Kevin to price by hand (flyer's high-value band needs
-    # modern-PSA-10 / no-BS judgment the bot can't make).
-    if sport == 'pokemon' and cv > PSA_POKEMON_MANUAL_REVIEW_OVER:
-        return ('review', f"${cv:,.0f} Pokémon — over ${PSA_POKEMON_MANUAL_REVIEW_OVER}, price manually")
+    # Pokémon reject-gaps + manual bucket for very-high-value slabs.
+    if sport == 'pokemon':
+        if 175 < cv < 225 or 275 < cv < 300:
+            return ('rejected', f"${cv:,.0f} — outside our Pokémon buy ranges")
+        if cv > PSA_POKEMON_MANUAL_REVIEW_OVER:
+            return ('review',
+                    f"${cv:,.0f} Pokémon — over ${PSA_POKEMON_MANUAL_REVIEW_OVER:,.0f}, price manually")
 
     return ('accepted', None)
 
@@ -1513,7 +1479,7 @@ async def on_message(message):
                         last_offer[channel_id] = {
                             "payout": total_payout,
                             "total": total_comp,
-                            "rate": (total_payout / total_comp) if total_comp else PSA_POKEMON_LOW_LOT_TIERS[0][2],
+                            "rate": (total_payout / total_comp) if total_comp else PSA_POKEMON_PER_CARD_TIERS[0][2],
                         }
 
                     # Record accepted slab comp values toward the $3k combined-lot minimum.
