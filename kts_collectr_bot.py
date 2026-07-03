@@ -907,8 +907,17 @@ def is_agreeing(text):
 
 import aiohttp.web as _ow_web
 
+# Persistent data dir: set env DATA_DIR to a mounted Railway volume (e.g. /data) so
+# owed/leaderboard/link stores survive redeploys. Falls back to the app folder (ephemeral).
+DATA_DIR = os.environ.get("DATA_DIR") or os.path.dirname(os.path.abspath(__file__))
+try:
+    os.makedirs(DATA_DIR, exist_ok=True)
+except Exception as _e:
+    print(f"DATA_DIR not writable ({DATA_DIR}): {_e}; using app folder")
+    DATA_DIR = os.path.dirname(os.path.abspath(__file__))
+
 # ── OWED / PACKAGES — the bot stores deals and serves them to the local tracker ──
-OWED_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "owed_store.json")
+OWED_FILE = os.path.join(DATA_DIR, "owed_store.json")
 try:
     with open(OWED_FILE) as _f:
         OWED_STORE = json.load(_f)
@@ -954,7 +963,7 @@ async def _owed_root(request):
     return _cors(_ow_web.Response(text="KTS bot owed endpoint OK"))
 
 # ── LEADERBOARD (public top-suppliers board, tier-only — no dollars exposed) ──
-LEADERBOARD_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "leaderboard_store.json")
+LEADERBOARD_FILE = os.path.join(DATA_DIR, "leaderboard_store.json")
 LEADERBOARD_KEY = os.environ.get("LEADERBOARD_KEY", "kts-lb-2026")
 try:
     with open(LEADERBOARD_FILE) as _f:
@@ -971,7 +980,7 @@ TIER_EMOJI = {"Diamond": "💎", "Gold": "🥇", "Silver": "🥈", "Bronze": "�
 TIER_RANK = {"Bronze": 1, "Silver": 2, "Gold": 3, "Diamond": 4}
 
 # ── SUPPLIER TIER ROLES (auto-assigned to the top-10 board members) ──
-LINK_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "supplier_links.json")
+LINK_FILE = os.path.join(DATA_DIR, "supplier_links.json")
 try:
     with open(LINK_FILE) as _f:
         SUPPLIER_LINKS = json.load(_f)   # {normalized board name: discord user_id}
