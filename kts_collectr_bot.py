@@ -1114,9 +1114,23 @@ async def _leaderboard_set(request):
             print(f"role sync — unmatched (need !link): {role_res['unmatched']}")
     except Exception as ex:
         print(f"role sync failed: {ex}")
+    # auto-update the live pinned board message, if one exists
+    await _update_live_board()
     return _cors(_ow_web.json_response({"ok": True, "count": len(new_entries), "promos": len(promos),
                                         "roles_assigned": role_res.get("assigned", 0),
                                         "roles_unmatched": role_res.get("unmatched", [])}))
+
+async def _update_live_board():
+    bmid = LEADERBOARD.get("board_message_id"); bcid = LEADERBOARD.get("board_channel_id")
+    if not (bmid and bcid):
+        return
+    try:
+        ch = bot.get_channel(bcid)
+        if ch:
+            msg = await ch.fetch_message(bmid)
+            await msg.edit(content=format_leaderboard())
+    except Exception as ex:
+        print(f"live board update failed: {ex}")
 
 async def start_owed_webserver():
     app = _ow_web.Application()
@@ -1189,6 +1203,22 @@ async def on_message(message):
     # ── suppliers board (open to anyone) — renamed off !leaderboard/!top to avoid Carl-bot ──
     if message.content.strip().lower() in ('!suppliers', '!topguys', '!plugs'):
         await message.channel.send(format_leaderboard())
+        return
+
+    # ── post a LIVE leaderboard message here that auto-updates (Kevin only) ──
+    if message.content.strip().lower() == '!postboard':
+        if message.author.id == YOUR_DISCORD_USER_ID:
+            sent = await message.channel.send(format_leaderboard())
+            LEADERBOARD["board_channel_id"] = message.channel.id
+            LEADERBOARD["board_message_id"] = sent.id
+            if message.guild:
+                LEADERBOARD["guild_id"] = message.guild.id
+            _save_leaderboard()
+            try:
+                await sent.pin()
+            except Exception:
+                pass
+            await message.channel.send("✅ That's now the **live leaderboard** — it auto-updates on every refresh. (You can delete this line.)")
         return
 
     # ── set this channel for tier-up announcements (Kevin only) ──
