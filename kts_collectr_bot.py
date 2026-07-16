@@ -1267,7 +1267,15 @@ async def on_message(message):
                 await message.channel.send(out)
         return
 
-    is_ticket = isinstance(message.channel, discord.TextChannel) and "ticket" in message.channel.name.lower()
+    # A channel counts as a buying ticket if its OWN name contains "ticket" (the old
+    # naming) OR it sits under a category whose name contains "ticket". The new ticket
+    # system names each channel after the customer's Discord username (e.g.
+    # #markandjheyson) and files them all under the "open ticket" category, so the old
+    # channel-name check silently ignored every new ticket. Gating on the category
+    # keeps the bot working no matter what the individual channel is named.
+    _is_text = isinstance(message.channel, discord.TextChannel)
+    _cat_name = message.channel.category.name.lower() if _is_text and message.channel.category else ""
+    is_ticket = _is_text and ("ticket" in message.channel.name.lower() or "ticket" in _cat_name)
     if not is_ticket:
         return
 
