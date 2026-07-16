@@ -69,26 +69,28 @@ RAW_MAX_PRICE = 150
 PSA_MIN_PRICE = 1
 PSA_MIN_GRADE = 7
 PSA_MAX_AGE_DAYS = 30
-# NBA slabs under $400 are bought at ANY grade (grade floor waived); everything else
-# (NBA $400+, all Pokémon, football, one piece) still requires PSA_MIN_GRADE+.
-NBA_ANY_GRADE_MAX_PRICE = 400
-# Per-sport price ceilings — sports not listed here are rejected outright.
-# pokemon: no hard ceiling (over $1,000 pulled for manual). basketball: $1,500.
-# one piece: $100. football (NFL): $500. mlb: $300.
+# NBA slabs now require PSA 7+ like every other sport (Jul 17 weekend — the old
+# under-$400 any-grade waiver was removed). Kept at 0 so the any-grade check below
+# can never fire, and so NBA sale-age falls through to the standard 90-day window.
+NBA_ANY_GRADE_MAX_PRICE = 0
+# Per-sport price ceilings — sports not listed here are rejected outright, and any
+# slab priced ABOVE its ceiling is rejected (Jul 17 weekend flyer).
+# pokemon: $160. basketball (NBA): $200. one piece: $100. football (NFL): $100. mlb: $100.
 PSA_SPORT_MAX_PRICE = {
-    'pokemon': float('inf'),
-    'basketball': 1500,
+    'pokemon': 160,
+    'basketball': 200,
     'one piece': 100,
-    'football': 500,   # NFL slabs
-    'mlb': 300,        # MLB slabs (re-enabled Jul 10 weekend)
+    'football': 100,   # NFL slabs
+    'mlb': 100,        # MLB slabs
 }
 # Per-sport max age of last sale (days). pokemon / basketball / football / mlb are
 # value-dependent and handled directly in classify_psa_comp; the rest use this dict.
 PSA_SPORT_MAX_AGE_DAYS = {
     'one piece': 60,   # sale within the past 2 months
 }
-# Pokémon slabs over this value are pulled OUT of the auto-quote (priced at 0%) and
-# highlighted orange on the sheet for Kevin to price by hand.
+# (Jul 17: Pokémon now has a hard $160 ceiling, so nothing reaches this manual-review
+# threshold — anything over $160 is rejected outright before this check. Kept only so
+# the code path below stays valid; effectively dead while the ceiling is $160.)
 PSA_POKEMON_MANUAL_REVIEW_OVER = 1000
 # CardLadder/helper may return One Piece under various names — normalize them all
 # to 'one piece' before lookup. Note: the helper returns 'other' for One Piece
@@ -156,27 +158,23 @@ def apply_avg3_value(comp, threshold=0):
 # Low end of each flyer range. Grade, reject-zones, and the Pokémon manual bucket
 # live in classify_psa_comp, so only in-band cards reach these blends. CL-confidence
 # requirements can't be enforced (no CL score in the data) — priced on value+grade.
-# Pokémon: ≤$100 → 90%, $100-250 → 88%, $250-1000 → 86% (over $1000 = manual).
+# Pokémon (Jul 17 weekend): $1-$100 → 90%, $100-$160 → 88%.  Ceiling $160.
 PSA_POKEMON_PER_CARD_TIERS = [
     (0,      100.01,       0.90),   # $1-$100 → 90%  (.01 so exactly $100 is 90%)
-    (100.01, 250,          0.88),   # $100-$250 → 88%
-    (250,    float('inf'), 0.86),   # $250-$1000 → 86% (over $1000 pulled for manual)
+    (100.01, float('inf'), 0.88),   # $100-$160 → 88%  ($160 ceiling rejects above)
 ]
-# Basketball (NBA): $1-400 → 97% (any grade), $1000-1500 → 92% (PSA 7+).
-# Reject $400-1000 (classify_psa_comp) and over $1500 (ceiling).
+# Basketball (NBA, Jul 17 weekend): $1-$200 → 95%, PSA 7+.  Ceiling $200.
 PSA_BASKETBALL_PER_CARD_TIERS = [
-    (0,      400.01,       0.97),   # $1-$400 → 97%  (.01 so exactly $400 is 97%)
-    (400.01, float('inf'), 0.92),   # $1000-$1500 → 92% ($400-1000 rejected upstream)
+    (0, float('inf'), 0.95),   # $1-$200 → 95%  ($200 ceiling rejects above)
 ]
 PSA_ONE_PIECE_PER_CARD_TIERS = [
     (0, 100, 0.88),  # $1-$100 → 88% (slabs over $100 rejected at the ceiling)
 ]
-# NFL / football AND MLB share these rates (NFL ceiling $500, MLB ceiling $300):
-# $1-30 → 110%, $30-100 → 92%, $100-500 → 88%.  ($1-30 pays over comp value.)
+# NFL / football AND MLB share these rates (both ceiling $100, Jul 17 weekend):
+# $1-30 → 100%, $30-100 → 92%.  ($1-30 pays the full comp value.)
 PSA_FOOTBALL_PER_CARD_TIERS = [
-    (0,     30.01,        1.10),   # $1-$30   → 110%  (.01 so exactly $30 is 110%)
-    (30.01, 100,          0.92),   # $30-$100 → 92%
-    (100,   float('inf'), 0.88),   # $100-$500 → 88%
+    (0,     30.01,        1.00),   # $1-$30   → 100%  (.01 so exactly $30 is 100%)
+    (30.01, float('inf'), 0.92),   # $30-$100 → 92%  ($100 ceiling rejects above)
 ]
 
 # ── BASKETBALL-SPECIFIC REJECTION RULES ──────────────────────────────────────────
