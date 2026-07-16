@@ -730,6 +730,307 @@ def extract_certs(text):
     return unique
 
 
+# ── PSA OFFER (shared by the live path and the background comp retry) ─────────────
+# channel_id -> {"task": asyncio.Task, "certs": [...], "sheet_id", "sheet_url",
+#                "username", "spawned_at": float}. One retry per ticket; a newer
+# submission supersedes it (merging outstanding certs) via start_comp_retry, and
+# a covering live quote cancels it via cancel_comp_retry. Persisted (minus the
+# task handle) to PENDING_RETRY_FILE so redeploys don't orphan promised quotes.
+pending_comp_retries = {}
+
+def start_comp_retry(channel, channel_id, username, certs, sheet_id, sheet_url,
+                     max_attempts=15, spawned_at=None):
+    """Spawn (or supersede) the background comp retry for a ticket. If a retry is
+    already pending, its task is cancelled and any of its certs missing from the
+    new submission are merged in, so a second helper-down submission never gets
+    silently dropped. The newest sheet is used for filling/linking."""
+    old = pending_comp_retries.get(channel_id)
+    merged = list(certs)
+    if old:
+        merged = [c for c in old.get("certs", []) if c not in set(certs)] + merged
+        t = old.get("task")
+        if t is not None:
+            t.cancel()
+    entry = {
+        "certs": merged, "sheet_id": sheet_id, "sheet_url": sheet_url,
+        "username": username,
+        "spawned_at": spawned_at if spawned_at is not None else datetime.now().timestamp(),
+    }
+    entry["task"] = asyncio.create_task(retry_psa_offer_when_helper_back(
+        channel, channel_id, username, merged, sheet_id, sheet_url,
+        max_attempts=max_attempts))
+    pending_comp_retries[channel_id] = entry
+    _save_pending_retries()
+
+def cancel_comp_retry(channel_id, reason=""):
+    """Cancel and forget the pending comp retry for a ticket (if any).
+    Returns True if one existed."""
+    entry = pending_comp_retries.pop(channel_id, None)
+    if entry is None:
+        return False
+    t = entry.get("task")
+    if t is not None:
+        t.cancel()
+    _save_pending_retries()
+    if reason:
+        print(f"comp retry cancelled for {channel_id}: {reason}")
+    return True
+
+async def price_and_send_psa_offer(channel, channel_id, username, certs, comps,
+                                   sheet_id, sheet_url, delayed=False):
+    """Apply avg-3 value adjustments, fill the buying sheet, classify every cert,
+    and post the offer (customer message + Kevin ping). Shared by the live path in
+    on_message and retry_psa_offer_when_helper_back (delayed=True swaps in a
+    thanks-for-your-patience opener)."""
+    _loaded_head = ("✅ Comps are in — thanks for your patience! Here's your quote:"
+                    if delayed else "✅ All comps loaded!")
+    # MLB: replace CL value with min(avg-of-last-3-sales, CL value) BEFORE filling
+    # the sheet or classifying, so the sheet's "Our comp" and all pricing use it.
+    for _c in comps:
+        _sp = normalize_sport(_c.get('sport'))
+        if _sp == 'mlb':
+            apply_avg3_value(_c, threshold=0)        # MLB: always
+        elif _sp == 'basketball':
+            # Over-ceiling NBA cards get the avg-3 discount so a
+            # stale-high CL value doesn't auto-reject a card whose
+            # actual recent sales sit inside the $1-200 buy band.
+            # (Was hardcoded 250 — left a $200-250 gap where cards
+            # were rejected on raw CL value while identical cards
+            # above $250 got discounted and accepted.)
+            apply_avg3_value(_c, threshold=PSA_SPORT_MAX_PRICE['basketball'])
+    if sheet_id and comps:
+        try:
+            await asyncio.to_thread(fill_buying_sheet, sheet_id, comps)
+        except Exception as e:
+            print(f"Sheet fill error (offer continues): {e}")
+    by_cert = {str(c.get('cert', '')).strip(): c for c in comps}
+    accepted = []
+    rejected = []
+    flagged = []   # accepted cards that need Kevin's manual review
+    review = []    # 'review' status — priced by hand, not auto-quoted
+    review_certs = []
+    kevin_lines = []
+    for cert in certs:
+        c = by_cert.get(str(cert).strip())
+        status, reason = classify_psa_comp(c)
+        if status == 'review':
+            # Manual-review cards: keep out of the auto-priced lot (0%),
+            # highlight orange on the sheet for Kevin to quote by hand.
+            review.append((cert, reason))
+            review_certs.append(cert)
+            cv = float(c['clValue'])
+            name = (c.get('cardName') or '')[:50]
+            grade = str(c.get('grade') or '').replace('PSA ', '').strip()
+            kevin_lines.append(f"• `{cert}` — 🟠 **${cv:.2f}** — {name} (PSA {grade}) — {reason}")
+        elif status == 'accepted':
+            accepted.append(c)
+            cv = float(c['clValue'])
+            name = (c.get('cardName') or '')[:50]
+            grade = str(c.get('grade') or '').replace('PSA ', '').strip()
+            kevin_lines.append(f"• `{cert}` — **${cv:.2f}** — {name} (PSA {grade})")
+        elif status == 'flag':
+            # Still accept the card so the lot is priced, but warn Kevin.
+            accepted.append(c)
+            flagged.append((cert, c, reason))
+            cv = float(c['clValue'])
+            name = (c.get('cardName') or '')[:50]
+            grade = str(c.get('grade') or '').replace('PSA ', '').strip()
+            kevin_lines.append(f"• `{cert}` — ⚠️ **${cv:.2f}** — {name} (PSA {grade}) — {reason}")
+        else:
+            rejected.append((cert, reason))
+            kevin_lines.append(f"• `{cert}` — ❌ {reason}")
+
+    # Shade manual-review cards orange so Kevin knows to price them by hand.
+    if review_certs and sheet_id:
+        try:
+            await asyncio.to_thread(highlight_certs_review, sheet_id, review_certs)
+        except Exception as e:
+            print(f"Review-highlight error: {e}")
+
+    sport_groups = {}
+    for c in accepted:
+        sp = normalize_sport(c.get('sport'))
+        sport_groups.setdefault(sp, []).append(c)
+    sport_breakdown = []
+    for sp, comps_in_sport in sport_groups.items():
+        card_values = [float(c['clValue']) for c in comps_in_sport]
+        sport_total = sum(card_values)
+        rate = get_psa_payout_rate(sp, sport_total, card_values)
+        sport_breakdown.append({
+            'sport': sp,
+            'count': len(comps_in_sport),
+            'total': sport_total,
+            'rate': rate,
+            'payout': sport_total * rate,
+        })
+    total_comp = sum(s['total'] for s in sport_breakdown)
+    total_payout = sum(s['payout'] for s in sport_breakdown)
+    n_accepted = len(accepted)
+    n_rejected = len(rejected)
+
+    if n_accepted:
+        last_offer[channel_id] = {
+            "payout": total_payout,
+            "total": total_comp,
+            "rate": (total_payout / total_comp) if total_comp else PSA_POKEMON_PER_CARD_TIERS[0][2],
+        }
+
+    # Record accepted slab comp values toward the $3k combined-lot minimum.
+    slab_value_map = {
+        str(c.get('cert', '')).strip(): float(c['clValue'])
+        for c in accepted if c.get('clValue') is not None
+    }
+    add_slab_values(channel_id, slab_value_map)
+
+    breakdown_lines = [
+        f"• {_sport_label(s['sport'])}: {s['count']} card{'s' if s['count'] != 1 else ''}, "
+        f"${s['total']:,.2f} → ${s['payout']:,.2f} ({_fmt_pct(s['rate'])})"
+        for s in sport_breakdown
+    ]
+
+    # Kevin DM
+    n_flagged = len(flagged)
+    n_review = len(review)
+    flag_warning = ""
+    if n_flagged:
+        flag_warning = (
+            f"\n⚠️ **{n_flagged} card{'s' if n_flagged != 1 else ''} flagged for manual review** — verify licensing before paying!\n"
+            + "\n".join([f"   - `{cert}`: {reason}" for cert, _, reason in flagged])
+            + "\n"
+        )
+    review_warning = ""
+    if n_review:
+        review_warning = (
+            f"\n🟠 **{n_review} card{'s' if n_review != 1 else ''} to price by hand** (highlighted orange on the sheet, not in the auto-quote):\n"
+            + "\n".join([f"   - `{cert}`: {reason}" for cert, reason in review])
+            + "\n"
+        )
+    summary = (
+        f"📋 **PSA sheet — {username}**\n"
+        f"{len(certs)} certs | Accepted **{n_accepted}** | Comp **${total_comp:,.2f}** | Payout **${total_payout:,.2f}**"
+        f"{f' | {n_rejected} rejected' if n_rejected else ''}"
+        f"{f' | {n_flagged} ⚠️ flagged' if n_flagged else ''}"
+        f"{f' | {n_review} 🟠 manual' if n_review else ''}\n"
+        f"{sheet_url}\n"
+        + ("\n".join(breakdown_lines) + "\n\n" if breakdown_lines else "\n")
+        + flag_warning
+        + review_warning
+    )
+    if n_accepted and not lot_qualifies(channel_id):
+        _sc, _sv, _si, _cb = lot_summary(channel_id)
+        summary = f"⏳ **[BELOW MINIMUM — HOLD]** {_sc} slab(s), combined ${_cb:,.2f}\n" + summary
+    await ping_kevin(summary + "\n".join(kevin_lines), channel)
+
+    # Customer follow-up
+    customer_parts = [_loaded_head, ""]
+    if n_accepted > 0:
+        customer_parts += [
+            f"**Total comp:** ${total_comp:,.2f}",
+            f"**Total payout:** ${total_payout:,.2f}",
+            f"**Number of cards:** {n_accepted}",
+            "",
+            "**Breakdown:**",
+            *breakdown_lines,
+        ]
+    if rejected:
+        customer_parts.append("")
+        if n_accepted > 0:
+            customer_parts.append(
+                f"⚠️ {n_rejected} card{'s' if n_rejected != 1 else ''} don't fit our current buying criteria:"
+            )
+        else:
+            customer_parts.append(
+                f"⚠️ Unfortunately, none of these {len(certs)} cards fit our current buying criteria:"
+            )
+        customer_parts += [f"• `{cert}` — {reason}" for cert, reason in rejected]
+    if n_review:
+        customer_parts += [
+            "",
+            f"💎 {n_review} card{'s' if n_review != 1 else ''} we'll quote by hand and get right back to you:",
+            *[f"• `{cert}`" for cert, _ in review],
+        ]
+    if n_accepted > 0:
+        hold_tail = proceed_or_hold_tail(channel_id)
+        if hold_tail:
+            customer_parts += ["", hold_tail]
+        else:
+            customer_parts += [
+                "",
+                "Let me know if you'd like to proceed!" if not rejected
+                else f"Let me know if you want to proceed with the {n_accepted} we can take.",
+            ]
+    customer_parts += [
+        "",
+        "If you want to see where I'm at on each individual card, click the sheet link above and request access.",
+    ]
+    customer_msg = "\n".join(customer_parts)
+    for chunk in _split_for_discord(customer_msg):
+        await channel.send(chunk)
+
+async def retry_psa_offer_when_helper_back(channel, channel_id, username, certs,
+                                           sheet_id, sheet_url,
+                                           max_attempts=15, interval_s=180):
+    """The comp helper was down when these certs arrived. Keep retrying in the
+    background (every 3 min, ~45 min total — the VM watchdog usually revives the
+    helper within one cycle); when it answers, post the quote automatically so the
+    customer never has to re-send anything. Managed exclusively through
+    start_comp_retry / cancel_comp_retry; the identity checks below make a
+    superseded or cancelled task a no-op even mid-lookup."""
+    def _mine():
+        e = pending_comp_retries.get(channel_id)
+        return e is not None and e.get("task") is asyncio.current_task()
+    try:
+        for _ in range(max_attempts):
+            await asyncio.sleep(interval_s)
+            if not _mine():
+                return   # superseded or cancelled
+            try:
+                comps = await asyncio.to_thread(lookup_comps, certs)
+            except Exception:
+                continue
+            if not comps:
+                continue
+            # Require FULL coverage before quoting. lookup_comps returns partial
+            # results when only some chunks succeed — exactly what a mid-recovery
+            # helper produces — and quoting then would falsely reject every cert
+            # in the failed chunks ("no comp on CardLadder"). Genuine no-comp
+            # answers still come back as found=False ENTRIES, so a missing cert
+            # means infrastructure failure, not a missing card.
+            returned = {str(c.get('cert', '')).strip() for c in comps}
+            if any(str(c).strip() not in returned for c in certs):
+                print(f"Comp retry: {len(returned)}/{len(certs)} certs returned — "
+                      f"helper still recovering, waiting for full coverage")
+                continue
+            if not _mine():
+                return   # cancelled while the lookup was in flight
+            try:
+                await price_and_send_psa_offer(channel, channel_id, username, certs,
+                                               comps, sheet_id, sheet_url, delayed=True)
+            except (discord.NotFound, discord.Forbidden):
+                print(f"Comp retry: ticket for {username} closed before comps returned — dropping")
+            except Exception as e:
+                print(f"Delayed quote failed — {username}: {e}")
+                await ping_kevin(
+                    f"⚠️ Auto-quote after helper recovery FAILED for **{username}** "
+                    f"({len(certs)} certs) — the customer may not have seen a quote. "
+                    f"Quote manually: {sheet_url}\nError: {e}",
+                    channel
+                )
+            return
+        print(f"Comp retry gave up after {max_attempts} attempts — {username}, {len(certs)} certs")
+        await ping_kevin(
+            f"🚨 Helper stayed down ~{max_attempts * interval_s // 60} min — "
+            f"**{username}**'s {len(certs)} certs never got comps. Quote manually: {sheet_url}",
+            channel
+        )
+    finally:
+        # Only clean up our own entry — a superseding task has already replaced it.
+        e = pending_comp_retries.get(channel_id)
+        if e is not None and e.get("task") is asyncio.current_task():
+            pending_comp_retries.pop(channel_id, None)
+            _save_pending_retries()
+
+
 # ── DISCORD BOT ──────────────────────────────────────────────────────────────────
 intents = discord.Intents.default()
 intents.message_content = True
@@ -908,13 +1209,17 @@ def _split_for_discord(text, limit=DISCORD_MAX_LEN):
     return chunks
 
 async def ping_kevin(msg, channel=None):
+    """DM Kevin. Returns True if delivered, False otherwise (never raises) —
+    callers that must not lose an alert (helper_health_monitor) retry on False."""
     try:
         kevin = await bot.fetch_user(YOUR_DISCORD_USER_ID)
         channel_link = f"\n**Ticket:** <#{channel.id}>" if channel else ""
         for chunk in _split_for_discord(msg + channel_link):
             await kevin.send(chunk)
+        return True
     except Exception as e:
         print(f"Could not ping Kevin: {e}")
+        return False
 
 def is_agreeing(text):
     # Trigger shipping when the message is just an agree word by itself
@@ -1000,6 +1305,54 @@ def _save_welcomed():
 def remember_channel_sheet(channel_id, sheet_id):
     channel_sheet[channel_id] = sheet_id
     _save_channel_sheet()
+
+# Pending comp retries survive redeploys: the JSON store holds everything except
+# the task handle; on_ready re-spawns young entries (see _resume_pending_retries).
+PENDING_RETRY_FILE = os.path.join(DATA_DIR, "pending_retries_store.json")
+
+def _save_pending_retries():
+    try:
+        snap = {str(cid): {k: v for k, v in e.items() if k != "task"}
+                for cid, e in pending_comp_retries.items()}
+        with open(PENDING_RETRY_FILE, "w") as _f:
+            json.dump(snap, _f)
+    except Exception as e:
+        print(f"pending-retry store save failed (non-critical): {e}")
+
+_PENDING_RETRIES_RESUMED = False
+
+async def _resume_pending_retries():
+    """After a redeploy, re-spawn comp retries that were promised to customers
+    ("I'll keep trying...") before the restart. Entries older than the retry
+    window — or whose ticket channel no longer resolves — are dropped with a
+    ping so Kevin can quote manually instead of the promise silently dying."""
+    try:
+        with open(PENDING_RETRY_FILE) as _f:
+            saved = json.load(_f)
+    except Exception:
+        return
+    if not saved:
+        return
+    now = datetime.now().timestamp()
+    for cid_str, e in saved.items():
+        cid = int(cid_str)
+        age_s = max(0, now - float(e.get("spawned_at", 0)))
+        remaining = 15 - int(age_s // 180)
+        chan = None
+        try:
+            chan = bot.get_channel(cid) or await bot.fetch_channel(cid)
+        except Exception:
+            pass
+        if chan is None or remaining < 1:
+            await ping_kevin(
+                f"⚠️ Pending comp auto-retry for **{e.get('username')}** "
+                f"({len(e.get('certs', []))} certs) expired across a redeploy — "
+                f"quote manually: {e.get('sheet_url')}")
+            continue
+        start_comp_retry(chan, cid, e.get("username"), e.get("certs", []),
+                         e.get("sheet_id"), e.get("sheet_url"),
+                         max_attempts=remaining, spawned_at=e.get("spawned_at"))
+    _save_pending_retries()   # drops the expired/unresolvable entries
 
 def _drive_find_sheet(lookup_names, created_after=None):
     """Sync helper: search the PSA folder for a buying sheet whose name STARTS WITH
@@ -1270,10 +1623,48 @@ async def start_owed_webserver():
     print(f"✅ Owed web endpoint listening on 0.0.0.0:{port}  (GET /owed)")
 
 _OWED_WEB_STARTED = False
+_HELPER_MONITOR_STARTED = False
+
+def _helper_is_healthy():
+    """Blocking health probe of the comp helper (run via asyncio.to_thread)."""
+    import urllib.request as urlreq
+    req = urlreq.Request(f"{HELPER_URL}/health", headers={"User-Agent": "KTS-Bot/1.0"})
+    with urlreq.urlopen(req, timeout=15) as resp:
+        data = json.loads(resp.read().decode())
+    return bool(data.get("ok")) and bool(data.get("braveAttached"))
+
+async def helper_health_monitor(interval_s=300):
+    """DM Kevin when the comp helper goes down (2 consecutive failed checks, to
+    skip momentary blips — the VM watchdog usually self-heals within ~3 min) and
+    again when it recovers, so an outage never goes unnoticed."""
+    fails = 0
+    alerted_down = False
+    while True:
+        await asyncio.sleep(interval_s)
+        try:
+            healthy = await asyncio.to_thread(_helper_is_healthy)
+        except Exception:
+            healthy = False
+        if healthy:
+            if alerted_down:
+                await ping_kevin("✅ **Comp helper is back up** — cert lookups working again.")
+                alerted_down = False
+            fails = 0
+        else:
+            fails += 1
+            if fails >= 2 and not alerted_down:
+                # Only mark alerted if the DM actually went through — otherwise
+                # retry the alert on the next cycle instead of going silent.
+                alerted_down = await ping_kevin(
+                    "🚨 **Comp helper looks DOWN** (2 checks in a row). The VM "
+                    "watchdog should revive it within a few minutes and cert "
+                    "quotes will auto-retry — but if this doesn't clear in "
+                    "~10 min, check the VM."
+                )
 
 @bot.event
 async def on_ready():
-    global _OWED_WEB_STARTED
+    global _OWED_WEB_STARTED, _HELPER_MONITOR_STARTED
     print(f"✅ KTS Collectibles Bot online as {bot.user}")
     if not _OWED_WEB_STARTED:
         _OWED_WEB_STARTED = True
@@ -1281,6 +1672,13 @@ async def on_ready():
             await start_owed_webserver()
         except Exception as e:
             print(f"owed web server failed to start: {e}")
+    if not _HELPER_MONITOR_STARTED:
+        _HELPER_MONITOR_STARTED = True
+        asyncio.create_task(helper_health_monitor())
+    global _PENDING_RETRIES_RESUMED
+    if not _PENDING_RETRIES_RESUMED:
+        _PENDING_RETRIES_RESUMED = True
+        asyncio.create_task(_resume_pending_retries())
 
 async def handle_owe(message):
     """!owe <@seller|name> <amount> [ach] [note...] — log a package Kevin owes (default Wire)."""
@@ -1394,6 +1792,15 @@ async def on_message(message):
     _cat_name = message.channel.category.name.lower() if _is_text and message.channel.category else ""
     is_ticket = _is_text and ("ticket" in message.channel.name.lower() or "ticket" in _cat_name)
     if not is_ticket:
+        return
+
+    # ── cancel the pending comp auto-retry in this ticket (Kevin only) ──
+    if message.content.strip().lower() == '!cancelretry':
+        if message.author.id == YOUR_DISCORD_USER_ID:
+            if cancel_comp_retry(message.channel.id, "cancelled by Kevin via !cancelretry"):
+                await message.channel.send("🛑 Auto-retry cancelled for this ticket — it's all yours.")
+            else:
+                await message.channel.send("No pending auto-retry for this ticket.")
         return
 
     channel_id = message.channel.id
@@ -1575,6 +1982,14 @@ async def on_message(message):
     if certs:
         async with message.channel.typing():
             try:
+                # If a background comp retry is pending and this submission covers
+                # its certs (a re-send / correction), cancel it NOW — before our
+                # own lookup even starts — so the retry can't race us and post a
+                # duplicate quote. A submission of DIFFERENT certs leaves the
+                # retry running: that batch is additive and still owed its quote.
+                _pending = pending_comp_retries.get(channel_id)
+                if _pending and set(_pending.get("certs", [])) <= set(certs):
+                    cancel_comp_retry(channel_id, "covered by a live re-submission")
                 await message.channel.send(
                     f"Got it! Setting up your buying sheet for {len(certs)} cert{'s' if len(certs) > 1 else ''}... ⏳"
                 )
@@ -1592,215 +2007,46 @@ async def on_message(message):
                     f"📊 {sheet_url}"
                 )
 
-                # Now look up comps and fill the sheet (slow path).
+                # Now look up comps and price the lot (slow path).
                 comps = []
                 comp_error = None
                 try:
                     comps = await asyncio.to_thread(lookup_comps, certs)
-                    # MLB: replace CL value with min(avg-of-last-3-sales, CL value)
-                    # BEFORE filling the sheet or classifying, so the sheet's
-                    # "Our comp" and all pricing use that value.
-                    for _c in comps:
-                        _sp = normalize_sport(_c.get('sport'))
-                        if _sp == 'mlb':
-                            apply_avg3_value(_c, threshold=0)        # MLB: always
-                        elif _sp == 'basketball':
-                            # Over-ceiling NBA cards get the avg-3 discount so a
-                            # stale-high CL value doesn't auto-reject a card whose
-                            # actual recent sales sit inside the $1-200 buy band.
-                            # (Was hardcoded 250 — left a $200-250 gap where cards
-                            # were rejected on raw CL value while identical cards
-                            # above $250 got discounted and accepted.)
-                            apply_avg3_value(_c, threshold=PSA_SPORT_MAX_PRICE['basketball'])
-                    if sheet_id and comps:
-                        await asyncio.to_thread(fill_buying_sheet, sheet_id, comps)
                 except Exception as e:
                     comp_error = str(e)
                     print(f"Helper comp lookup error: {e}")
 
                 if comps:
-                    by_cert = {str(c.get('cert', '')).strip(): c for c in comps}
-                    accepted = []
-                    rejected = []
-                    flagged = []   # accepted cards that need Kevin's manual review
-                    review = []    # 'review' status — priced by hand, not auto-quoted
-                    review_certs = []
-                    kevin_lines = []
-                    for cert in certs:
-                        c = by_cert.get(str(cert).strip())
-                        status, reason = classify_psa_comp(c)
-                        if status == 'review':
-                            # Manual-review cards: keep out of the auto-priced lot (0%),
-                            # highlight orange on the sheet for Kevin to quote by hand.
-                            review.append((cert, reason))
-                            review_certs.append(cert)
-                            cv = float(c['clValue'])
-                            name = (c.get('cardName') or '')[:50]
-                            grade = str(c.get('grade') or '').replace('PSA ', '').strip()
-                            kevin_lines.append(f"• `{cert}` — 🟠 **${cv:.2f}** — {name} (PSA {grade}) — {reason}")
-                        elif status == 'accepted':
-                            accepted.append(c)
-                            cv = float(c['clValue'])
-                            name = (c.get('cardName') or '')[:50]
-                            grade = str(c.get('grade') or '').replace('PSA ', '').strip()
-                            kevin_lines.append(f"• `{cert}` — **${cv:.2f}** — {name} (PSA {grade})")
-                        elif status == 'flag':
-                            # Still accept the card so the lot is priced, but warn Kevin.
-                            accepted.append(c)
-                            flagged.append((cert, c, reason))
-                            cv = float(c['clValue'])
-                            name = (c.get('cardName') or '')[:50]
-                            grade = str(c.get('grade') or '').replace('PSA ', '').strip()
-                            kevin_lines.append(f"• `{cert}` — ⚠️ **${cv:.2f}** — {name} (PSA {grade}) — {reason}")
-                        else:
-                            rejected.append((cert, reason))
-                            kevin_lines.append(f"• `{cert}` — ❌ {reason}")
-
-                    # Shade manual-review cards orange so Kevin knows to price them by hand.
-                    if review_certs and sheet_id:
-                        try:
-                            await asyncio.to_thread(highlight_certs_review, sheet_id, review_certs)
-                        except Exception as e:
-                            print(f"Review-highlight error: {e}")
-
-                    sport_groups = {}
-                    for c in accepted:
-                        sp = normalize_sport(c.get('sport'))
-                        sport_groups.setdefault(sp, []).append(c)
-                    sport_breakdown = []
-                    for sp, comps_in_sport in sport_groups.items():
-                        card_values = [float(c['clValue']) for c in comps_in_sport]
-                        sport_total = sum(card_values)
-                        rate = get_psa_payout_rate(sp, sport_total, card_values)
-                        sport_breakdown.append({
-                            'sport': sp,
-                            'count': len(comps_in_sport),
-                            'total': sport_total,
-                            'rate': rate,
-                            'payout': sport_total * rate,
-                        })
-                    total_comp = sum(s['total'] for s in sport_breakdown)
-                    total_payout = sum(s['payout'] for s in sport_breakdown)
-                    n_accepted = len(accepted)
-                    n_rejected = len(rejected)
-
-                    if n_accepted:
-                        last_offer[channel_id] = {
-                            "payout": total_payout,
-                            "total": total_comp,
-                            "rate": (total_payout / total_comp) if total_comp else PSA_POKEMON_PER_CARD_TIERS[0][2],
-                        }
-
-                    # Record accepted slab comp values toward the $3k combined-lot minimum.
-                    slab_value_map = {
-                        str(c.get('cert', '')).strip(): float(c['clValue'])
-                        for c in accepted if c.get('clValue') is not None
-                    }
-                    add_slab_values(channel_id, slab_value_map)
-
-                    breakdown_lines = [
-                        f"• {_sport_label(s['sport'])}: {s['count']} card{'s' if s['count'] != 1 else ''}, "
-                        f"${s['total']:,.2f} → ${s['payout']:,.2f} ({_fmt_pct(s['rate'])})"
-                        for s in sport_breakdown
-                    ]
-
-                    # Kevin DM
-                    n_flagged = len(flagged)
-                    n_review = len(review)
-                    flag_warning = ""
-                    if n_flagged:
-                        flag_warning = (
-                            f"\n⚠️ **{n_flagged} card{'s' if n_flagged != 1 else ''} flagged for manual review** — verify licensing before paying!\n"
-                            + "\n".join([f"   - `{cert}`: {reason}" for cert, _, reason in flagged])
-                            + "\n"
-                        )
-                    review_warning = ""
-                    if n_review:
-                        review_warning = (
-                            f"\n🟠 **{n_review} card{'s' if n_review != 1 else ''} to price by hand** (highlighted orange on the sheet, not in the auto-quote):\n"
-                            + "\n".join([f"   - `{cert}`: {reason}" for cert, reason in review])
-                            + "\n"
-                        )
-                    summary = (
-                        f"📋 **PSA sheet — {username}**\n"
-                        f"{len(certs)} certs | Accepted **{n_accepted}** | Comp **${total_comp:,.2f}** | Payout **${total_payout:,.2f}**"
-                        f"{f' | {n_rejected} rejected' if n_rejected else ''}"
-                        f"{f' | {n_flagged} ⚠️ flagged' if n_flagged else ''}"
-                        f"{f' | {n_review} 🟠 manual' if n_review else ''}\n"
-                        f"{sheet_url}\n"
-                        + ("\n".join(breakdown_lines) + "\n\n" if breakdown_lines else "\n")
-                        + flag_warning
-                        + review_warning
-                    )
-                    if n_accepted and not lot_qualifies(channel_id):
-                        _sc, _sv, _si, _cb = lot_summary(channel_id)
-                        summary = f"⏳ **[BELOW MINIMUM — HOLD]** {_sc} slab(s), combined ${_cb:,.2f}\n" + summary
-                    await ping_kevin(summary + "\n".join(kevin_lines), message.channel)
-
-                    # Customer follow-up
-                    customer_parts = ["✅ All comps loaded!", ""]
-                    if n_accepted > 0:
-                        customer_parts += [
-                            f"**Total comp:** ${total_comp:,.2f}",
-                            f"**Total payout:** ${total_payout:,.2f}",
-                            f"**Number of cards:** {n_accepted}",
-                            "",
-                            "**Breakdown:**",
-                            *breakdown_lines,
-                        ]
-                    if rejected:
-                        customer_parts.append("")
-                        if n_accepted > 0:
-                            customer_parts.append(
-                                f"⚠️ {n_rejected} card{'s' if n_rejected != 1 else ''} don't fit our current buying criteria:"
-                            )
-                        else:
-                            customer_parts.append(
-                                f"⚠️ Unfortunately, none of these {len(certs)} cards fit our current buying criteria:"
-                            )
-                        customer_parts += [f"• `{cert}` — {reason}" for cert, reason in rejected]
-                    if n_review:
-                        customer_parts += [
-                            "",
-                            f"💎 {n_review} card{'s' if n_review != 1 else ''} we'll quote by hand and get right back to you:",
-                            *[f"• `{cert}`" for cert, _ in review],
-                        ]
-                    if n_accepted > 0:
-                        hold_tail = proceed_or_hold_tail(channel_id)
-                        if hold_tail:
-                            customer_parts += ["", hold_tail]
-                        else:
-                            customer_parts += [
-                                "",
-                                "Let me know if you'd like to proceed!" if not rejected
-                                else f"Let me know if you want to proceed with the {n_accepted} we can take.",
-                            ]
-                    customer_parts += [
-                        "",
-                        "If you want to see where I'm at on each individual card, click the sheet link above and request access.",
-                    ]
-                    customer_msg = "\n".join(customer_parts)
-                    for chunk in _split_for_discord(customer_msg):
-                        await message.channel.send(chunk)
+                    # (Any retry this submission covers was already cancelled at
+                    # submission time, before our lookup — a still-pending retry
+                    # here is for a DIFFERENT batch and keeps running.)
+                    await price_and_send_psa_offer(
+                        message.channel, channel_id, username, certs, comps,
+                        sheet_id, sheet_url)
                 else:
-                    # Helper unavailable — fall back to old behavior. Tell the
-                    # CUSTOMER too: they were just told "Pulling comps now... ⏳"
-                    # and would otherwise be left hanging forever.
+                    # Helper unavailable — tell the customer, gate "proceed"
+                    # (_lot_entry), ping Kevin, and keep retrying in the
+                    # background: when the helper comes back (the VM watchdog
+                    # usually revives it within ~3 min) the quote posts itself.
                     await message.channel.send(
-                        "⚠️ Comps are taking longer than usual — Kevin will review "
-                        "your sheet and get your quote to you shortly!"
+                        "⚠️ Comps are taking a little longer than usual — I'll "
+                        "keep trying and post your quote here as soon as they're in!"
                     )
-                    # No offer was priced: make sure a lot_state entry exists so a
-                    # premature "proceed" hits the minimum gate, not the address.
                     _lot_entry(channel_id)
                     cert_list = "\n".join([f"• `{c}`" for c in certs])
                     err_note = f"\n\n⚠️ Helper offline ({comp_error})" if comp_error else ""
                     await ping_kevin(
-                        f"📋 **PSA sheet — {username}**\n"
+                        f"📋 **PSA sheet — {username}** (comps pending, auto-retrying — "
+                        f"type `!cancelretry` in the ticket to take over manually)\n"
                         f"{len(certs)} certs | {sheet_url}{err_note}\n\n"
                         f"{cert_list}",
                         message.channel
                     )
+                    # Always (re)spawn: a second helper-down submission supersedes
+                    # the old retry and MERGES its outstanding certs, so no batch
+                    # is silently dropped.
+                    start_comp_retry(message.channel, channel_id, username, certs,
+                                     sheet_id, sheet_url)
             except Exception as e:
                 print(f"Sheet error: {e}")
                 await message.channel.send("Small hiccup — Kevin will set this up manually and be right with you!")
