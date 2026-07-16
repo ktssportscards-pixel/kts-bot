@@ -9,7 +9,7 @@ Handles TWO types of customers automatically:
    - Pings Kevin with sheet link
 
 2. RAW CARD sellers (Collectr) — ONE PIECE ONLY (May 2026):
-   - Customer uploads their Collectr CSV export in DMs
+   - Customer uploads their Collectr CSV export in their ticket channel
    - Bot reads it, calculates total market value
    - One Piece English NM singles, $1-$150 per card
    - Applies correct % based on lot size (low end of the range):
@@ -130,8 +130,11 @@ def apply_avg3_value(comp, threshold=0):
     average is HIGHER than the CardLadder value — then keep the CardLadder value.
     i.e. value = min(avg3Sales, clValue). Only applied when the CardLadder value
     is ABOVE `threshold`; at/below threshold the CardLadder value is kept as-is.
-        MLB        -> threshold=0   (always use the avg-3 logic)
-        NBA $250+  -> threshold=250 ($1-$250 keep direct CardLadder value)
+        MLB -> threshold=0 (always use the avg-3 logic)
+        NBA -> threshold=PSA_SPORT_MAX_PRICE['basketball'] (in-band cards keep the
+               direct CardLadder value; over-ceiling cards get the avg-3 discount
+               so a stale-high CL value doesn't auto-reject a card whose actual
+               recent sales sit inside the buy band)
     Mutates comp['clValue'] so every downstream step (price caps, payout, the
     sheet's "Our comp" column G) uses this value. The original CardLadder value is
     kept in comp['clValueRaw']. If avg3Sales isn't available, the CardLadder value
@@ -163,7 +166,8 @@ PSA_POKEMON_PER_CARD_TIERS = [
     (0,      100.01,       0.90),   # $1-$100 → 90%  (.01 so exactly $100 is 90%)
     (100.01, float('inf'), 0.88),   # $100-$160 → 88%  ($160 ceiling rejects above)
 ]
-# Basketball (NBA, Jul 17 weekend): $1-$200 → 95%, PSA 7+.  Ceiling $200.
+# Basketball (NBA, Jul 17 weekend): $1-$200 → 95%, ANY grade, one sale ever.
+# Ceiling $200.
 PSA_BASKETBALL_PER_CARD_TIERS = [
     (0, float('inf'), 0.95),   # $1-$200 → 95%  ($200 ceiling rejects above)
 ]
@@ -310,11 +314,12 @@ def _blended_per_card_rate(tiers, card_values):
 def get_psa_payout_rate(sport, sport_lot_total, card_values=None):
     """
     Return the effective (blended) per-card payout rate for a sport's accepted cards.
-    - pokemon: $1-100 → 90%, $100-250 → 88%, $250-1000 → 86%.
-    - basketball: $1-400 → 97%, $1000-1500 → 92%.
-    - one piece: $1-100 → 88%.
-    - football (NFL) & mlb: $1-30 → 110%, $30-100 → 92%, $100-500 → 88%.
-    Reject-zones / manual buckets are filtered in classify_psa_comp, so only in-band
+    Jul 17 weekend rates:
+    - pokemon: $1-100 → 90%, $100-160 → 88% (ceiling $160).
+    - basketball: $1-200 → 95% (ceiling $200).
+    - one piece: $1-100 → 88% (ceiling $100).
+    - football (NFL) & mlb: $1-30 → 100%, $30-100 → 92% (ceiling $100).
+    Reject-zones / ceilings are filtered in classify_psa_comp, so only in-band
     cards reach these blends.
     """
     if sport == 'pokemon':
@@ -328,7 +333,8 @@ def get_psa_payout_rate(sport, sport_lot_total, card_values=None):
     return PSA_POKEMON_PER_CARD_TIERS[0][2]
 
 # VIP rates PAUSED while we're buying One Piece raws (May 2026).
-# Top of standard tier is 85%, so legacy VIP rates of 87/89% would exceed margin.
+# Standard raw tiers are 85% (88% on $10k+ lots), so legacy VIP rates of 87/89%
+# would exceed margin on sub-$10k lots.
 # Keep lists here for easy re-enable later; treated as standard tier for now.
 VIP_CLIENTS = []
 VIP_CLIENTS_89 = []
@@ -380,7 +386,7 @@ def parse_collectr_csv(content_bytes):
     Validates cards against KTS One Piece buying requirements:
       - Must be One Piece TCG (Pokémon politely declined)
       - English only
-      - $1-$99 per card
+      - $1-$150 per card
       - Near Mint only
     """
     df = pd.read_csv(io.BytesIO(content_bytes))
@@ -442,7 +448,7 @@ def parse_collectr_csv(content_bytes):
         elif _has_non_latin_script(combined):
             non_english.append(f"• {name} ({set_name})")
 
-    # Per-card price range: $1-$99
+    # Per-card price range: $1-$150
     over_max = []
     under_min = []
     for _, row in df.iterrows():
@@ -584,7 +590,9 @@ def classify_psa_comp(comp):
         sport_label = sport or 'unknown sport'
         return ('rejected', f"{sport_label} (we only buy pokemon, basketball, football, mlb, and one piece)")
     if cv > max_price:
-        return ('rejected', f"${cv:,.0f} (over our ${max_price} {sport} max)")
+        # Two decimals so a $200.40 NBA card reads "over our $200 max" sensibly
+        # instead of the contradictory "$200 (over our $200 max)".
+        return ('rejected', f"${cv:,.2f} (over our ${max_price} {sport} max)")
     if cv < PSA_MIN_PRICE:
         return ('rejected', f"${cv:.2f} (under ${PSA_MIN_PRICE} min)")
     grade_raw = str(comp.get('grade') or '').replace('PSA', '').strip()
@@ -592,8 +600,8 @@ def classify_psa_comp(comp):
         g = float(grade_raw)
     except ValueError:
         return ('rejected', f"grade '{grade_raw}' unrecognized")
-    # Grade floor. NBA under $400 → ANY grade accepted; everything else
-    # (NBA $400+, all Pokémon, football, one piece) → PSA_MIN_GRADE+.
+    # Grade floor. NBA (whole $1-$200 band) → ANY grade accepted; everything else
+    # (all Pokémon, football, mlb, one piece) → PSA_MIN_GRADE+.
     nba_any_grade = (sport == 'basketball' and cv <= NBA_ANY_GRADE_MAX_PRICE)
     if not nba_any_grade and g < PSA_MIN_GRADE:
         return ('rejected', f"PSA {grade_raw} (we buy {PSA_MIN_GRADE}-10 only)")
@@ -608,7 +616,7 @@ def classify_psa_comp(comp):
     if sport == 'pokemon':
         max_age = 60 if cv < 100 else 30                                    # $1-100 within 2 months, else 1 month
     elif sport == 'basketball':
-        max_age = float('inf') if cv <= NBA_ANY_GRADE_MAX_PRICE else 90     # $1-400 just needs one sale ever
+        max_age = float('inf') if cv <= NBA_ANY_GRADE_MAX_PRICE else 90     # whole $1-200 band: one sale ever
     elif sport in ('football', 'mlb'):
         max_age = float('inf') if cv < 100 else 90                         # $1-100 just needs one sale on record
     else:
@@ -680,7 +688,7 @@ def fill_buying_sheet(sheet_id, comps, sheet_name="Form. Put Date Here."):
 
 def highlight_certs_review(sheet_id, certs, sheet_name="Form. Put Date Here."):
     """Shade the rows of the given certs bright orange so Kevin can't miss them and
-    knows to price them by hand (Pokémon slabs over $200 — see classify_psa_comp).
+    knows to price them by hand (cards classify_psa_comp returns as 'review').
     Best-effort: a failure to format must never block the quote."""
     if not certs:
         return
@@ -790,6 +798,12 @@ def proceed_or_hold_tail(channel_id):
     if lot_qualifies(channel_id):
         return None
     slab_count, slab_value, singles, combined = lot_summary(channel_id)
+    # Empty entry (created on the CSV-rejected / helper-down paths just to gate
+    # "proceed"): there's no priced lot to itemize, so don't tell a slab customer
+    # they're "$3,000 of One Piece singles short" — their quote simply isn't done.
+    if slab_count == 0 and singles == 0:
+        return ("⏳ **Your quote isn't finalized yet** — Kevin is reviewing it and "
+                "will confirm shortly. Hang tight!")
     lines = ["📊 **Heads up — this lot doesn't meet our buying minimums yet.**", ""]
     if slab_count and singles:
         lines.append(
@@ -830,7 +844,7 @@ WELCOME_MSG = (
     "👋 Welcome to KTS Collectibles!\n\n"
     "We're currently buying:\n"
     "• **PSA graded slabs** (Pokémon, Basketball, Football, MLB & One Piece) → send your cert numbers\n"
-    "• **One Piece raw singles** (English, Near Mint, $1–$99) → upload your Collectr CSV export\n\n"
+    "• **One Piece raw singles** (English, Near Mint, $1–$150) → upload your Collectr CSV export\n\n"
     "⚠️ We are **not** buying Pokémon raw cards at this time.\n\n"
     "📊 **Minimum lot requirements:**\n"
     "• Lots **with PSA slabs:** at least **15 slabs** AND **$3,000+** total value (slabs + any One Piece singles combined).\n"
@@ -942,6 +956,109 @@ def upsert_owed(rec):
             return
     OWED_STORE.append(rec)
     _save_owed()
+
+class _CsvDone(Exception):
+    """Control-flow sentinel: 'done with the Collectr CSV block, skip its remainder'.
+    Raised on the early-exit paths (parse error, validation issues) inside the CSV
+    branch so execution still reaches the fall-through to the PSA-cert handler —
+    a message can carry BOTH a CSV and cert numbers, and returning early used to
+    silently drop the certs. Caught before the generic `except Exception`."""
+    pass
+
+# ── PERSISTED CHANNEL STATE — survives redeploys ──────────────────────────────────
+# channel_sheet (channel -> buying sheet) and welcomed_tickets used to be memory-only,
+# so every Railway deploy wiped them: tracking numbers fell back to a fuzzy Drive
+# search (which never matched old "ticket-" channels and could match the WRONG
+# customer on short usernames) and long tickets risked re-welcomes. Persist both.
+CHANNEL_SHEET_FILE = os.path.join(DATA_DIR, "channel_sheet_store.json")
+WELCOMED_FILE = os.path.join(DATA_DIR, "welcomed_store.json")
+try:
+    with open(CHANNEL_SHEET_FILE) as _f:
+        channel_sheet.update({int(k): v for k, v in json.load(_f).items()})
+except Exception:
+    pass
+try:
+    with open(WELCOMED_FILE) as _f:
+        welcomed_tickets.update(int(x) for x in json.load(_f))
+except Exception:
+    pass
+
+def _save_channel_sheet():
+    try:
+        with open(CHANNEL_SHEET_FILE, "w") as _f:
+            json.dump({str(k): v for k, v in channel_sheet.items()}, _f)
+    except Exception as e:
+        print(f"channel_sheet store save failed (non-critical): {e}")
+
+def _save_welcomed():
+    try:
+        with open(WELCOMED_FILE, "w") as _f:
+            json.dump(list(welcomed_tickets), _f)
+    except Exception as e:
+        print(f"welcomed store save failed (non-critical): {e}")
+
+def remember_channel_sheet(channel_id, sheet_id):
+    channel_sheet[channel_id] = sheet_id
+    _save_channel_sheet()
+
+def _drive_find_sheet(lookup_names, created_after=None):
+    """Sync helper: search the PSA folder for a buying sheet whose name STARTS WITH
+    one of the lookup names (the Apps Script names sheets '<username> <source> <date>',
+    e.g. 'cwilk_sportscards. discord 7-13'). Exact-prefix match only — Drive's
+    `contains` is a loose token match, so a short username like 'mark' would happily
+    return markandjheyson's sheet and we'd write tracking to the wrong customer.
+    created_after (tz-aware datetime): skip sheets older than it — a repeat seller's
+    sheet from a PREVIOUS deal predates the current ticket channel and must never be
+    matched (we'd write this deal's tracking onto their old completed sheet).
+    Returns a sheet id or None. Blocking network call — run via asyncio.to_thread."""
+    drive = get_drive_service()
+    for lookup in lookup_names:
+        lookup = (lookup or "").strip().lower()
+        if not lookup:
+            continue
+        try:
+            results = drive.files().list(
+                q=f"'{PSA_FOLDER_ID}' in parents and name contains '{lookup}' and trashed=false",
+                fields="files(id,name,createdTime)",
+                orderBy="createdTime desc",
+                pageSize=10,
+            ).execute()
+        except Exception as e:
+            print(f"Drive lookup error for '{lookup}': {e}")
+            continue
+        for f in results.get("files", []):
+            fname = (f.get("name") or "").lower()
+            if not (fname == lookup or fname.startswith(lookup + " ")):
+                continue
+            if created_after is not None:
+                try:
+                    ct = datetime.fromisoformat(
+                        (f.get("createdTime") or "").replace("Z", "+00:00"))
+                    if ct < created_after:
+                        continue   # older than this ticket — a previous deal's sheet
+                except ValueError:
+                    pass   # unparseable timestamp: don't block on the guard
+            return f["id"]
+    return None
+
+async def find_sheet_for_channel(channel_id, channel_name, username, channel_created_at=None):
+    """Resolve the buying sheet for a ticket: channel_sheet cache first, then an
+    exact-prefix Drive search by the channel name (minus any legacy 'ticket-'
+    prefix — sheets are named from the bare username, never with the prefix) and
+    by the author's username (covers characters Discord strips from channel names,
+    like the trailing period in 'cwilk_sportscards.'). Pass the ticket channel's
+    created_at so a repeat customer's sheet from a previous deal (older than this
+    ticket) can never match. Never guesses: returns None rather than someone
+    else's — or some other deal's — sheet."""
+    sheet_id = channel_sheet.get(channel_id)
+    if sheet_id:
+        return sheet_id
+    bare = re.sub(r'^ticket-?', '', (channel_name or '').lower())
+    sheet_id = await asyncio.to_thread(_drive_find_sheet, [bare, username], channel_created_at)
+    if sheet_id:
+        remember_channel_sheet(channel_id, sheet_id)
+        print(f"Found sheet for #{channel_name} via Drive lookup: {sheet_id}")
+    return sheet_id
 
 def _cors(resp):
     resp.headers["Access-Control-Allow-Origin"] = "*"
@@ -1293,21 +1410,42 @@ async def on_message(message):
     certs = extract_certs(text) if text else []
 
     # ── WELCOME ──────────────────────────────────────────────────────────────────
-    # Send the welcome EXACTLY ONCE, at the very start of the ticket. We look at the
-    # OLDEST messages (where the welcome always lives) instead of the most recent —
-    # so the check never scrolls off no matter how long the ticket gets, and it
-    # still works after a bot restart (in-memory set would be empty then).
+    # Send the welcome EXACTLY ONCE, at the very start of the ticket. welcomed_tickets
+    # is persisted to DATA_DIR (survives redeploys); the oldest-25 history scan is a
+    # fallback for channels welcomed before the store existed. We also count PRIOR
+    # human messages: tickets opened while the old channel-name gate ignored them
+    # (username-only channels, pre-fix) already have a whole conversation and no
+    # welcome — blasting WELCOME_MSG mid-negotiation and swallowing their message
+    # (which is likely "ship" or a tracking number) would be wrong, so in-flight
+    # channels skip the welcome and fall straight through to normal processing.
     if channel_id not in welcomed_tickets:
         already_welcomed = False
+        prior_human_msgs = 0
+        kevin_replied = False
         try:
             async for msg in message.channel.history(limit=25, oldest_first=True):
                 if msg.author == bot.user and "Welcome to KTS Collectibles" in (msg.content or ""):
                     already_welcomed = True
                     break
+                if msg.author.id == YOUR_DISCORD_USER_ID:
+                    # Kevin already talking in here = genuinely in-flight ticket.
+                    kevin_replied = True
+                # Count only messages STRICTLY OLDER than the one being handled
+                # (snowflake ids are time-ordered). Two rapid first messages would
+                # otherwise each count the other as "prior" and BOTH skip the
+                # welcome — permanently, since the channel gets persisted below.
+                # Filter ALL bots (ticket-tool posts its own embed at open).
+                if not msg.author.bot and msg.id < message.id:
+                    prior_human_msgs += 1
         except Exception:
             pass
         welcomed_tickets.add(channel_id)
-        if not already_welcomed:
+        _save_welcomed()
+        # In-flight = Kevin already replied, or 2+ earlier customer messages.
+        # A SINGLE earlier customer message with no Kevin reply is most likely a
+        # message the bot missed during a deploy restart (Discord doesn't replay
+        # them) — that ticket never got greeted, so still welcome it.
+        if not already_welcomed and not kevin_replied and prior_human_msgs < 2:
             await asyncio.sleep(1)
             await message.channel.send(WELCOME_MSG)
             # If they already sent certs or a CSV with their first message,
@@ -1323,7 +1461,7 @@ async def on_message(message):
                 result, error = parse_collectr_csv(csv_bytes)
                 if error:
                     await message.channel.send(f"Couldn't read that file — {error}. Try re-exporting from Collectr.")
-                    return
+                    raise _CsvDone()
 
                 issues = result.get("issues", [])
                 for issue_type, cards in issues:
@@ -1334,7 +1472,7 @@ async def on_message(message):
                         await message.channel.send(
                             f"❌ **We're not buying Pokémon raw cards right now.**\n\n"
                             f"Detected Pokémon cards in your CSV:\n{card_list}\n\n"
-                            f"We're currently only buying **One Piece raw singles** (English, NM, $1–$99). "
+                            f"We're currently only buying **One Piece raw singles** (English, NM, $1–$150). "
                             f"We're still happy to take a look at any **PSA graded Pokémon slabs** you have — "
                             f"just drop your cert numbers here! 🙏"
                         )
@@ -1364,7 +1502,12 @@ async def on_message(message):
                         "\n".join([f"• {t}: {len(c)} cards" for t, c in issues]),
                         message.channel
                     )
-                    return
+                    # Make sure a lot_state entry exists so a later "proceed" hits
+                    # the below-minimum gate instead of failing open and sending
+                    # the shipping address for a lot we just rejected. setdefault
+                    # only — never clobbers a previously recorded valid lot.
+                    _lot_entry(channel_id)
+                    raise _CsvDone()
 
                 total = result["total"]
                 card_count = result["card_count"]
@@ -1390,7 +1533,9 @@ async def on_message(message):
                         data=post_data,
                         headers={"Content-Type": "application/json"}
                     )
-                    urlreq.urlopen(req, timeout=15)
+                    # Off the event loop — a slow Apps Script cold start would
+                    # otherwise freeze every other ticket for up to 15s.
+                    await asyncio.to_thread(urlreq.urlopen, req, timeout=15)
                 except Exception as e:
                     print(f"CSV Drive save error (non-critical): {e}")
 
@@ -1414,11 +1559,17 @@ async def on_message(message):
                     kevin_msg += f"\n{top}"
                 await ping_kevin(kevin_msg, message.channel)
 
+            except _CsvDone:
+                pass   # early exit from the CSV block — not an error
             except Exception as e:
                 print(f"Collectr error: {e}")
                 await message.channel.send("Had an issue with that file — Kevin will take a look!")
                 await ping_kevin(f"⚠️ Collectr error — **{username}**: {str(e)}", message.channel)
-        return
+        # A message can carry BOTH a Collectr CSV and PSA cert numbers. The CSV was
+        # handled above; fall through so the certs still get a sheet + comps (they
+        # used to be silently dropped, and the lot then mis-gated as singles-only).
+        if not certs:
+            return
 
     # ── PSA CERT NUMBERS ─────────────────────────────────────────────────────────
     if certs:
@@ -1427,10 +1578,12 @@ async def on_message(message):
                 await message.channel.send(
                     f"Got it! Setting up your buying sheet for {len(certs)} cert{'s' if len(certs) > 1 else ''}... ⏳"
                 )
-                sheet_url, sheet_name, data = create_psa_sheet(username, certs)
+                # Off the event loop — Apps Script sheet creation can take many
+                # seconds and would freeze every other ticket while it runs.
+                sheet_url, sheet_name, data = await asyncio.to_thread(create_psa_sheet, username, certs)
                 sheet_id = data.get("sheet_id") or extract_sheet_id(sheet_url)
                 if sheet_id:
-                    channel_sheet[channel_id] = sheet_id
+                    remember_channel_sheet(channel_id, sheet_id)
 
                 # Tell the customer the sheet is ready BEFORE the slow helper call.
                 # Helper lookup for 50 certs can be 1-2 min; don't make them wait.
@@ -1452,7 +1605,13 @@ async def on_message(message):
                         if _sp == 'mlb':
                             apply_avg3_value(_c, threshold=0)        # MLB: always
                         elif _sp == 'basketball':
-                            apply_avg3_value(_c, threshold=250)      # NBA: $250+ only
+                            # Over-ceiling NBA cards get the avg-3 discount so a
+                            # stale-high CL value doesn't auto-reject a card whose
+                            # actual recent sales sit inside the $1-200 buy band.
+                            # (Was hardcoded 250 — left a $200-250 gap where cards
+                            # were rejected on raw CL value while identical cards
+                            # above $250 got discounted and accepted.)
+                            apply_avg3_value(_c, threshold=PSA_SPORT_MAX_PRICE['basketball'])
                     if sheet_id and comps:
                         await asyncio.to_thread(fill_buying_sheet, sheet_id, comps)
                 except Exception as e:
@@ -1464,14 +1623,14 @@ async def on_message(message):
                     accepted = []
                     rejected = []
                     flagged = []   # accepted cards that need Kevin's manual review
-                    review = []    # Pokémon over $200 — priced by hand, not auto-quoted
+                    review = []    # 'review' status — priced by hand, not auto-quoted
                     review_certs = []
                     kevin_lines = []
                     for cert in certs:
                         c = by_cert.get(str(cert).strip())
                         status, reason = classify_psa_comp(c)
                         if status == 'review':
-                            # Over $200 Pokémon: keep out of the auto-priced lot (0%),
+                            # Manual-review cards: keep out of the auto-priced lot (0%),
                             # highlight orange on the sheet for Kevin to quote by hand.
                             review.append((cert, reason))
                             review_certs.append(cert)
@@ -1497,7 +1656,7 @@ async def on_message(message):
                             rejected.append((cert, reason))
                             kevin_lines.append(f"• `{cert}` — ❌ {reason}")
 
-                    # Shade over-$200 Pokémon orange so Kevin knows to price them by hand.
+                    # Shade manual-review cards orange so Kevin knows to price them by hand.
                     if review_certs and sheet_id:
                         try:
                             await asyncio.to_thread(highlight_certs_review, sheet_id, review_certs)
@@ -1558,7 +1717,7 @@ async def on_message(message):
                     review_warning = ""
                     if n_review:
                         review_warning = (
-                            f"\n🟠 **{n_review} Pokémon over $200 — price by hand** (highlighted orange on the sheet, not in the auto-quote):\n"
+                            f"\n🟠 **{n_review} card{'s' if n_review != 1 else ''} to price by hand** (highlighted orange on the sheet, not in the auto-quote):\n"
                             + "\n".join([f"   - `{cert}`: {reason}" for cert, reason in review])
                             + "\n"
                         )
@@ -1603,7 +1762,7 @@ async def on_message(message):
                     if n_review:
                         customer_parts += [
                             "",
-                            f"💎 {n_review} card{'s' if n_review != 1 else ''} over $200 — we'll quote {'these' if n_review != 1 else 'this'} by hand and get right back to you:",
+                            f"💎 {n_review} card{'s' if n_review != 1 else ''} we'll quote by hand and get right back to you:",
                             *[f"• `{cert}`" for cert, _ in review],
                         ]
                     if n_accepted > 0:
@@ -1624,7 +1783,16 @@ async def on_message(message):
                     for chunk in _split_for_discord(customer_msg):
                         await message.channel.send(chunk)
                 else:
-                    # Helper unavailable — fall back to old behavior
+                    # Helper unavailable — fall back to old behavior. Tell the
+                    # CUSTOMER too: they were just told "Pulling comps now... ⏳"
+                    # and would otherwise be left hanging forever.
+                    await message.channel.send(
+                        "⚠️ Comps are taking longer than usual — Kevin will review "
+                        "your sheet and get your quote to you shortly!"
+                    )
+                    # No offer was priced: make sure a lot_state entry exists so a
+                    # premature "proceed" hits the minimum gate, not the address.
+                    _lot_entry(channel_id)
                     cert_list = "\n".join([f"• `{c}`" for c in certs])
                     err_note = f"\n\n⚠️ Helper offline ({comp_error})" if comp_error else ""
                     await ping_kevin(
@@ -1658,12 +1826,17 @@ async def on_message(message):
             return
         await message.channel.send(SHIPPING_MSG)
         await ping_kevin(f"✅ **{username} agreed** — shipping address sent.", message.channel)
-        if channel_id in channel_sheet:
+        # Resolve the sheet through the cache + Drive fallback (channel_sheet used
+        # to be memory-only, so a redeploy between quote and "ship" silently
+        # skipped the tracking row).
+        ship_sheet_id = await find_sheet_for_channel(
+            channel_id, message.channel.name, username, message.channel.created_at)
+        if ship_sheet_id:
             try:
                 import urllib.request as urlreq
                 post_data = json.dumps({
                     "action": "add_tracking",
-                    "sheet_id": channel_sheet[channel_id],
+                    "sheet_id": ship_sheet_id,
                     "username": username
                 }).encode("utf-8")
                 req = urlreq.Request(
@@ -1671,7 +1844,7 @@ async def on_message(message):
                     data=post_data,
                     headers={"Content-Type": "application/json"}
                 )
-                urlreq.urlopen(req, timeout=15)
+                await asyncio.to_thread(urlreq.urlopen, req, timeout=15)
                 print(f"Added tracking row for {username}")
             except Exception as e:
                 print(f"Tracking row error (non-critical): {e}")
@@ -1681,26 +1854,14 @@ async def on_message(message):
     tracking_match = re.search(r'\b([0-9]{20,22}|1Z[A-Z0-9]{16}|[0-9]{12,15})\b', text)
     if tracking_match:
         tracking_num = tracking_match.group(1)
-        sheet_id = channel_sheet.get(channel_id)
-        if not sheet_id:
-            try:
-                creds = get_credentials()
-                from googleapiclient.discovery import build
-                drive = build("drive", "v3", credentials=creds)
-                channel_name = message.channel.name
-                results = drive.files().list(
-                    q=f"'{PSA_FOLDER_ID}' in parents and name contains '{channel_name}' and trashed=false",
-                    fields="files(id,name)",
-                    orderBy="createdTime desc",
-                    pageSize=1
-                ).execute()
-                files = results.get("files", [])
-                if files:
-                    sheet_id = files[0]["id"]
-                    channel_sheet[channel_id] = sheet_id
-                    print(f"Found sheet for {channel_name} via Drive lookup: {sheet_id}")
-            except Exception as e:
-                print(f"Drive lookup error: {e}")
+        # Cache + exact-prefix Drive fallback. The old inline fallback searched
+        # `name contains '<channel name>'`: it never matched legacy ticket-<name>
+        # channels (sheets are named from the bare username) and on short usernames
+        # could match — and silently write tracking into — the WRONG customer's
+        # sheet. find_sheet_for_channel handles both; if it can't find a confident
+        # match it returns None and we ping Kevin instead of guessing.
+        sheet_id = await find_sheet_for_channel(
+            channel_id, message.channel.name, username, message.channel.created_at)
         if sheet_id:
             try:
                 import urllib.request as urlreq
@@ -1714,10 +1875,17 @@ async def on_message(message):
                     data=post_data,
                     headers={"Content-Type": "application/json"}
                 )
-                urlreq.urlopen(req, timeout=15)
+                await asyncio.to_thread(urlreq.urlopen, req, timeout=15)
                 print(f"Saved tracking {tracking_num} for {username}")
             except Exception as e:
                 print(f"Tracking save error (non-critical): {e}")
+        else:
+            await ping_kevin(
+                f"⚠️ Tracking number `{tracking_num}` from **{username}** in "
+                f"#{message.channel.name} — couldn't find their buying sheet, "
+                f"add it to the sheet manually.",
+                message.channel
+            )
         return
 
     # ── STAY SILENT ───────────────────────────────────────────────────────────────
