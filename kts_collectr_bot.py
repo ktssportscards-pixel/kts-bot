@@ -349,6 +349,33 @@ def get_payout_rate(total, username):
     return 0.80, "standard rate"
 
 
+def _has_non_latin_script(text):
+    """True if text contains a character from a non-Latin writing system
+    (Japanese kana/kanji, Korean hangul, Chinese, Cyrillic, etc.) — i.e. a
+    genuinely foreign-language card. Typographic punctuation and accented Latin
+    letters (curly apostrophes in "Luffy's", en-/em-dashes, ™, é) are NOT treated
+    as foreign: they show up in normal ENGLISH Collectr exports and must not trip
+    the non-English filter. (The old check rejected on *any* byte > 127, which
+    started false-flagging every English card the moment Collectr switched to
+    curly apostrophes.)"""
+    for c in text:
+        o = ord(c)
+        if o < 0x80:
+            continue  # plain ASCII
+        if (0x3040 <= o <= 0x30FF or   # Hiragana + Katakana
+                0x31F0 <= o <= 0x31FF or   # Katakana phonetic extensions
+                0x3400 <= o <= 0x4DBF or   # CJK Extension A
+                0x4E00 <= o <= 0x9FFF or   # CJK Unified Ideographs
+                0xF900 <= o <= 0xFAFF or   # CJK Compatibility Ideographs
+                0xAC00 <= o <= 0xD7AF or   # Hangul syllables
+                0x1100 <= o <= 0x11FF or   # Hangul Jamo
+                0x3130 <= o <= 0x318F or   # Hangul Compatibility Jamo
+                0xFF00 <= o <= 0xFFEF or   # Halfwidth/Fullwidth forms
+                0x0400 <= o <= 0x04FF):    # Cyrillic
+            return True
+    return False
+
+
 def parse_collectr_csv(content_bytes):
     """
     Parse a Collectr CSV export and return total market value + card list.
@@ -401,7 +428,10 @@ def parse_collectr_csv(content_bytes):
 
     # Check for non-English cards. Collectr marks them two ways:
     #   1. Language tag in the product name: "(JP)", "(KR)", "(CN)", "(TW)", "(KOR)"
-    #   2. Non-ASCII characters in the name or set (for cards that weren't tagged)
+    #   2. Characters from a non-Latin script (Japanese/Korean/Chinese/etc.) in the
+    #      name or set. We deliberately do NOT reject on any non-ASCII byte —
+    #      English exports contain curly apostrophes / dashes / ™ that are not a
+    #      foreign language (see _has_non_latin_script).
     non_english_tags = ('(jp)', '(kr)', '(cn)', '(tw)', '(kor)', '(jpn)', '(chn)')
     non_english = []
     for _, row in df.iterrows():
@@ -411,7 +441,7 @@ def parse_collectr_csv(content_bytes):
         name_lower = name.lower()
         if any(tag in name_lower for tag in non_english_tags):
             non_english.append(f"• {name} ({set_name})")
-        elif any(ord(c) > 127 for c in combined):
+        elif _has_non_latin_script(combined):
             non_english.append(f"• {name} ({set_name})")
 
     # Per-card price range: $1-$99
