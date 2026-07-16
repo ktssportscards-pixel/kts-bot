@@ -69,10 +69,10 @@ RAW_MAX_PRICE = 150
 PSA_MIN_PRICE = 1
 PSA_MIN_GRADE = 7
 PSA_MAX_AGE_DAYS = 30
-# NBA slabs now require PSA 7+ like every other sport (Jul 17 weekend — the old
-# under-$400 any-grade waiver was removed). Kept at 0 so the any-grade check below
-# can never fire, and so NBA sale-age falls through to the standard 90-day window.
-NBA_ANY_GRADE_MAX_PRICE = 0
+# NBA slabs are bought at ANY grade with just one sale on record (any date), across
+# the whole $1-$200 band (Jul 17 weekend). Set to the $200 ceiling so both the
+# any-grade waiver AND the "one sale ever" age (inf) apply to every in-range NBA card.
+NBA_ANY_GRADE_MAX_PRICE = 200
 # Per-sport price ceilings — sports not listed here are rejected outright, and any
 # slab priced ABOVE its ceiling is rejected (Jul 17 weekend flyer).
 # pokemon: $160. basketball (NBA): $200. one piece: $100. football (NFL): $100. mlb: $100.
