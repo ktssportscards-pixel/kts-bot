@@ -539,7 +539,12 @@ def extract_sheet_id(url):
     return m.group(1) if m else None
 
 
-HELPER_CHUNK_SIZE = 4  # Matches helper CONCURRENCY=4. CardLadder under load + Cloudflare challenge can push per-cert time to 60-90s; chunks of 4 (one parallel batch) keep total under the ~100s tunnel timeout.
+# Cloudflare tunnels cut HTTP responses at ~100s. A COLD chunk of 4 sales-heavy
+# scrapes (4 concurrent × 60-90s each) regularly blows past that, so every cold
+# chunk burned its 180s client timeout and only the cache-warm second pass
+# recovered it — a 59-cert lookup crawled for ~50 min. Chunks of 2 keep cold
+# chunks comfortably under the ceiling; warm (cached) chunks are instant anyway.
+HELPER_CHUNK_SIZE = 2
 
 # One lookup at a time, across ALL tickets. A 241-slab lot split over 5 Discord
 # messages used to run 5 lookup_comps concurrently, slamming the helper's single
