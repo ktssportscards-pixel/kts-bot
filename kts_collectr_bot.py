@@ -70,21 +70,21 @@ PSA_MIN_PRICE = 1
 PSA_MIN_GRADE = 7
 PSA_MAX_AGE_DAYS = 30
 # NBA slabs are bought at ANY grade with just one sale on record (any date), across
-# the whole $1-$200 band (Jul 17 weekend). Set to the $200 ceiling so both the
+# the whole $1-$300 band (Jul 24 weekend). Set to the $300 ceiling so both the
 # any-grade waiver AND the "one sale ever" age (inf) apply to every in-range NBA card.
-NBA_ANY_GRADE_MAX_PRICE = 200
+NBA_ANY_GRADE_MAX_PRICE = 300
 # Per-sport price ceilings — sports not listed here are rejected outright, and any
-# slab priced ABOVE its ceiling is rejected (Jul 17 weekend flyer + Jul 16 update).
-# pokemon: $750. basketball (NBA): $200. one piece: $100. football (NFL): $100. mlb: $100.
+# slab priced ABOVE its ceiling is rejected (Jul 24 weekend flyer).
+# pokemon: $750. basketball (NBA): $300. one piece: $150. football (NFL): $250. mlb: $100.
 PSA_SPORT_MAX_PRICE = {
     'pokemon': 750,
-    'basketball': 200,
-    'one piece': 100,
-    'football': 100,   # NFL slabs
+    'basketball': 300,
+    'one piece': 150,
+    'football': 250,   # NFL slabs
     'mlb': 100,        # MLB slabs
 }
-# Pokémon $160+ requires PSA 8-10 (the $1-$160 bands stay PSA 7+).
-POKEMON_HIGH_BAND_MIN = 160
+# Pokémon $200+ requires PSA 8-10 (the $1-$200 bands stay PSA 7+).
+POKEMON_HIGH_BAND_MIN = 200
 POKEMON_HIGH_BAND_MIN_GRADE = 8
 # Per-sport max age of last sale (days). pokemon / basketball / football / mlb are
 # value-dependent and handled directly in classify_psa_comp; the rest use this dict.
@@ -164,26 +164,26 @@ def apply_avg3_value(comp, threshold=0):
 # Low end of each flyer range. Grade, reject-zones, and the Pokémon manual bucket
 # live in classify_psa_comp, so only in-band cards reach these blends. CL-confidence
 # requirements can't be enforced (no CL score in the data) — priced on value+grade.
-# Pokémon (Jul 17 weekend + Jul 16 add): $1-$100 → 90%, $100-$160 → 88%,
-# $160-$750 → 85% (PSA 8-10 only — enforced in classify_psa_comp).  Ceiling $750.
+# Pokémon (Jul 24 weekend): $1-$100 → 90%, $100-$200 → 87%,
+# $200-$750 → 85% (PSA 8-10 only — enforced in classify_psa_comp).  Ceiling $750.
 PSA_POKEMON_PER_CARD_TIERS = [
     (0,      100.01,       0.90),   # $1-$100 → 90%  (.01 so exactly $100 is 90%)
-    (100.01, 160,          0.88),   # $100-$160 → 88%
-    (160,    float('inf'), 0.85),   # $160-$750 → 85%  ($750 ceiling rejects above)
+    (100.01, 200,          0.87),   # $100-$200 → 87%
+    (200,    float('inf'), 0.85),   # $200-$750 → 85%  ($750 ceiling rejects above)
 ]
-# Basketball (NBA, Jul 17 weekend): $1-$200 → 95%, ANY grade, one sale ever.
-# Ceiling $200.
+# Basketball (NBA, Jul 24 weekend): $1-$300 → 95%, ANY grade, one sale ever.
+# Ceiling $300.
 PSA_BASKETBALL_PER_CARD_TIERS = [
-    (0, float('inf'), 0.95),   # $1-$200 → 95%  ($200 ceiling rejects above)
+    (0, float('inf'), 0.95),   # $1-$300 → 95%  ($300 ceiling rejects above)
 ]
 PSA_ONE_PIECE_PER_CARD_TIERS = [
-    (0, 100, 0.88),  # $1-$100 → 88% (slabs over $100 rejected at the ceiling)
+    (0, float('inf'), 0.87),  # $1-$150 → 87% (slabs over $150 rejected at the ceiling)
 ]
-# NFL / football AND MLB share these rates (both ceiling $100, Jul 17 weekend):
-# $1-30 → 100%, $30-100 → 92%.  ($1-30 pays the full comp value.)
+# NFL / football AND MLB share these rates (Jul 24 weekend — ceilings differ:
+# NFL $250, MLB $100): $1-30 → 100%, $30-ceiling → 92%.
 PSA_FOOTBALL_PER_CARD_TIERS = [
-    (0,     30.01,        1.00),   # $1-$30   → 100%  (.01 so exactly $30 is 100%)
-    (30.01, float('inf'), 0.92),   # $30-$100 → 92%  ($100 ceiling rejects above)
+    (0,     30.01,        1.00),   # $1-$30 → 100%  (.01 so exactly $30 is 100%)
+    (30.01, float('inf'), 0.92),   # $30-ceiling → 92%
 ]
 
 # ── BASKETBALL-SPECIFIC REJECTION RULES ──────────────────────────────────────────
@@ -319,11 +319,12 @@ def _blended_per_card_rate(tiers, card_values):
 def get_psa_payout_rate(sport, sport_lot_total, card_values=None):
     """
     Return the effective (blended) per-card payout rate for a sport's accepted cards.
-    Jul 17 weekend rates (+ Jul 16 Pokémon high band):
-    - pokemon: $1-100 → 90%, $100-160 → 88%, $160-750 → 85% PSA 8-10 (ceiling $750).
-    - basketball: $1-200 → 95% (ceiling $200).
-    - one piece: $1-100 → 88% (ceiling $100).
-    - football (NFL) & mlb: $1-30 → 100%, $30-100 → 92% (ceiling $100).
+    Jul 24 weekend rates:
+    - pokemon: $1-100 → 90%, $100-200 → 87%, $200-750 → 85% PSA 8-10 (ceiling $750).
+    - basketball: $1-300 → 95% (ceiling $300).
+    - one piece: $1-150 → 87% (ceiling $150).
+    - football (NFL): $1-30 → 100%, $30-250 → 92% (ceiling $250).
+    - mlb: $1-30 → 100%, $30-100 → 92% (ceiling $100).
     Reject-zones / ceilings / grade floors are filtered in classify_psa_comp, so
     only in-band cards reach these blends.
     """
@@ -540,21 +541,45 @@ def extract_sheet_id(url):
 
 HELPER_CHUNK_SIZE = 4  # Matches helper CONCURRENCY=4. CardLadder under load + Cloudflare challenge can push per-cert time to 60-90s; chunks of 4 (one parallel batch) keep total under the ~100s tunnel timeout.
 
-def lookup_comps(certs):
-    """
-    Call helper.ktscollectibles.com/comp/batch in chunks and return the merged results list.
-    Each result: {cert, found, clValue, cardName, grade, recentSales, avg3Sales, salesCount, note}
-    Returns [] if the helper key isn't set. Per-chunk failures are logged; if every chunk
-    fails the last error is re-raised so the caller can surface it.
-    """
-    if not HELPER_API_KEY or not certs:
-        return []
+# One lookup at a time, across ALL tickets. A 241-slab lot split over 5 Discord
+# messages used to run 5 lookup_comps concurrently, slamming the helper's single
+# Brave with ~5 parallel chunk streams: scrapes half-failed under the load, those
+# empty results got CACHED (poisoning every lookup for 24h), and CardLadder
+# rate-limited the account. lookup_comps runs in asyncio.to_thread threads, so a
+# threading.Lock is the right primitive.
+import threading
+_HELPER_LOCK = threading.Lock()
+
+def _comp_is_bad(c):
+    """A scrape that carries no usable value — missing entirely, found=false, or
+    found=true with clValue None (the signature of a scrape that half-loaded
+    under load, or of a poisoned cache entry)."""
+    return (not c) or (not c.get('found')) or (c.get('clValue') is None)
+
+def _purge_helper_cache(certs):
+    """Best-effort DELETE /cache/<cert> on the helper so a retry re-scrapes fresh
+    instead of being served the same poisoned cache entry."""
     import urllib.request as urlreq
-    cert_list = [str(c).strip() for c in certs]
+    for c in certs:
+        try:
+            req = urlreq.Request(
+                f"{HELPER_URL}/cache/{c}", method="DELETE",
+                headers={"X-API-Key": HELPER_API_KEY, "User-Agent": "KTS-Bot/1.0"})
+            urlreq.urlopen(req, timeout=10).close()
+        except Exception:
+            pass
+
+def _lookup_comps_once(cert_list):
+    """Single pass over the helper in chunks; merged results list. Per-chunk
+    failures are logged; if EVERY chunk fails the last error is raised."""
+    import urllib.request as urlreq
+    import time as _time
     chunks = [cert_list[i:i + HELPER_CHUNK_SIZE] for i in range(0, len(cert_list), HELPER_CHUNK_SIZE)]
     all_results = []
     last_error = None
     for idx, chunk in enumerate(chunks, 1):
+        if idx > 1 and len(cert_list) > 40:
+            _time.sleep(1.0)   # big lots: pace CardLadder instead of firehosing it
         payload = json.dumps({"certs": chunk}).encode("utf-8")
         req = urlreq.Request(
             f"{HELPER_URL}/comp/batch",
@@ -573,6 +598,37 @@ def lookup_comps(certs):
     if not all_results and last_error:
         raise last_error
     return all_results
+
+def lookup_comps(certs):
+    """
+    Call helper.ktscollectibles.com/comp/batch and return the merged results list.
+    Each result: {cert, found, clValue, cardName, grade, recentSales, avg3Sales, salesCount, note}
+    Returns [] if the helper key isn't set; raises only if every chunk fails.
+    Serialized across tickets via _HELPER_LOCK. Bad results (missing / found=false /
+    no value) from a PARTIALLY successful pass get one purge-cache-and-retry pass —
+    if everything came back bad the helper itself is down or rate-limited, and a
+    second hammering would only make that worse.
+    """
+    if not HELPER_API_KEY or not certs:
+        return []
+    import time as _time
+    cert_list = list(dict.fromkeys(str(c).strip() for c in certs))
+    with _HELPER_LOCK:
+        results = _lookup_comps_once(cert_list)
+        by_cert = {str(c.get('cert', '')).strip(): c for c in results}
+        bad = [c for c in cert_list if _comp_is_bad(by_cert.get(c))]
+        if bad and len(bad) < len(cert_list):
+            print(f"Comp second pass: {len(bad)}/{len(cert_list)} bad results — purging cache, retrying")
+            _purge_helper_cache(bad)
+            _time.sleep(5)
+            try:
+                for c in _lookup_comps_once(bad[:100]):
+                    k = str(c.get('cert', '')).strip()
+                    if k and (k not in by_cert or not _comp_is_bad(c)):
+                        by_cert[k] = c
+            except Exception as e:
+                print(f"Comp second pass failed (keeping first-pass results): {e}")
+        return [by_cert[k] for k in cert_list if k in by_cert]
 
 
 def classify_psa_comp(comp):
@@ -610,7 +666,7 @@ def classify_psa_comp(comp):
     nba_any_grade = (sport == 'basketball' and cv <= NBA_ANY_GRADE_MAX_PRICE)
     if not nba_any_grade and g < PSA_MIN_GRADE:
         return ('rejected', f"PSA {grade_raw} (we buy {PSA_MIN_GRADE}-10 only)")
-    # Pokémon $160+ band is PSA 8-10 only (the $1-$160 bands stay PSA 7+).
+    # Pokémon $200+ band is PSA 8-10 only (the $1-$200 bands stay PSA 7+).
     if (sport == 'pokemon' and cv >= POKEMON_HIGH_BAND_MIN
             and g < POKEMON_HIGH_BAND_MIN_GRADE):
         return ('rejected',
