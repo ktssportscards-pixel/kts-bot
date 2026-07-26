@@ -133,11 +133,12 @@ def apply_avg3_value(comp, threshold=0):
     average is HIGHER than the CardLadder value — then keep the CardLadder value.
     i.e. value = min(avg3Sales, clValue). Only applied when the CardLadder value
     is ABOVE `threshold`; at/below threshold the CardLadder value is kept as-is.
-        MLB -> threshold=0 (always use the avg-3 logic)
         NBA -> threshold=PSA_SPORT_MAX_PRICE['basketball'] (in-band cards keep the
                direct CardLadder value; over-ceiling cards get the avg-3 discount
                so a stale-high CL value doesn't auto-reject a card whose actual
                recent sales sit inside the buy band)
+        MLB no longer uses this (removed Jul 26 — MLB prices on the direct
+        CardLadder value).
     Mutates comp['clValue'] so every downstream step (price caps, payout, the
     sheet's "Our comp" column G) uses this value. The original CardLadder value is
     kept in comp['clValueRaw']. If avg3Sales isn't available, the CardLadder value
@@ -856,13 +857,13 @@ async def price_and_send_psa_offer(channel, channel_id, username, certs, comps,
     thanks-for-your-patience opener)."""
     _loaded_head = ("✅ Comps are in — thanks for your patience! Here's your quote:"
                     if delayed else "✅ All comps loaded!")
-    # MLB: replace CL value with min(avg-of-last-3-sales, CL value) BEFORE filling
-    # the sheet or classifying, so the sheet's "Our comp" and all pricing use it.
+    # Value adjustments BEFORE filling the sheet or classifying, so the sheet's
+    # "Our comp" and all pricing use the adjusted value.
+    # MLB uses the DIRECT CardLadder value (the min(avg-3-sales, CL) discount was
+    # removed Jul 26 per Kevin — it was underpricing MLB slabs).
     for _c in comps:
         _sp = normalize_sport(_c.get('sport'))
-        if _sp == 'mlb':
-            apply_avg3_value(_c, threshold=0)        # MLB: always
-        elif _sp == 'basketball':
+        if _sp == 'basketball':
             # Over-ceiling NBA cards get the avg-3 discount so a
             # stale-high CL value doesn't auto-reject a card whose
             # actual recent sales sit inside the $1-200 buy band.
