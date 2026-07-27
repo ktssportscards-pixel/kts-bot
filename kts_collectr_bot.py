@@ -1780,6 +1780,50 @@ async def handle_owe(message):
         + (f" — {note}" if note else "")
         + ".  Open the tracker → **Sync from bot**.")
 
+def _sanitize_channel_name(name):
+    """Discord channel names: lowercase letters/digits/dash/underscore. Usernames
+    with periods (e.g. 'cwilk_sportscards.') lose them — the Drive sheet lookup
+    already tries both the channel name and the author's raw username."""
+    s = re.sub(r'[^a-z0-9_-]', '', (name or '').lower().replace(' ', '-'))
+    return s[:90]
+
+@bot.event
+async def on_guild_channel_create(channel):
+    """Rename a freshly-opened ticket channel to the opener's Discord username
+    (e.g. #ticket-0712 -> #cwilk_sportscards). The opener is the one non-bot
+    MEMBER with a permission overwrite — Ticket Tool grants the opener access
+    that way when it creates the channel. Overwrites can land a moment after
+    creation, so poll briefly. Best-effort: a failed rename (missing Manage
+    Channels permission, rate limit) is logged and never blocks anything —
+    the ticket still works under its original name via the category check."""
+    if not isinstance(channel, discord.TextChannel):
+        return
+    cat = (channel.category.name.lower() if channel.category else "")
+    if "ticket" not in channel.name.lower() and "ticket" not in cat:
+        return
+    opener = None
+    for _ in range(10):
+        fresh_ch = bot.get_channel(channel.id) or channel
+        for target in fresh_ch.overwrites:
+            if isinstance(target, discord.Member) and not target.bot:
+                opener = target
+                break
+        if opener:
+            channel = fresh_ch
+            break
+        await asyncio.sleep(3)
+    if opener is None:
+        print(f"Ticket rename: no opener overwrite found on #{channel.name} — leaving as-is")
+        return
+    new_name = _sanitize_channel_name(opener.name)
+    if not new_name or channel.name == new_name:
+        return
+    try:
+        await channel.edit(name=new_name, reason="KTS: ticket renamed to opener's username")
+        print(f"Ticket renamed: #{channel.name} -> #{new_name} (opener {opener.name})")
+    except Exception as e:
+        print(f"Ticket rename failed for #{channel.name} (bot needs Manage Channels?): {e}")
+
 @bot.event
 async def on_message(message):
     if message.author.bot:
