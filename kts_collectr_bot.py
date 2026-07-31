@@ -1531,120 +1531,153 @@ def _pokemon_band_labels():
         labels.append(f"≤${top}" if i == 0 else f"${int(low)}-${top}")
     return labels
 
-def handle_vip_command(content, mentions=None, guild=None):
-    """Parse and apply a !vip command; returns the reply text (sync, testable).
-    Target resolution: a mention TOKEN present in the command text wins, matched
-    to the resolved user by id — raw message.mentions is NEVER trusted on its
-    own, because Discord's reply-ping injects the replied-to user into it in
-    arbitrary order (that could assign a VIP rate to the wrong customer). A
-    typed username is validated against real server members when possible."""
-    toks = content.strip().split()[1:]   # drop '!vip'
-    sub = (toks[0].lower() if toks else "list")
+def _vip_parse_rates(tokens):
+    """Parse 1-3 rate tokens -> (rates, err). Accepts 91, 91%, 0.91."""
+    rates = []
+    for t in tokens[:len(PSA_POKEMON_PER_CARD_TIERS)]:
+        try:
+            v = float(t.replace('%', ''))
+        except ValueError:
+            return None, f"'{t}' isn't a number — usage: `!vip add <username> 91 88 85`"
+        if v > 1.5:
+            v = v / 100.0
+        if not (0.5 <= v <= 1.2):
+            return None, f"{t} is outside the sane range (50-120%) — not saved."
+        rates.append(round(v, 4))
+    if not rates:
+        return None, "Usage: `!vip add <username> 91` or `!vip add <username> 91 88 85`"
+    return rates, None
 
-    def _mention_target():
-        m = re.search(r'<@!?(\d+)>', content)
-        if not m:
-            return None, None
+def _vip_resolve_target(token, mentions, guild, for_remove=False):
+    """Resolve one target token (mention / user ID / username) -> (name, err).
+    Mirrors the safety rules: mention tokens matched by id, pasted 15-21 digit
+    IDs resolved via the member list, usernames validated against real members
+    (except for_remove, where raw keys are allowed for cleanup)."""
+    m = re.match(r'^<@!?(\d+)>$', token)
+    if m:
         uid = int(m.group(1))
         user = next((u for u in (mentions or []) if getattr(u, 'id', None) == uid), None)
         if user is None:
             return None, "Couldn't resolve that @mention — try the plain username instead."
         return user.name.lower(), None
+    name = token.lstrip('@').lower()
+    if re.match(r'^\d{15,21}$', name):
+        mb = next((mm for mm in (guild.members if guild else [])
+                   if getattr(mm, 'id', None) == int(name)), None)
+        if mb is None:
+            if for_remove:
+                return name, None
+            return None, (f"`{name}` looks like a Discord user ID, but no server "
+                          f"member matched it — use **Copy Username** instead, "
+                          f"or @mention them.")
+        return mb.name.lower(), None
+    if for_remove:
+        return name, None
+    try:
+        float(name)
+        return None, (f"'{token}' looks like a rate, not a username — "
+                      f"usage: `!vip add <username> 91 [88 85]`")
+    except ValueError:
+        pass
+    if not re.match(r'^[a-z0-9._]{2,32}$', name):
+        return None, f"'{token}' doesn't look like a Discord username — not saved."
+    if guild is not None:
+        exact = next((mb for mb in guild.members if mb.name.lower() == name), None)
+        if exact is None:
+            cands = [mb.name for mb in guild.members
+                     if name in mb.name.lower()
+                     or name in (mb.display_name or '').lower()
+                     or name in ((getattr(mb, 'global_name', '') or '')).lower()][:3]
+            hint = (" Did you mean: " + ", ".join(f"`{c}`" for c in cands) + "?") if cands else ""
+            return None, (f"No server member has the exact username `{name}` — not saved "
+                          f"(VIP keys must match their login username, not display name).{hint}")
+    return name, None
+
+def _vip_rate_summary(name):
+    labels = _pokemon_band_labels()
+    tiers = vip_pokemon_tiers(name)
+    return ", ".join(f"{labels[i]} → {t[2]*100:g}%" for i, t in enumerate(tiers))
+
+def handle_vip_command(content, mentions=None, guild=None):
+    """Parse and apply a !vip command; returns the reply text (sync, testable).
+    Subcommands: add/set (one user), bulk/batch/all (rates on the first line,
+    then one username/ID per line), remove, list. Mention targets are resolved
+    from the token IN the text matched by id — raw message.mentions is never
+    trusted on its own (Discord's reply-ping injects the replied-to user)."""
+    first_line = content.strip().split("\n")[0]
+    toks = first_line.split()[1:]   # drop '!vip'
+    sub = (toks[0].lower() if toks else "list")
 
     if sub == "list":
         if not VIP_RATES:
             return "No VIP users set. Add one with `!vip add <username> 91` (or `91 88 85` per band)."
         lines = ["✨ **VIP Pokémon rates:**"]
-        labels = _pokemon_band_labels()
-        for name, entry in sorted(VIP_RATES.items()):
-            tiers = vip_pokemon_tiers(name)
-            parts = ", ".join(f"{labels[i]} → {t[2]*100:g}%" for i, t in enumerate(tiers))
-            lines.append(f"• **{name}**: {parts}")
+        for name in sorted(VIP_RATES):
+            lines.append(f"• **{name}**: {_vip_rate_summary(name)}")
         return "\n".join(lines)
+
+    if sub in ("bulk", "batch", "all"):
+        rates, err = _vip_parse_rates(toks[1:])
+        if err:
+            return err + "\nBulk usage: first line `!vip bulk 91 90 85`, then one username/ID per line."
+        target_tokens = []
+        for line in content.strip().split("\n")[1:]:
+            target_tokens += [t for t in re.split(r'[,\s]+', line.strip()) if t]
+        if not target_tokens:
+            return ("Bulk usage — rates on the first line, then the list:\n"
+                    "`!vip bulk 91 90 85`\n`icevyy`\n`meta`\n`...` (usernames or user IDs, one per line)")
+        results = []
+        applied = 0
+        for t in target_tokens:
+            name, terr = _vip_resolve_target(t, mentions, guild)
+            if terr:
+                results.append(f"• {t} ✗ {terr}")
+                continue
+            VIP_RATES[name] = {"pokemon": list(rates)}
+            applied += 1
+            results.append(f"• **{name}** ✓")
+        if applied:
+            _save_vip()
+        pretty = "/".join(f"{r*100:g}" for r in rates)
+        return (f"✨ VIP Pokémon rates **{pretty}** applied to {applied} of "
+                f"{len(target_tokens)}:\n" + "\n".join(results)
+                + ("\n(pinned until you change them — weekly flyer updates won't move them)" if applied else ""))
 
     if sub in ("add", "set"):
         rest = toks[1:]
-        name, err = _mention_target()
+        target_tok = None
+        for i, t in enumerate(rest):
+            target_tok = t
+            rest = rest[:i] + rest[i+1:]
+            break
+        if target_tok is None:
+            return "Usage: `!vip add <username> 91` or `!vip add <username> 91 88 85`"
+        name, err = _vip_resolve_target(target_tok, mentions, guild)
         if err:
             return err
-        if name:
-            rest = [t for t in rest if not re.match(r'^<@!?\d+>$', t)]
-        else:
-            if not rest:
-                return "Usage: `!vip add <username> 91` or `!vip add <username> 91 88 85`"
-            name = rest[0].lstrip('@').lower()
-            rest = rest[1:]
-            # A pasted 17-20 digit number is a Discord user ID ("Copy User ID") —
-            # resolve it to the member's username, which is what quotes key on.
-            if re.match(r'^\d{15,21}$', name):
-                mb = next((m for m in (guild.members if guild else [])
-                           if getattr(m, 'id', None) == int(name)), None)
-                if mb is None:
-                    return (f"`{name}` looks like a Discord user ID, but no server "
-                            f"member matched it — use **Copy Username** instead, "
-                            f"or @mention them.")
-                name = mb.name.lower()
-            else:
-                try:
-                    float(name)
-                    return (f"'{toks[1]}' looks like a rate, not a username — "
-                            f"usage: `!vip add <username> 91 [88 85]`")
-                except ValueError:
-                    pass
-            if not re.match(r'^[a-z0-9._]{2,32}$', name):
-                return f"'{toks[1]}' doesn't look like a Discord username — not saved."
-            if guild is not None:
-                exact = next((mb for mb in guild.members if mb.name.lower() == name), None)
-                if exact is None:
-                    cands = [mb.name for mb in guild.members
-                             if name in mb.name.lower()
-                             or name in (mb.display_name or '').lower()
-                             or name in ((getattr(mb, 'global_name', '') or '')).lower()][:3]
-                    hint = (" Did you mean: " + ", ".join(f"`{c}`" for c in cands) + "?") if cands else ""
-                    return (f"No server member has the exact username `{name}` — not saved "
-                            f"(VIP keys must match their login username, not display name).{hint}")
-        if not rest:
-            return "Usage: `!vip add <username> 91` or `!vip add <username> 91 88 85`"
-        rates = []
-        for t in rest[:len(PSA_POKEMON_PER_CARD_TIERS)]:
-            try:
-                v = float(t.replace('%', ''))
-            except ValueError:
-                return f"'{t}' isn't a number — usage: `!vip add <username> 91 88 85`"
-            if v > 1.5:
-                v = v / 100.0
-            if not (0.5 <= v <= 1.2):
-                return f"{t} is outside the sane range (50-120%) — not saved."
-            rates.append(round(v, 4))
+        rates, err = _vip_parse_rates(rest)
+        if err:
+            return err
         VIP_RATES[name] = {"pokemon": rates}
         _save_vip()
-        labels = _pokemon_band_labels()
-        tiers = vip_pokemon_tiers(name)
-        parts = ", ".join(f"{labels[i]} → {t[2]*100:g}%" for i, t in enumerate(tiers))
-        return (f"✨ VIP set for **{name}**: Pokémon {parts}\n"
+        return (f"✨ VIP set for **{name}**: Pokémon {_vip_rate_summary(name)}\n"
                 f"(pinned until you change it — weekly flyer updates won't move it; "
                 f"grade/ceiling/sale-age rules stay standard)")
 
     if sub in ("remove", "delete", "del"):
-        name, err = _mention_target()
+        if len(toks) < 2:
+            return "Usage: `!vip remove <username>`"
+        name, err = _vip_resolve_target(toks[1], mentions, guild, for_remove=True)
         if err:
             return err
-        if not name:
-            # Raw typed key on purpose (no charset/guild checks): lets Kevin clean
-            # up any legacy/odd key exactly as `!vip list` shows it.
-            name = (toks[1].lstrip('@').lower() if len(toks) > 1 else "")
-            if re.match(r'^\d{15,21}$', name):
-                mb = next((m for m in (guild.members if guild else [])
-                           if getattr(m, 'id', None) == int(name)), None)
-                if mb is not None:
-                    name = mb.name.lower()
         if name in VIP_RATES:
             del VIP_RATES[name]
             _save_vip()
             return f"Removed **{name}** from VIP — they get standard rates now."
         return f"**{name or '?'}** isn't on the VIP list. `!vip list` to see who is."
 
-    return "Commands: `!vip add <username> 91 [88 85]` · `!vip remove <username>` · `!vip list`"
+    return ("Commands: `!vip add <username> 91 [88 85]` · `!vip bulk 91 90 85` + list "
+            "of usernames on following lines · `!vip remove <username>` · `!vip list`")
 
 def build_sheet_h_formula(r, pokemon_tiers=None):
     """The per-row payout formula written into buying sheets — generated from the
