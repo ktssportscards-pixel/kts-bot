@@ -2091,12 +2091,20 @@ async def on_message(message):
     if message.content.strip().lower().startswith('!vip'):
         if message.author.id == YOUR_DISCORD_USER_ID:
             try:
-                reply = handle_vip_command(message.content, message.mentions, message.guild)
+                # DM commands still validate typed usernames against the KTS
+                # server's member list (typo protection works everywhere).
+                _g = message.guild or next(iter(bot.guilds), None)
+                reply = handle_vip_command(message.content, message.mentions, _g)
                 if message.guild is None:
                     await message.channel.send(reply)
                 else:
                     # Negotiated rates are private — never post them in a server
-                    # channel (tickets are customer-readable). DM the reply.
+                    # channel (tickets are customer-readable). DM the reply and
+                    # scrub Kevin's own command message from the channel too.
+                    try:
+                        await message.delete()
+                    except Exception:
+                        pass   # needs Manage Messages; harmless if missing
                     if not await ping_kevin(reply):
                         await message.channel.send(
                             "Couldn't DM you — check your DM settings. "
