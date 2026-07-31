@@ -1574,12 +1574,23 @@ def handle_vip_command(content, mentions=None, guild=None):
                 return "Usage: `!vip add <username> 91` or `!vip add <username> 91 88 85`"
             name = rest[0].lstrip('@').lower()
             rest = rest[1:]
-            try:
-                float(name)
-                return (f"'{toks[1]}' looks like a rate, not a username — "
-                        f"usage: `!vip add <username> 91 [88 85]`")
-            except ValueError:
-                pass
+            # A pasted 17-20 digit number is a Discord user ID ("Copy User ID") —
+            # resolve it to the member's username, which is what quotes key on.
+            if re.match(r'^\d{15,21}$', name):
+                mb = next((m for m in (guild.members if guild else [])
+                           if getattr(m, 'id', None) == int(name)), None)
+                if mb is None:
+                    return (f"`{name}` looks like a Discord user ID, but no server "
+                            f"member matched it — use **Copy Username** instead, "
+                            f"or @mention them.")
+                name = mb.name.lower()
+            else:
+                try:
+                    float(name)
+                    return (f"'{toks[1]}' looks like a rate, not a username — "
+                            f"usage: `!vip add <username> 91 [88 85]`")
+                except ValueError:
+                    pass
             if not re.match(r'^[a-z0-9._]{2,32}$', name):
                 return f"'{toks[1]}' doesn't look like a Discord username — not saved."
             if guild is not None:
@@ -1622,6 +1633,11 @@ def handle_vip_command(content, mentions=None, guild=None):
             # Raw typed key on purpose (no charset/guild checks): lets Kevin clean
             # up any legacy/odd key exactly as `!vip list` shows it.
             name = (toks[1].lstrip('@').lower() if len(toks) > 1 else "")
+            if re.match(r'^\d{15,21}$', name):
+                mb = next((m for m in (guild.members if guild else [])
+                           if getattr(m, 'id', None) == int(name)), None)
+                if mb is not None:
+                    name = mb.name.lower()
         if name in VIP_RATES:
             del VIP_RATES[name]
             _save_vip()
