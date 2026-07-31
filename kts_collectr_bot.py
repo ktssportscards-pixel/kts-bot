@@ -1549,49 +1549,62 @@ def _vip_parse_rates(tokens):
     return rates, None
 
 def _vip_resolve_target(token, mentions, guild, for_remove=False):
-    """Resolve one target token (mention / user ID / username) -> (name, err).
-    Mirrors the safety rules: mention tokens matched by id, pasted 15-21 digit
-    IDs resolved via the member list, usernames validated against real members
-    (except for_remove, where raw keys are allowed for cleanup)."""
+    """Resolve one target token (mention / user ID / username) -> (name, err, note).
+    Safety rules: mention tokens matched by id; pasted 15-21 digit IDs resolved
+    via the member list; usernames validated against real members. A typed name
+    that isn't an exact username AUTO-MATCHES when exactly ONE member fits
+    (their display/global name matches exactly, or exactly one member's names
+    contain it) — note explains the substitution so it's always visible in the
+    reply. Multiple or zero candidates still refuse: never guess on money.
+    for_remove skips validation so raw keys can be cleaned up."""
     m = re.match(r'^<@!?(\d+)>$', token)
     if m:
         uid = int(m.group(1))
         user = next((u for u in (mentions or []) if getattr(u, 'id', None) == uid), None)
         if user is None:
-            return None, "Couldn't resolve that @mention — try the plain username instead."
-        return user.name.lower(), None
+            return None, "Couldn't resolve that @mention — try the plain username instead.", None
+        return user.name.lower(), None, None
     name = token.lstrip('@').lower()
     if re.match(r'^\d{15,21}$', name):
         mb = next((mm for mm in (guild.members if guild else [])
                    if getattr(mm, 'id', None) == int(name)), None)
         if mb is None:
             if for_remove:
-                return name, None
+                return name, None, None
             return None, (f"`{name}` looks like a Discord user ID, but no server "
                           f"member matched it — use **Copy Username** instead, "
-                          f"or @mention them.")
-        return mb.name.lower(), None
+                          f"or @mention them."), None
+        return mb.name.lower(), None, None
     if for_remove:
-        return name, None
+        return name, None, None
     try:
         float(name)
         return None, (f"'{token}' looks like a rate, not a username — "
-                      f"usage: `!vip add <username> 91 [88 85]`")
+                      f"usage: `!vip add <username> 91 [88 85]`"), None
     except ValueError:
         pass
     if not re.match(r'^[a-z0-9._]{2,32}$', name):
-        return None, f"'{token}' doesn't look like a Discord username — not saved."
+        return None, f"'{token}' doesn't look like a Discord username — not saved.", None
     if guild is not None:
         exact = next((mb for mb in guild.members if mb.name.lower() == name), None)
         if exact is None:
-            cands = [mb.name for mb in guild.members
-                     if name in mb.name.lower()
-                     or name in (mb.display_name or '').lower()
-                     or name in ((getattr(mb, 'global_name', '') or '')).lower()][:3]
+            # Tier 1: their display/global name matches exactly.
+            t1 = [mb for mb in guild.members
+                  if (mb.display_name or '').lower() == name
+                  or ((getattr(mb, 'global_name', '') or '')).lower() == name]
+            # Tier 2: the token appears inside any of their names.
+            t2 = [mb for mb in guild.members
+                  if name in mb.name.lower()
+                  or name in (mb.display_name or '').lower()
+                  or name in ((getattr(mb, 'global_name', '') or '')).lower()]
+            pick = t1[0] if len(t1) == 1 else (t2[0] if len(t2) == 1 else None)
+            if pick is not None:
+                return pick.name.lower(), None, f"matched from `{name}`"
+            cands = [mb.name for mb in (t1 or t2)][:3]
             hint = (" Did you mean: " + ", ".join(f"`{c}`" for c in cands) + "?") if cands else ""
             return None, (f"No server member has the exact username `{name}` — not saved "
-                          f"(VIP keys must match their login username, not display name).{hint}")
-    return name, None
+                          f"(VIP keys must match their login username, not display name).{hint}"), None
+    return name, None, None
 
 def _vip_rate_summary(name):
     labels = _pokemon_band_labels()
@@ -1629,13 +1642,13 @@ def handle_vip_command(content, mentions=None, guild=None):
         results = []
         applied = 0
         for t in target_tokens:
-            name, terr = _vip_resolve_target(t, mentions, guild)
+            name, terr, note = _vip_resolve_target(t, mentions, guild)
             if terr:
                 results.append(f"• {t} ✗ {terr}")
                 continue
             VIP_RATES[name] = {"pokemon": list(rates)}
             applied += 1
-            results.append(f"• **{name}** ✓")
+            results.append(f"• **{name}** ✓" + (f" ({note})" if note else ""))
         if applied:
             _save_vip()
         pretty = "/".join(f"{r*100:g}" for r in rates)
@@ -1652,7 +1665,7 @@ def handle_vip_command(content, mentions=None, guild=None):
             break
         if target_tok is None:
             return "Usage: `!vip add <username> 91` or `!vip add <username> 91 88 85`"
-        name, err = _vip_resolve_target(target_tok, mentions, guild)
+        name, err, note = _vip_resolve_target(target_tok, mentions, guild)
         if err:
             return err
         rates, err = _vip_parse_rates(rest)
@@ -1660,14 +1673,15 @@ def handle_vip_command(content, mentions=None, guild=None):
             return err
         VIP_RATES[name] = {"pokemon": rates}
         _save_vip()
-        return (f"✨ VIP set for **{name}**: Pokémon {_vip_rate_summary(name)}\n"
+        _tag = f" ({note})" if note else ""
+        return (f"✨ VIP set for **{name}**{_tag}: Pokémon {_vip_rate_summary(name)}\n"
                 f"(pinned until you change it — weekly flyer updates won't move it; "
                 f"grade/ceiling/sale-age rules stay standard)")
 
     if sub in ("remove", "delete", "del"):
         if len(toks) < 2:
             return "Usage: `!vip remove <username>`"
-        name, err = _vip_resolve_target(toks[1], mentions, guild, for_remove=True)
+        name, err, _note = _vip_resolve_target(toks[1], mentions, guild, for_remove=True)
         if err:
             return err
         if name in VIP_RATES:
