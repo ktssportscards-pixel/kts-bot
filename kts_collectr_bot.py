@@ -1741,6 +1741,170 @@ def write_custom_sheet_formulas(sheet_id, pokemon_tiers, sheet_name="Form. Put D
                  range_name="H2:H1000", value_input_option="USER_ENTERED")
 
 
+# ── PAYMENT PACKETS / PAYOUT ORGANIZATION ────────────────────────────────────────
+# Kevin sends every wire/ACH HIMSELF from his bank — the bot never moves money.
+# It just makes the manual send instant: store each seller's payment details
+# (!payinfo, Kevin-only, DM-routed — bank details never post in channels), DM a
+# copy-paste "payment packet" whenever a debt is logged with !owe, mark payments
+# done with !paid, and DM a queue digest on payout days (Thu/Fri).
+PAYINFO_FILE = os.path.join(DATA_DIR, "payinfo_store.json")
+try:
+    with open(PAYINFO_FILE) as _f:
+        PAYINFO = {str(k).lower(): v for k, v in json.load(_f).items()}
+except Exception:
+    PAYINFO = {}
+
+def _save_payinfo():
+    try:
+        with open(PAYINFO_FILE + ".tmp", "w") as _f:
+            json.dump(PAYINFO, _f)
+        os.replace(PAYINFO_FILE + ".tmp", PAYINFO_FILE)
+    except Exception as e:
+        print(f"payinfo store save failed (non-critical): {e}")
+
+def handle_payinfo_command(content):
+    """!payinfo set <user> <details...> (multi-line ok) · !payinfo <user> ·
+    !payinfo remove <user> · !payinfo list.  Sync + testable; caller routes the
+    reply to Kevin's DM."""
+    body = content.strip()
+    lines = body.split("\n")
+    toks = lines[0].split()[1:]   # drop '!payinfo'
+    sub = (toks[0].lower() if toks else "list")
+    if sub == "set":
+        if len(toks) < 2:
+            return "Usage: `!payinfo set <username> <their wire/ACH details...>` (details can span lines)"
+        name = toks[1].lstrip('@').lower()
+        details = " ".join(toks[2:])
+        if len(lines) > 1:
+            details = (details + "\n" if details else "") + "\n".join(l.strip() for l in lines[1:] if l.strip())
+        if not details:
+            return "No details given — paste their wire/ACH info after the username."
+        PAYINFO[name] = {"details": details, "updated": date.today().isoformat()}
+        _save_payinfo()
+        return f"💾 Payment details saved for **{name}** (updated {PAYINFO[name]['updated']})."
+    if sub in ("remove", "delete", "del"):
+        name = (toks[1].lstrip('@').lower() if len(toks) > 1 else "")
+        if name in PAYINFO:
+            del PAYINFO[name]; _save_payinfo()
+            return f"Removed payment details for **{name}**."
+        return f"No payment details on file for **{name or '?'}**."
+    if sub == "list":
+        if not PAYINFO:
+            return "No payment details on file yet. `!payinfo set <username> <details>` to add."
+        return "💾 **Payment details on file:**\n" + "\n".join(
+            f"• **{n}** (updated {v.get('updated','?')})" for n, v in sorted(PAYINFO.items()))
+    # bare "!payinfo <user>" -> view
+    name = sub.lstrip('@')
+    v = PAYINFO.get(name)
+    if not v:
+        return f"No payment details on file for **{name}**. `!payinfo set {name} <details>` to add."
+    return f"💸 **{name}** (updated {v.get('updated','?')}):\n{v.get('details','')}"
+
+def build_payment_packet(seller, amount, method, note=""):
+    """The copy-paste DM Kevin gets when a debt is logged: everything his bank's
+    send screen needs, plus safety flags. Never posted in channels."""
+    key = (seller or "").lower()
+    info = PAYINFO.get(key)
+    flags = []
+    dup = [o for o in OWED_STORE
+           if o.get("status") != "paid"
+           and str(o.get("discord", "")).lower() == key
+           and abs(float(o.get("amount", 0)) - float(amount)) < 0.005]
+    if len(dup) > 1:
+        flags.append(f"⚠️ DUPLICATE? {len(dup)} unpaid entries for {seller} at this exact amount — make sure this isn't logged twice.")
+    if info:
+        try:
+            upd = datetime.strptime(info.get("updated", ""), "%Y-%m-%d").date()
+            if (date.today() - upd).days <= 3:
+                flags.append(f"⚠️ Their payment details were changed {info['updated']} — double-check before sending.")
+        except ValueError:
+            pass
+    lines = [f"💸 **Payment packet — {seller}**",
+             f"Amount: **${float(amount):,.2f}** · Method: **{method}**",
+             f"Memo: KTS payout — {seller} — {date.today().isoformat()}"]
+    if note:
+        lines.append(f"Note: {note}")
+    if info:
+        lines.append(f"── payment details on file (updated {info.get('updated','?')}) ──")
+        lines.append(info.get("details", ""))
+    else:
+        flags.append(f"⚠️ No payment details on file — `!payinfo set {key} <their wire/ACH info>` for next time.")
+    lines += flags
+    lines.append("_Review at the bank before sending — packets are prep, not payment._")
+    return "\n".join(lines)
+
+def mark_paid(seller, amount=None):
+    """Mark the OLDEST matching unpaid entry paid. Returns (rec, remaining_unpaid_for_seller)."""
+    key = (seller or "").lower()
+    match = [o for o in OWED_STORE
+             if o.get("status") != "paid" and str(o.get("discord", "")).lower() == key
+             and (amount is None or abs(float(o.get("amount", 0)) - float(amount)) < 0.005)]
+    if not match:
+        return None, [o for o in OWED_STORE
+                      if o.get("status") != "paid" and str(o.get("discord", "")).lower() == key]
+    match.sort(key=lambda o: o.get("date", ""))
+    rec = match[0]
+    rec["status"] = "paid"
+    rec["date_paid"] = date.today().isoformat()
+    _save_owed()
+    rest = [o for o in OWED_STORE
+            if o.get("status") != "paid" and str(o.get("discord", "")).lower() == key]
+    return rec, rest
+
+def build_payout_digest():
+    """Everything unpaid, oldest first (first-come-first-serve), with aging and
+    missing-payinfo flags. None if the queue is empty."""
+    unpaid = [o for o in OWED_STORE if o.get("status") != "paid"]
+    if not unpaid:
+        return None
+    unpaid.sort(key=lambda o: o.get("date", ""))
+    total = sum(float(o.get("amount", 0)) for o in unpaid)
+    lines = [f"🗓️ **Payout day — {len(unpaid)} in the queue, ${total:,.2f} total** (oldest first):"]
+    for o in unpaid:
+        key = str(o.get("discord", "")).lower()
+        age = ""
+        try:
+            days = (date.today() - datetime.strptime(o.get("date", ""), "%Y-%m-%d").date()).days
+            age = f" · {days}d" + (" ⚠️ AGING" if days > 7 else "")
+        except ValueError:
+            pass
+        pin = "" if key in PAYINFO else " · ❓ no payment info on file"
+        lines.append(f"• **{o.get('discord')}** — ${float(o.get('amount',0)):,.2f} {o.get('method','')}"
+                     f"{age}{pin}")
+    lines.append("`!payinfo <name>` for details · `!paid <name> [amount]` after each send.")
+    return "\n".join(lines)
+
+_PAYOUT_DIGEST_MARKER = os.path.join(DATA_DIR, "payout_digest_last.txt")
+
+async def payout_digest_loop():
+    """DM the payout digest once on Thursday and Friday mornings (~8am Central).
+    Marker file survives redeploys so a restart doesn't re-send."""
+    from zoneinfo import ZoneInfo
+    tz = ZoneInfo("America/Chicago")
+    while True:
+        try:
+            now = datetime.now(tz)
+            today = now.date().isoformat()
+            last = ""
+            try:
+                with open(_PAYOUT_DIGEST_MARKER) as f:
+                    last = f.read().strip()
+            except Exception:
+                pass
+            if now.weekday() in (3, 4) and now.hour >= 8 and last != today:
+                digest = build_payout_digest()
+                if digest is None or await ping_kevin(digest):
+                    try:
+                        with open(_PAYOUT_DIGEST_MARKER, "w") as f:
+                            f.write(today)
+                    except Exception:
+                        pass
+        except Exception as e:
+            print(f"payout digest loop error: {e}")
+        await asyncio.sleep(1800)
+
+
+
 def _drive_find_sheet(lookup_names, created_after=None):
     """Sync helper: search the PSA folder for a buying sheet whose name STARTS WITH
     one of the lookup names (the Apps Script names sheets '<username> <source> <date>',
@@ -2062,6 +2226,7 @@ async def on_ready():
     if not _HELPER_MONITOR_STARTED:
         _HELPER_MONITOR_STARTED = True
         asyncio.create_task(helper_health_monitor())
+        asyncio.create_task(payout_digest_loop())
     global _PENDING_RETRIES_RESUMED
     if not _PENDING_RETRIES_RESUMED:
         _PENDING_RETRIES_RESUMED = True
@@ -2099,7 +2264,10 @@ async def handle_owe(message):
     await message.channel.send(
         f"✅ Logged: owe **{seller}** ${amount:,.2f} via {method}"
         + (f" — {note}" if note else "")
-        + ".  Open the tracker → **Sync from bot**.")
+        + ".  Open the tracker → **Sync from bot**.  💸 Packet in your DMs.")
+    # Copy-paste payment packet with the seller's stored details -> Kevin's DMs
+    # only (bank info never posts in channels).
+    await ping_kevin(build_payment_packet(seller, amount, method, note))
 
 def _sanitize_channel_name(name):
     """Discord channel names: lowercase letters/digits/dash/underscore. Usernames
@@ -2148,6 +2316,54 @@ async def on_guild_channel_create(channel):
 @bot.event
 async def on_message(message):
     if message.author.bot:
+        return
+
+    # ── !payinfo (Kevin only) — sellers' wire/ACH details, DM-routed ──
+    if message.content.strip().lower().startswith('!payinfo'):
+        if message.author.id == YOUR_DISCORD_USER_ID:
+            try:
+                reply = handle_payinfo_command(message.content)
+                if message.guild is None:
+                    await message.channel.send(reply)
+                else:
+                    # The command itself may contain bank details — scrub it and
+                    # DM the reply. Never leave payment info in a channel.
+                    try:
+                        await message.delete()
+                    except Exception:
+                        pass
+                    if not await ping_kevin(reply):
+                        await message.channel.send("Couldn't DM you — check DM settings.")
+            except Exception as e:
+                print(f"payinfo command error: {e}")
+        return
+
+    # ── !paid (Kevin only) — mark the oldest matching owed entry paid ──
+    if message.content.strip().lower().startswith('!paid'):
+        if message.author.id == YOUR_DISCORD_USER_ID:
+            toks = message.content.strip().split()[1:]
+            if not toks:
+                await message.channel.send("Usage: `!paid <username> [amount]`")
+                return
+            seller = toks[0].lstrip('@')
+            amt = None
+            if len(toks) > 1:
+                try:
+                    amt = float(toks[1].replace('$', '').replace(',', ''))
+                except ValueError:
+                    pass
+            rec, remaining = mark_paid(seller, amt)
+            if rec is None:
+                if remaining:
+                    listing = ", ".join(f"${float(o.get('amount',0)):,.2f} ({o.get('date','?')})" for o in remaining)
+                    await message.channel.send(f"No unpaid entry matched that amount for **{seller}** — unpaid: {listing}")
+                else:
+                    await message.channel.send(f"Nothing unpaid on file for **{seller}**.")
+            else:
+                left = f"  ({len(remaining)} still unpaid for them)" if remaining else ""
+                await message.channel.send(
+                    f"✅ Paid: **{rec.get('discord')}** ${float(rec.get('amount',0)):,.2f} "
+                    f"{rec.get('method','')} (logged {rec.get('date','?')}).{left}  Tracker syncs on next open.")
         return
 
     # ── !vip command (Kevin only) — per-customer premium Pokémon rates ──
