@@ -867,6 +867,10 @@ async def price_and_send_psa_offer(channel, channel_id, username, certs, comps,
     thanks-for-your-patience opener)."""
     _loaded_head = ("✅ Comps are in — thanks for your patience! Here's your quote:"
                     if delayed else "✅ All comps loaded!")
+    # ONE snapshot of the VIP state for this whole quote: the sheet stamp and the
+    # quoted rates must never disagree (a !vip add/remove mid-quote would other-
+    # wise desynchronize them across the awaits below).
+    vip_tiers = vip_pokemon_tiers(username)
     # Value adjustments BEFORE filling the sheet or classifying, so the sheet's
     # "Our comp" and all pricing use the adjusted value.
     # MLB uses the DIRECT CardLadder value (the min(avg-3-sales, CL) discount was
@@ -886,6 +890,26 @@ async def price_and_send_psa_offer(channel, channel_id, username, certs, comps,
             await asyncio.to_thread(fill_buying_sheet, sheet_id, comps)
         except Exception as e:
             print(f"Sheet fill error (offer continues): {e}")
+    # VIP customers get their negotiated Pokémon rates baked into THEIR sheet's
+    # payout formulas (the template copy carries standard rates). A silent failure
+    # here would make the sheet compute LESS than the quoted number and Kevin pays
+    # off the sheet — so retry once, then alert him loudly.
+    if sheet_id and vip_tiers:
+        for _attempt in (1, 2):
+            try:
+                await asyncio.to_thread(write_custom_sheet_formulas, sheet_id, vip_tiers)
+                break
+            except Exception as e:
+                if _attempt == 1:
+                    print(f"VIP formula write failed (retrying in 20s): {e}")
+                    await asyncio.sleep(20)
+                else:
+                    print(f"VIP formula write FAILED twice: {e}")
+                    await ping_kevin(
+                        f"⚠️ **VIP formula stamp FAILED for {username}** — their sheet's "
+                        f"H column still computes STANDARD rates but the quote below uses "
+                        f"their VIP rates. Fix column H before paying!\n{sheet_url}",
+                        channel)
     by_cert = {str(c.get('cert', '')).strip(): c for c in comps}
     accepted = []
     rejected = []
@@ -938,13 +962,18 @@ async def price_and_send_psa_offer(channel, channel_id, username, certs, comps,
     for sp, comps_in_sport in sport_groups.items():
         card_values = [float(c['clValue']) for c in comps_in_sport]
         sport_total = sum(card_values)
-        rate = get_psa_payout_rate(sp, sport_total, card_values)
+        if sp == 'pokemon' and vip_tiers:
+            # Negotiated per-customer Pokémon rates (see VIP_RATES / !vip).
+            rate = _blended_per_card_rate(vip_tiers, card_values)
+        else:
+            rate = get_psa_payout_rate(sp, sport_total, card_values)
         sport_breakdown.append({
             'sport': sp,
             'count': len(comps_in_sport),
             'total': sport_total,
             'rate': rate,
             'payout': sport_total * rate,
+            'vip': sp == 'pokemon' and bool(vip_tiers),
         })
     total_comp = sum(s['total'] for s in sport_breakdown)
     total_payout = sum(s['payout'] for s in sport_breakdown)
@@ -968,6 +997,7 @@ async def price_and_send_psa_offer(channel, channel_id, username, certs, comps,
     breakdown_lines = [
         f"• {_sport_label(s['sport'])}: {s['count']} card{'s' if s['count'] != 1 else ''}, "
         f"${s['total']:,.2f} → ${s['payout']:,.2f} ({_fmt_pct(s['rate'])})"
+        + (" ✨ VIP" if s.get('vip') else "")
         for s in sport_breakdown
     ]
 
@@ -1437,6 +1467,217 @@ async def _resume_pending_retries():
                          max_attempts=remaining, spawned_at=e.get("spawned_at"))
     _save_pending_retries()   # drops the expired/unresolvable entries
 
+# ── VIP / PREMIUM RATES (Pokémon slabs only) ─────────────────────────────────────
+# Kevin negotiates per-customer Pokémon rates. Managed entirely in Discord:
+#   !vip add <username or @mention> 91            -> 91% on ALL Pokémon bands
+#   !vip add <username> 91 88 85                  -> per band (≤$100 / mid / high)
+#   !vip remove <username>    !vip list
+# Keyed by lowercase Discord username; persisted to DATA_DIR. Rates are PINNED —
+# weekly flyer changes don't move a VIP's promised rate until Kevin re-adds them.
+# Only the payout % changes: grade floors, ceilings and sale-age stay standard.
+VIP_FILE = os.path.join(DATA_DIR, "vip_store.json")
+_VIP_LOAD_FAILED = False
+try:
+    with open(VIP_FILE) as _f:
+        _raw_vip = json.load(_f)
+    VIP_RATES = {}
+    for _k, _v in _raw_vip.items():
+        if (isinstance(_v, dict) and isinstance(_v.get("pokemon"), list) and _v["pokemon"]
+                and all(isinstance(_x, (int, float)) for _x in _v["pokemon"])):
+            VIP_RATES[str(_k).lower()] = _v
+        else:
+            print(f"vip store: dropping malformed entry {_k!r}")
+except FileNotFoundError:
+    VIP_RATES = {}
+except Exception as _e:
+    # A corrupt store must NOT silently revert VIPs to standard rates: preserve
+    # the bad file (the next _save_vip would clobber it) and alert Kevin from
+    # on_ready. Money is quoted off this dict.
+    VIP_RATES = {}
+    _VIP_LOAD_FAILED = True
+    print(f"VIP STORE FAILED TO LOAD ({_e}) — VIPs quote at STANDARD rates until re-added")
+    try:
+        os.replace(VIP_FILE, VIP_FILE + ".corrupt")
+    except Exception:
+        pass
+
+def _save_vip():
+    # Atomic write: a crash mid-save must never leave a truncated store behind.
+    try:
+        with open(VIP_FILE + ".tmp", "w") as _f:
+            json.dump(VIP_RATES, _f)
+        os.replace(VIP_FILE + ".tmp", VIP_FILE)
+    except Exception as e:
+        print(f"vip store save failed (non-critical): {e}")
+
+def vip_pokemon_tiers(username):
+    """The user's custom Pokémon tier list — band boundaries from the CURRENT
+    standard tiers, rates from their VIP entry (last rate repeats if they gave
+    fewer rates than there are bands). None if the user isn't a VIP."""
+    entry = VIP_RATES.get((username or "").lower())
+    if not entry:
+        return None
+    rates = entry.get("pokemon") or []
+    if not rates:
+        return None
+    return [(low, high, rates[i] if i < len(rates) else rates[-1])
+            for i, (low, high, _std) in enumerate(PSA_POKEMON_PER_CARD_TIERS)]
+
+def _pokemon_band_labels():
+    """Human labels for the current Pokémon bands, e.g. ['≤$100', '$100-$150', '$150-$750']."""
+    labels = []
+    for i, (low, high, _r) in enumerate(PSA_POKEMON_PER_CARD_TIERS):
+        top = PSA_SPORT_MAX_PRICE['pokemon'] if high == float('inf') else int(high)
+        labels.append(f"≤${top}" if i == 0 else f"${int(low)}-${top}")
+    return labels
+
+def handle_vip_command(content, mentions=None, guild=None):
+    """Parse and apply a !vip command; returns the reply text (sync, testable).
+    Target resolution: a mention TOKEN present in the command text wins, matched
+    to the resolved user by id — raw message.mentions is NEVER trusted on its
+    own, because Discord's reply-ping injects the replied-to user into it in
+    arbitrary order (that could assign a VIP rate to the wrong customer). A
+    typed username is validated against real server members when possible."""
+    toks = content.strip().split()[1:]   # drop '!vip'
+    sub = (toks[0].lower() if toks else "list")
+
+    def _mention_target():
+        m = re.search(r'<@!?(\d+)>', content)
+        if not m:
+            return None, None
+        uid = int(m.group(1))
+        user = next((u for u in (mentions or []) if getattr(u, 'id', None) == uid), None)
+        if user is None:
+            return None, "Couldn't resolve that @mention — try the plain username instead."
+        return user.name.lower(), None
+
+    if sub == "list":
+        if not VIP_RATES:
+            return "No VIP users set. Add one with `!vip add <username> 91` (or `91 88 85` per band)."
+        lines = ["✨ **VIP Pokémon rates:**"]
+        labels = _pokemon_band_labels()
+        for name, entry in sorted(VIP_RATES.items()):
+            tiers = vip_pokemon_tiers(name)
+            parts = ", ".join(f"{labels[i]} → {t[2]*100:g}%" for i, t in enumerate(tiers))
+            lines.append(f"• **{name}**: {parts}")
+        return "\n".join(lines)
+
+    if sub in ("add", "set"):
+        rest = toks[1:]
+        name, err = _mention_target()
+        if err:
+            return err
+        if name:
+            rest = [t for t in rest if not re.match(r'^<@!?\d+>$', t)]
+        else:
+            if not rest:
+                return "Usage: `!vip add <username> 91` or `!vip add <username> 91 88 85`"
+            name = rest[0].lstrip('@').lower()
+            rest = rest[1:]
+            try:
+                float(name)
+                return (f"'{toks[1]}' looks like a rate, not a username — "
+                        f"usage: `!vip add <username> 91 [88 85]`")
+            except ValueError:
+                pass
+            if not re.match(r'^[a-z0-9._]{2,32}$', name):
+                return f"'{toks[1]}' doesn't look like a Discord username — not saved."
+            if guild is not None:
+                exact = next((mb for mb in guild.members if mb.name.lower() == name), None)
+                if exact is None:
+                    cands = [mb.name for mb in guild.members
+                             if name in mb.name.lower()
+                             or name in (mb.display_name or '').lower()
+                             or name in ((getattr(mb, 'global_name', '') or '')).lower()][:3]
+                    hint = (" Did you mean: " + ", ".join(f"`{c}`" for c in cands) + "?") if cands else ""
+                    return (f"No server member has the exact username `{name}` — not saved "
+                            f"(VIP keys must match their login username, not display name).{hint}")
+        if not rest:
+            return "Usage: `!vip add <username> 91` or `!vip add <username> 91 88 85`"
+        rates = []
+        for t in rest[:len(PSA_POKEMON_PER_CARD_TIERS)]:
+            try:
+                v = float(t.replace('%', ''))
+            except ValueError:
+                return f"'{t}' isn't a number — usage: `!vip add <username> 91 88 85`"
+            if v > 1.5:
+                v = v / 100.0
+            if not (0.5 <= v <= 1.2):
+                return f"{t} is outside the sane range (50-120%) — not saved."
+            rates.append(round(v, 4))
+        VIP_RATES[name] = {"pokemon": rates}
+        _save_vip()
+        labels = _pokemon_band_labels()
+        tiers = vip_pokemon_tiers(name)
+        parts = ", ".join(f"{labels[i]} → {t[2]*100:g}%" for i, t in enumerate(tiers))
+        return (f"✨ VIP set for **{name}**: Pokémon {parts}\n"
+                f"(pinned until you change it — weekly flyer updates won't move it; "
+                f"grade/ceiling/sale-age rules stay standard)")
+
+    if sub in ("remove", "delete", "del"):
+        name, err = _mention_target()
+        if err:
+            return err
+        if not name:
+            # Raw typed key on purpose (no charset/guild checks): lets Kevin clean
+            # up any legacy/odd key exactly as `!vip list` shows it.
+            name = (toks[1].lstrip('@').lower() if len(toks) > 1 else "")
+        if name in VIP_RATES:
+            del VIP_RATES[name]
+            _save_vip()
+            return f"Removed **{name}** from VIP — they get standard rates now."
+        return f"**{name or '?'}** isn't on the VIP list. `!vip list` to see who is."
+
+    return "Commands: `!vip add <username> 91 [88 85]` · `!vip remove <username>` · `!vip list`"
+
+def build_sheet_h_formula(r, pokemon_tiers=None):
+    """The per-row payout formula written into buying sheets — generated from the
+    bot's CURRENT rate constants so bot and sheet can't disagree. pokemon_tiers
+    overrides only the Pokémon band RATES (VIP sheets). NOTE: assumes the current
+    band structure (3 pokemon bands, 3 football bands, 2 one piece bands) — if a
+    weekly flyer changes the band COUNT, update this builder with it."""
+    def _n(v):
+        return f"{v:g}"   # 1.0 -> "1", 0.89 -> "0.89" (matches the template's style)
+    pt = pokemon_tiers or PSA_POKEMON_PER_CARD_TIERS
+    p1, p2, p3 = _n(pt[0][2]), _n(pt[1][2]), _n(pt[2][2])
+    p_mid_top = int(pt[1][1])
+    pok_max = PSA_SPORT_MAX_PRICE['pokemon']
+    nba_max = PSA_SPORT_MAX_PRICE['basketball']
+    op_max = PSA_SPORT_MAX_PRICE['one piece']
+    nfl_max = PSA_SPORT_MAX_PRICE['football']
+    f1, f2, f3 = (_n(PSA_FOOTBALL_PER_CARD_TIERS[0][2]), _n(PSA_FOOTBALL_PER_CARD_TIERS[1][2]),
+                  _n(PSA_FOOTBALL_PER_CARD_TIERS[2][2]))
+    op1, op2 = _n(PSA_ONE_PIECE_PER_CARD_TIERS[0][2]), _n(PSA_ONE_PIECE_PER_CARD_TIERS[1][2])
+    g = PSA_MIN_GRADE
+    gp = POKEMON_HIGH_BAND_MIN_GRADE
+    gop = ONE_PIECE_MIN_GRADE
+    maxage = (f'IF(F{r}="pokemon",IF(G{r}<100,60,30),IF(F{r}="basketball",IF(G{r}<={nba_max},99999,90),'
+              f'IF(OR(F{r}="football",F{r}="mlb",F{r}="baseball"),IF(G{r}<100,99999,90),'
+              f'IF(F{r}="other",60,30))))')
+    rate = (f'IFS('
+            f'F{r}="pokemon",IF(G{r}<=100,IF(N(E{r})<{g},0,{p1}),IF(G{r}<{p_mid_top},IF(N(E{r})<{g},0,{p2}),IF(G{r}<={pok_max},IF(N(E{r})<{gp},0,{p3}),0))),'
+            f'F{r}="basketball",IF(G{r}<={nba_max},0.95,0),'
+            f'F{r}="football",IF(N(E{r})<{g},0,IF(G{r}>{nfl_max},0,IF(G{r}<=30,{f1},IF(G{r}<100,{f2},{f3})))),'
+            f'OR(F{r}="mlb",F{r}="baseball"),0,'
+            f'F{r}="other",IF(N(E{r})<{gop},0,IF(AND(G{r}>=1,G{r}<=100),{op1},IF(G{r}<={op_max},{op2},0))),'
+            f'TRUE,0)')
+    too_old = (f'IF(ISNUMBER(J{r}),(TODAY()-J{r})>{maxage},'
+               f'IFERROR((TODAY()-DATEVALUE(J{r}))>{maxage},TRUE))')
+    return f'=IF(OR(NOT(ISNUMBER(G{r})),G{r}=0),"",IF(A{r}<>"PSA",0.7,IF({too_old},0,{rate})))'
+
+def write_custom_sheet_formulas(sheet_id, pokemon_tiers, sheet_name="Form. Put Date Here."):
+    """Rewrite H2:H1000 in one customer's sheet with their VIP Pokémon rates.
+    Blocking — run via asyncio.to_thread."""
+    gc = get_gspread_client()
+    ss = gc.open_by_key(sheet_id)
+    try:
+        sheet = ss.worksheet(sheet_name)
+    except Exception:
+        sheet = ss.sheet1
+    sheet.update(values=[[build_sheet_h_formula(r, pokemon_tiers)] for r in range(2, 1001)],
+                 range_name="H2:H1000", value_input_option="USER_ENTERED")
+
+
 def _drive_find_sheet(lookup_names, created_after=None):
     """Sync helper: search the PSA folder for a buying sheet whose name STARTS WITH
     one of the lookup names (the Apps Script names sheets '<username> <source> <date>',
@@ -1762,6 +2003,13 @@ async def on_ready():
     if not _PENDING_RETRIES_RESUMED:
         _PENDING_RETRIES_RESUMED = True
         asyncio.create_task(_resume_pending_retries())
+    global _VIP_LOAD_FAILED
+    if _VIP_LOAD_FAILED:
+        _VIP_LOAD_FAILED = False
+        await ping_kevin(
+            "⚠️ **VIP store failed to load** — every VIP is quoting at STANDARD "
+            "rates until you re-add them with `!vip add`. The unreadable file "
+            "was kept as vip_store.json.corrupt.")
 
 async def handle_owe(message):
     """!owe <@seller|name> <amount> [ach] [note...] — log a package Kevin owes (default Wire)."""
@@ -1837,6 +2085,24 @@ async def on_guild_channel_create(channel):
 @bot.event
 async def on_message(message):
     if message.author.bot:
+        return
+
+    # ── !vip command (Kevin only) — per-customer premium Pokémon rates ──
+    if message.content.strip().lower().startswith('!vip'):
+        if message.author.id == YOUR_DISCORD_USER_ID:
+            try:
+                reply = handle_vip_command(message.content, message.mentions, message.guild)
+                if message.guild is None:
+                    await message.channel.send(reply)
+                else:
+                    # Negotiated rates are private — never post them in a server
+                    # channel (tickets are customer-readable). DM the reply.
+                    if not await ping_kevin(reply):
+                        await message.channel.send(
+                            "Couldn't DM you — check your DM settings. "
+                            "(Not posting VIP rates here.)")
+            except Exception as e:
+                print(f"vip command error: {e}")
         return
 
     # ── !owe command (Kevin only) — log a package he owes, anywhere ──
@@ -2126,6 +2392,15 @@ async def on_message(message):
                 sheet_id = data.get("sheet_id") or extract_sheet_id(sheet_url)
                 if sheet_id:
                     remember_channel_sheet(channel_id, sheet_id)
+                    # Stamp VIP formulas at CREATION time too: if the helper is
+                    # down and Kevin ends up quoting this sheet by hand (or the
+                    # retry exhausts), the sheet must already carry their rates.
+                    _vt = vip_pokemon_tiers(username)
+                    if _vt:
+                        try:
+                            await asyncio.to_thread(write_custom_sheet_formulas, sheet_id, _vt)
+                        except Exception as e:
+                            print(f"VIP creation-time stamp failed (quote-time stamp retries): {e}")
 
                 # Tell the customer the sheet is ready BEFORE the slow helper call.
                 # Helper lookup for 50 certs can be 1-2 min; don't make them wait.
