@@ -70,22 +70,24 @@ PSA_MIN_PRICE = 1
 PSA_MIN_GRADE = 7
 PSA_MAX_AGE_DAYS = 30
 # NBA slabs are bought at ANY grade with just one sale on record (any date), across
-# the whole $1-$300 band (Jul 24 weekend). Set to the $300 ceiling so both the
+# the whole $1-$200 band (Jul 31 weekend). Set to the $200 ceiling so both the
 # any-grade waiver AND the "one sale ever" age (inf) apply to every in-range NBA card.
-NBA_ANY_GRADE_MAX_PRICE = 300
+NBA_ANY_GRADE_MAX_PRICE = 200
 # Per-sport price ceilings — sports not listed here are rejected outright, and any
-# slab priced ABOVE its ceiling is rejected (Jul 24 weekend flyer).
-# pokemon: $750. basketball (NBA): $300. one piece: $150. football (NFL): $250. mlb: $100.
+# slab priced ABOVE its ceiling is rejected (Jul 31 weekend flyer).
+# pokemon: $750. basketball (NBA): $200. one piece: $750. football (NFL): $200.
+# MLB REMOVED Jul 31 — baseball slabs are rejected (absent from the flyer).
 PSA_SPORT_MAX_PRICE = {
     'pokemon': 750,
-    'basketball': 300,
-    'one piece': 150,
-    'football': 250,   # NFL slabs
-    'mlb': 100,        # MLB slabs
+    'basketball': 200,
+    'one piece': 750,
+    'football': 200,   # NFL slabs
 }
-# Pokémon $200+ requires PSA 8-10 (the $1-$200 bands stay PSA 7+).
-POKEMON_HIGH_BAND_MIN = 200
+# Pokémon $150+ requires PSA 8-10 (the $1-$150 bands stay PSA 7+).
+POKEMON_HIGH_BAND_MIN = 150
 POKEMON_HIGH_BAND_MIN_GRADE = 8
+# One Piece slabs require PSA 8-10 across the board (Jul 31 weekend).
+ONE_PIECE_MIN_GRADE = 8
 # Per-sport max age of last sale (days). pokemon / basketball / football / mlb are
 # value-dependent and handled directly in classify_psa_comp; the rest use this dict.
 PSA_SPORT_MAX_AGE_DAYS = {
@@ -165,26 +167,30 @@ def apply_avg3_value(comp, threshold=0):
 # Low end of each flyer range. Grade, reject-zones, and the Pokémon manual bucket
 # live in classify_psa_comp, so only in-band cards reach these blends. CL-confidence
 # requirements can't be enforced (no CL score in the data) — priced on value+grade.
-# Pokémon (Jul 24 weekend): $1-$100 → 90%, $100-$200 → 87%,
-# $200-$750 → 85% (PSA 8-10 only — enforced in classify_psa_comp).  Ceiling $750.
+# Pokémon (Jul 31 weekend): $1-$100 → 89% (flyer says 89-90 — pay the low end),
+# $100-$150 → 87%, $150-$750 → 84% (PSA 8-10 only — enforced in classify_psa_comp).
+# Ceiling $750.
 PSA_POKEMON_PER_CARD_TIERS = [
-    (0,      100.01,       0.90),   # $1-$100 → 90%  (.01 so exactly $100 is 90%)
-    (100.01, 200,          0.87),   # $100-$200 → 87%
-    (200,    float('inf'), 0.85),   # $200-$750 → 85%  ($750 ceiling rejects above)
+    (0,      100.01,       0.89),   # $1-$100 → 89%  (.01 so exactly $100 is 89%)
+    (100.01, 150,          0.87),   # $100-$150 → 87%
+    (150,    float('inf'), 0.84),   # $150-$750 → 84%  ($750 ceiling rejects above)
 ]
-# Basketball (NBA, Jul 24 weekend): $1-$300 → 95%, ANY grade, one sale ever.
-# Ceiling $300.
+# Basketball (NBA, Jul 31 weekend): $1-$200 → 95%, ANY grade, one sale ever.
+# Ceiling $200.
 PSA_BASKETBALL_PER_CARD_TIERS = [
-    (0, float('inf'), 0.95),   # $1-$300 → 95%  ($300 ceiling rejects above)
+    (0, float('inf'), 0.95),   # $1-$200 → 95%  ($200 ceiling rejects above)
 ]
 PSA_ONE_PIECE_PER_CARD_TIERS = [
-    (0, float('inf'), 0.87),  # $1-$150 → 87% (slabs over $150 rejected at the ceiling)
+    (0,      100.01,       0.88),   # $1-$100 → 88%  (.01 so exactly $100 is 88%)
+    (100.01, float('inf'), 0.83),   # $101-$750 → 83%  ($750 ceiling rejects above)
 ]
-# NFL / football AND MLB share these rates (Jul 24 weekend — ceilings differ:
-# NFL $250, MLB $100): $1-30 → 100%, $30-ceiling → 92%.
+# NFL / football (Jul 31 weekend): $1-30 → 100%, $30-100 → 92%, $100-200 → 90%.
+# Ceiling $200. (The flyer's "CL 3+" on the $100-200 band is a CardLadder
+# confidence requirement the bot cannot read — Kevin eyeballs it.)
 PSA_FOOTBALL_PER_CARD_TIERS = [
     (0,     30.01,        1.00),   # $1-$30 → 100%  (.01 so exactly $30 is 100%)
-    (30.01, float('inf'), 0.92),   # $30-ceiling → 92%
+    (30.01, 100,          0.92),   # $30-$100 → 92%
+    (100,   float('inf'), 0.90),   # $100-$200 → 90%  ($200 ceiling rejects above)
 ]
 
 # ── BASKETBALL-SPECIFIC REJECTION RULES ──────────────────────────────────────────
@@ -320,12 +326,12 @@ def _blended_per_card_rate(tiers, card_values):
 def get_psa_payout_rate(sport, sport_lot_total, card_values=None):
     """
     Return the effective (blended) per-card payout rate for a sport's accepted cards.
-    Jul 24 weekend rates:
-    - pokemon: $1-100 → 90%, $100-200 → 87%, $200-750 → 85% PSA 8-10 (ceiling $750).
-    - basketball: $1-300 → 95% (ceiling $300).
-    - one piece: $1-150 → 87% (ceiling $150).
-    - football (NFL): $1-30 → 100%, $30-250 → 92% (ceiling $250).
-    - mlb: $1-30 → 100%, $30-100 → 92% (ceiling $100).
+    Jul 31 weekend rates:
+    - pokemon: $1-100 → 89%, $100-150 → 87%, $150-750 → 84% PSA 8-10 (ceiling $750).
+    - basketball: $1-200 → 95% any grade (ceiling $200).
+    - one piece (PSA 8-10): $1-100 → 88%, $101-750 → 83% (ceiling $750).
+    - football (NFL): $1-30 → 100%, $30-100 → 92%, $100-200 → 90% (ceiling $200).
+    - mlb: NOT BUYING (rejected in classify_psa_comp).
     Reject-zones / ceilings / grade floors are filtered in classify_psa_comp, so
     only in-band cards reach these blends.
     """
@@ -335,7 +341,7 @@ def get_psa_payout_rate(sport, sport_lot_total, card_values=None):
         return _blended_per_card_rate(PSA_BASKETBALL_PER_CARD_TIERS, card_values)
     if sport == 'one piece':
         return _blended_per_card_rate(PSA_ONE_PIECE_PER_CARD_TIERS, card_values)
-    if sport in ('football', 'mlb'):
+    if sport == 'football':
         return _blended_per_card_rate(PSA_FOOTBALL_PER_CARD_TIERS, card_values)
     return PSA_POKEMON_PER_CARD_TIERS[0][2]
 
@@ -655,7 +661,7 @@ def classify_psa_comp(comp):
     max_price = PSA_SPORT_MAX_PRICE.get(sport)
     if max_price is None:
         sport_label = sport or 'unknown sport'
-        return ('rejected', f"{sport_label} (we only buy pokemon, basketball, football, mlb, and one piece)")
+        return ('rejected', f"{sport_label} (we only buy pokemon, basketball, football, and one piece right now)")
     if cv > max_price:
         # Two decimals so a $200.40 NBA card reads "over our $200 max" sensibly
         # instead of the contradictory "$200 (over our $200 max)".
@@ -678,6 +684,10 @@ def classify_psa_comp(comp):
         return ('rejected',
                 f"PSA {grade_raw} (${cv:,.0f} Pokémon needs PSA "
                 f"{POKEMON_HIGH_BAND_MIN_GRADE}-10 at ${POKEMON_HIGH_BAND_MIN}+)")
+    # One Piece slabs are PSA 8-10 only (whole $1-$750 range, Jul 31 weekend).
+    if sport == 'one piece' and g < ONE_PIECE_MIN_GRADE:
+        return ('rejected',
+                f"PSA {grade_raw} (One Piece slabs are PSA {ONE_PIECE_MIN_GRADE}-10 only)")
     last_sale = comp.get('lastSaleDate')
     if not last_sale:
         return ('rejected', 'no recent sale visible')
