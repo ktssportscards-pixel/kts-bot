@@ -524,19 +524,64 @@ def get_gspread_client():
 def get_drive_service():
     return build("drive", "v3", credentials=get_credentials())
 
+def _find_fresh_psa_sheet(username, since_dt):
+    """Drive fallback for create_psa_sheet: the Apps Script usually FINISHES
+    creating the sheet server-side even when our HTTP call to it dies (Aug 2
+    morning: a transient Google 404 and a client timeout — both sheets existed
+    in Drive anyway). Find a '<username> discord ...' sheet created after we
+    started calling, so a retry doesn't make a duplicate."""
+    try:
+        drive = get_drive_service()
+        safe = username.replace("\\", "\\\\").replace("'", "\\'")
+        since_iso = since_dt.strftime("%Y-%m-%dT%H:%M:%S")
+        q = (f"name contains '{safe} discord' and '{PSA_FOLDER_ID}' in parents "
+             f"and trashed=false and createdTime > '{since_iso}'")
+        files = drive.files().list(q=q, orderBy="createdTime desc", pageSize=5,
+                                   fields="files(id,name,createdTime)").execute().get("files", [])
+        for f in files:
+            if f["name"].lower().startswith(username.lower()):
+                return f
+    except Exception as e:
+        print(f"Drive fallback search failed: {e}")
+    return None
+
 def create_psa_sheet(username, cert_numbers):
-    """Create a buying sheet by calling the Google Apps Script web app."""
+    """Create a buying sheet by calling the Google Apps Script web app.
+    Google gets slow/flaky under weekend-morning load: a 103-cert sheet took
+    54s on a HEALTHY run (the old 30s timeout could never survive it), and
+    failed calls usually still created their sheet server-side. So: generous
+    timeout; on failure poll Drive for the sheet Google may have finished
+    anyway (returns it with no duplicate); only then retry the call once."""
     import urllib.request
     import urllib.parse
+    import time as _time
+    from datetime import timedelta as _td
     certs_str = ",".join([str(c).strip() for c in cert_numbers])
     params = urllib.parse.urlencode({"username": username, "certs": certs_str, "folder_id": PSA_FOLDER_ID})
     url = f"{APPS_SCRIPT_URL}?{params}"
-    req = urllib.request.Request(url, headers={"User-Agent": "KTS-Bot/1.0"})
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        data = json.loads(resp.read().decode())
-    if not data.get("success"):
-        raise Exception(data.get("error", "Unknown error from Apps Script"))
-    return data["url"], data["name"], data
+    started = datetime.utcnow() - _td(seconds=30)   # slack for clock skew vs Drive
+    last_err = None
+    for attempt in (1, 2):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "KTS-Bot/1.0"})
+            with urllib.request.urlopen(req, timeout=150) as resp:
+                data = json.loads(resp.read().decode())
+            if not data.get("success"):
+                raise Exception(data.get("error", "Unknown error from Apps Script"))
+            return data["url"], data["name"], data
+        except Exception as e:
+            last_err = e
+            print(f"Apps Script sheet call failed (attempt {attempt}/2): {e}")
+            # Server-side run may still be finishing — poll Drive up to ~60s.
+            for _ in range(6):
+                _time.sleep(10)
+                f = _find_fresh_psa_sheet(username, started)
+                if f:
+                    sheet_url = f"https://docs.google.com/spreadsheets/d/{f['id']}/edit"
+                    print(f"Apps Script call failed but the sheet WAS created — recovered '{f['name']}' from Drive")
+                    return sheet_url, f["name"], {"sheet_id": f["id"], "url": sheet_url,
+                                                  "name": f["name"], "recovered": True}
+    raise last_err
 
 
 # ── HELPER API (CARDLADDER COMPS) ────────────────────────────────────────────────
