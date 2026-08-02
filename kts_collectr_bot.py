@@ -8,15 +8,18 @@ Handles TWO types of customers automatically:
    - Bot creates a Google Sheet copy with cert numbers + CardLadder links
    - Pings Kevin with sheet link
 
-2. RAW CARD sellers (Collectr) — ONE PIECE ONLY (May 2026):
+2. RAW CARD sellers (Collectr) — ONE PIECE + POKÉMON (Jul 31 2026):
    - Customer uploads their Collectr CSV export in their ticket channel
-   - Bot reads it, calculates total market value
-   - One Piece English NM singles, $1-$150 per card
-   - Applies correct % based on lot size (low end of the range):
+   - Bot reads it, validates per game, calculates per-game market value
+   - One Piece: English NM singles, $1-$150 per card
        under $10k     → 85%
        $10k+          → 88%
-   - Pokémon raws are politely declined (PSA slabs still accepted)
-   - Sends customer their offer
+   - Pokémon: English NM UNGRADED singles, $40-$80 per card, 2022+ sets only,
+     no trainer cards, no Master Ball versions (see pokemon_species.py)
+       under $5k      → 85%
+       $5k+           → 88%
+   - Any rule-breaking rows BLOCK the quote until the re-export is clean
+   - Sends customer their offer (per-game portions priced separately)
    - Pings Kevin with breakdown
 
 SETUP:
@@ -34,6 +37,7 @@ import io
 import os
 import json
 import pandas as pd
+import pokemon_species
 from datetime import datetime, date
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
@@ -64,6 +68,19 @@ RAW_PAYOUT_TIERS = [
 # Raw card per-card price limits (One Piece)
 RAW_MIN_PRICE = 1
 RAW_MAX_PRICE = 150
+
+# Pokémon raw singles (added Jul 31 2026 weekend): $40-$80 per card, English
+# Near Mint UNGRADED, 2022+ sets only, no trainers, no Master Ball versions
+# (rules data + helpers live in pokemon_species.py). 85% base, 88% when the
+# POKÉMON portion of the lot is $5k+. Pokémon-singles lots need $1,500+
+# (POKEMON_SINGLES_MIN_LOT); One Piece singles keep their own $3,000 minimum.
+POKEMON_RAW_MIN_PRICE = 40
+POKEMON_RAW_MAX_PRICE = 80
+POKEMON_RAW_PAYOUT_TIERS = [
+    (0,    5000,         0.85),   # under $5k Pokémon portion → 85%
+    (5000, float('inf'), 0.88),   # $5k+ Pokémon portion      → 88%
+]
+POKEMON_SINGLES_MIN_LOT = 1500
 
 # PSA slab buying criteria
 PSA_MIN_PRICE = 1
@@ -353,16 +370,19 @@ VIP_CLIENTS = []
 VIP_CLIENTS_89 = []
 
 # ── PAYOUT CALCULATOR ────────────────────────────────────────────────────────────
-def get_payout_rate(total, username):
-    """Return the payout percentage for a given lot total."""
+def get_raw_rate(game, game_total, username):
+    """Payout % for ONE game's singles portion. Each game's tier is judged on
+    its OWN portion of the lot: One Piece hits 88% at $10k+ of One Piece,
+    Pokémon hits 88% at $5k+ of Pokémon (Jul 31 2026)."""
     username_lower = username.lower()
     if username_lower in VIP_CLIENTS_89:
         return 0.89, "VIP rate"
     if username_lower in VIP_CLIENTS:
         return 0.87, "VIP rate"
-    for low, high, rate in RAW_PAYOUT_TIERS:
-        if low <= total < high:
-            return rate, f"${low:,}–{'$'+str(high//1000)+'k' if high != float('inf') else '+'} tier"
+    tiers = POKEMON_RAW_PAYOUT_TIERS if game == 'pokemon' else RAW_PAYOUT_TIERS
+    for low, high, rate in tiers:
+        if low <= game_total < high:
+            return rate, f"${low:,}–{'$'+str(int(high)//1000)+'k' if high != float('inf') else '+'} tier"
     return 0.80, "standard rate"
 
 
@@ -395,12 +415,16 @@ def _has_non_latin_script(text):
 
 def parse_collectr_csv(content_bytes):
     """
-    Parse a Collectr CSV export and return total market value + card list.
-    Validates cards against KTS One Piece buying requirements:
-      - Must be One Piece TCG (Pokémon politely declined)
-      - English only
-      - $1-$150 per card
-      - Near Mint only
+    Parse a Collectr CSV export and validate it per game (Jul 31 2026):
+      ONE PIECE singles: English, $1-$150 per card (unchanged).
+      POKÉMON singles:   English, Near Mint, UNGRADED, $40-$80 per card,
+                         2022+ sets only, no trainer cards, no Master Ball
+                         versions (data + helpers in pokemon_species.py).
+      Any other game is rejected.
+    BLOCK UNTIL CLEAN: any violating row lands in `issues` and the caller
+    refuses to quote until a clean re-export arrives — same handling for both
+    games. Totals/counts come back per game (game_totals / game_counts) so
+    mixed lots are priced per portion.
     """
     df = pd.read_csv(io.BytesIO(content_bytes))
 
@@ -431,61 +455,132 @@ def parse_collectr_csv(content_bytes):
             game_col = candidate
             break
 
-    pokemon_cards = []
-    other_game_cards = []
-    if game_col:
-        for _, row in df.iterrows():
-            game_val = str(row.get(game_col, '')).strip().lower()
-            name = str(row.get('Product Name', 'Unknown'))
-            set_name = str(row.get('Set', ''))
-            if 'pokemon' in game_val or 'pokémon' in game_val:
-                pokemon_cards.append(f"• {name} ({set_name})")
-            elif game_val and 'one piece' not in game_val:
-                other_game_cards.append(f"• {name} ({set_name}) — {row.get(game_col, '')}")
+    def _game_of(row):
+        """'pokemon' / 'one piece' / 'other'. Pokémon must match EXACTLY —
+        "Pokemon Japan" / "Pokémon (JP)" must NOT ride in under English
+        Pokémon rules (they fall to 'other' and get blocked, matching the old
+        code where every pokemon-ish row was declined). A blank category in a
+        modern export is 'other' too (fail closed — the old code blocked NaN
+        categories; treating them as One Piece would let Pokémon rows dodge
+        every Pokémon rule). No game column at all = legacy export = One Piece."""
+        if not game_col:
+            return 'one piece'
+        v = pokemon_species.canon(str(row.get(game_col, '')).strip())
+        if v == 'pokemon':
+            return 'pokemon'
+        if not v or v == 'nan':
+            return 'other'
+        if 'one piece' in v:
+            return 'one piece'
+        return 'other'
 
-    # Check for non-English cards. Collectr marks them two ways:
-    #   1. Language tag in the product name: "(JP)", "(KR)", "(CN)", "(TW)", "(KOR)"
-    #   2. Characters from a non-Latin script (Japanese/Korean/Chinese/etc.) in the
-    #      name or set. We deliberately do NOT reject on any non-ASCII byte —
-    #      English exports contain curly apostrophes / dashes / ™ that are not a
-    #      foreign language (see _has_non_latin_script).
+    df['_game'] = df.apply(_game_of, axis=1)
+
     non_english_tags = ('(jp)', '(kr)', '(cn)', '(tw)', '(kor)', '(jpn)', '(chn)')
+    other_game_cards = []
     non_english = []
-    for _, row in df.iterrows():
-        name = str(row.get('Product Name', ''))
-        set_name = str(row.get('Set', ''))
-        combined = name + set_name
-        name_lower = name.lower()
-        if any(tag in name_lower for tag in non_english_tags):
-            non_english.append(f"• {name} ({set_name})")
-        elif _has_non_latin_script(combined):
-            non_english.append(f"• {name} ({set_name})")
+    op_over_max, op_under_min = [], []
+    pk_price, pk_condition, pk_graded = [], [], []
+    pk_master_ball, pk_trainer, pk_old_set, pk_sealed = [], [], [], []
 
-    # Per-card price range: $1-$150
-    over_max = []
-    under_min = []
+    def _cell(row, col):
+        """Cell as a clean string: pandas turns blanks into NaN and
+        str(nan) == 'nan', which must read as empty, not as a value."""
+        v = str(row.get(col, '')).strip()
+        return '' if v.lower() == 'nan' else v
+
     for _, row in df.iterrows():
-        price = float(row[price_col])
         name = str(row.get('Product Name', 'Unknown'))
-        if price > RAW_MAX_PRICE:
-            over_max.append(f"• {name} — ${price:.2f}")
-        elif price < RAW_MIN_PRICE:
-            under_min.append(f"• {name} — ${price:.2f}")
+        set_name = _cell(row, 'Set')
+        game = row['_game']
+        price = float(row[price_col])
+        label = f"• {name} ({set_name})"
+
+        if game == 'other':
+            cat = _cell(row, game_col) if game_col else ''
+            other_game_cards.append(f"{label} — {cat or '(no category)'}")
+            continue
+
+        # English only (both games). Collectr marks foreign cards two ways:
+        #   1. Language tag in the product name: "(JP)", "(KR)", "(CN)", ...
+        #   2. Non-Latin script (kana/kanji/hangul/...) in name or set. We do
+        #      NOT reject on any non-ASCII byte — English exports contain curly
+        #      apostrophes / ™ / é (see _has_non_latin_script).
+        if (any(tag in name.lower() for tag in non_english_tags)
+                or _has_non_latin_script(name + set_name)):
+            non_english.append(label)
+
+        if game == 'one piece':
+            # One Piece: per-card price $1-$150 (unchanged rules)
+            if price > RAW_MAX_PRICE:
+                op_over_max.append(f"• {name} — ${price:.2f}")
+            elif price < RAW_MIN_PRICE:
+                op_under_min.append(f"• {name} — ${price:.2f}")
+            continue
+
+        # ── Pokémon rules (Jul 31 2026) ─────────────────────────────────────
+        variance = _cell(row, 'Variance')
+        condition = _cell(row, 'Card Condition')
+        grade = _cell(row, 'Grade')
+
+        if not (POKEMON_RAW_MIN_PRICE <= price <= POKEMON_RAW_MAX_PRICE):
+            pk_price.append(f"• {name} — ${price:.2f}")
+        if pokemon_species.canon(condition) != 'near mint':
+            pk_condition.append(f"{label} — {condition or 'no condition given'}")
+        # Graded cards don't belong in a raw-singles export — they go through
+        # the PSA slab flow (cert numbers) instead. Blank Grade = ungraded.
+        if grade and pokemon_species.canon(grade) != 'ungraded':
+            pk_graded.append(f"{label} — {grade}")
+        if pokemon_species.is_master_ball_variant(name, variance):
+            pk_master_ball.append(label)
+        # Japanese-only sets carry Latin names ("VSTAR Universe", "... sv2a
+        # Japanese") that the script/tag checks above can't see.
+        if pokemon_species.is_non_english_set(set_name) and label not in non_english:
+            non_english.append(label)
+        # Sealed product titled after its featured Pokémon ("Pikachu V Box",
+        # "... UPC Promo Sealed") would pass the species filter — veto first.
+        if pokemon_species.is_sealed_product_name(name):
+            pk_sealed.append(label)
+        # FAIL-CLOSED trainer filter: accept only if the name contains a
+        # recognized Pokémon species. Trainers/items/energy don't.
+        elif (pokemon_species.find_species(name) is None
+                or pokemon_species.is_trainer_with_species_name(name)):
+            pk_trainer.append(label)
+        if pokemon_species.is_pre_2022_set(set_name):
+            pk_old_set.append(label)
 
     issues = []
-    if pokemon_cards:
-        issues.append(("pokemon", pokemon_cards))
     if other_game_cards:
         issues.append(("other_game", other_game_cards))
     if non_english:
         issues.append(("non_english", non_english))
-    if over_max:
-        issues.append(("over_max", over_max))
-    if under_min:
-        issues.append(("under_min", under_min))
+    if op_over_max:
+        issues.append(("over_max", op_over_max))
+    if op_under_min:
+        issues.append(("under_min", op_under_min))
+    if pk_price:
+        issues.append(("pk_price", pk_price))
+    if pk_condition:
+        issues.append(("pk_condition", pk_condition))
+    if pk_graded:
+        issues.append(("pk_graded", pk_graded))
+    if pk_master_ball:
+        issues.append(("pk_master_ball", pk_master_ball))
+    if pk_sealed:
+        issues.append(("pk_sealed", pk_sealed))
+    if pk_trainer:
+        issues.append(("pk_trainer", pk_trainer))
+    if pk_old_set:
+        issues.append(("pk_old_set", pk_old_set))
 
     total = df['_line_total'].sum()
     card_count = int(df[qty_col].sum()) if qty_col else len(df)
+
+    game_totals, game_counts = {}, {}
+    for g in ('one piece', 'pokemon'):
+        sub = df[df['_game'] == g]
+        game_totals[g] = float(sub['_line_total'].sum())
+        game_counts[g] = int(sub[qty_col].sum()) if qty_col else len(sub)
 
     top_cards = df.nlargest(5, '_line_total')[['Product Name', 'Set', price_col, '_line_total']].copy()
     top_list = []
@@ -498,6 +593,8 @@ def parse_collectr_csv(content_bytes):
     return {
         "total": total,
         "card_count": card_count,
+        "game_totals": game_totals,
+        "game_counts": game_counts,
         "top_cards": top_list,
         "issues": issues,
         "df": df
@@ -1200,26 +1297,43 @@ last_offer = {}
 channel_sheet = {}
 
 # ── BUYING MINIMUMS ───────────────────────────────────────────────────────────
-# Two qualifying paths for a lot:
-#   1. Lot CONTAINS PSA slabs  -> need >=15 accepted slabs AND >=$3,000 combined
-#      value (slab CardLadder comp + any One Piece singles market value).
-#   2. One Piece singles ONLY  -> Collectr export must be >=$3,000 in value.
+# Qualifying paths for a lot (Jul 31 2026):
+#   1. Lot CONTAINS PSA slabs   -> need >=15 accepted slabs AND >=$3,000 combined
+#      value (slab CardLadder comp + any raw singles market value).
+#   2. One Piece singles alone  >=$3,000  -> lot qualifies.
+#   3. Pokémon singles alone    >=$1,500  -> lot qualifies (POKEMON_SINGLES_MIN_LOT).
+# Hitting EITHER singles threshold qualifies the whole lot (slabs then taken
+# regardless of count, matching the long-standing One Piece behavior).
 # Slabs and singles can arrive in either order / separate messages, so we keep a
 # running per-ticket total and only let a seller proceed/ship once it qualifies.
 MIN_LOT_VALUE = 3000
 MIN_SLAB_COUNT = 15
 
-# Per-ticket running lot.  channel_id -> {"singles": float, "slab_certs": {cert: comp_value}}
-#   singles    : market value of the latest valid Collectr CSV (replaced on re-upload)
+# Per-ticket running lot.
+#   channel_id -> {"singles": {game: market_value}, "slab_certs": {cert: comp_value}}
+#   singles    : per-game market value of the latest valid Collectr CSV
+#                (whole dict replaced on re-upload — latest CSV is the truth)
 #   slab_certs : accepted PSA certs -> comp value, accumulated & deduped by cert
 lot_state = {}
 
 def _lot_entry(channel_id):
-    return lot_state.setdefault(channel_id, {"singles": 0.0, "slab_certs": {}})
+    return lot_state.setdefault(channel_id, {"singles": {}, "slab_certs": {}})
 
-def set_singles_value(channel_id, value):
-    """Latest Collectr CSV is the current truth for singles — replace, don't add."""
-    _lot_entry(channel_id)["singles"] = float(value or 0)
+def set_singles_value(channel_id, totals_by_game):
+    """Latest Collectr CSV is the current truth for singles — replace, don't add.
+    Replaces the ENTIRE per-game dict: a re-export with no Pokémon rows zeroes
+    the Pokémon portion too."""
+    _lot_entry(channel_id)["singles"] = {
+        g: float(v or 0) for g, v in (totals_by_game or {}).items() if float(v or 0) > 0
+    }
+
+def singles_by_game(channel_id):
+    entry = lot_state.get(channel_id) or {}
+    singles = entry.get("singles") or {}
+    return {
+        "one piece": float(singles.get("one piece", 0)),
+        "pokemon": float(singles.get("pokemon", 0)),
+    }
 
 def add_slab_values(channel_id, cert_value_map):
     """Accumulate accepted slab certs (deduped by cert so re-sends don't double-count)."""
@@ -1228,24 +1342,29 @@ def add_slab_values(channel_id, cert_value_map):
         entry["slab_certs"][str(cert)] = float(val or 0)
 
 def lot_summary(channel_id):
-    """Return (slab_count, slab_value, singles_value, combined_value)."""
-    entry = lot_state.get(channel_id) or {"singles": 0.0, "slab_certs": {}}
+    """Return (slab_count, slab_value, singles_value, combined_value).
+    singles_value is the sum across games — use singles_by_game for the split."""
+    entry = lot_state.get(channel_id) or {"singles": {}, "slab_certs": {}}
     slab_value = sum(entry["slab_certs"].values())
     slab_count = len(entry["slab_certs"])
-    singles = entry["singles"]
+    singles = sum((entry.get("singles") or {}).values())
     return slab_count, slab_value, singles, slab_value + singles
 
 def lot_qualifies(channel_id):
     """True if the running lot meets the buying minimums for its path."""
     slab_count, slab_value, singles, combined = lot_summary(channel_id)
-    # One Piece singles alone at $3,000+ qualifies the whole lot — we'll take any
-    # slabs included regardless of slab count.
-    if singles >= MIN_LOT_VALUE:
+    games = singles_by_game(channel_id)
+    # A singles portion hitting its own threshold qualifies the whole lot —
+    # we'll take any slabs included regardless of slab count.
+    # One Piece $3,000+, Pokémon $1,500+ (Jul 31 2026).
+    if games["one piece"] >= MIN_LOT_VALUE:
+        return True
+    if games["pokemon"] >= POKEMON_SINGLES_MIN_LOT:
         return True
     # Otherwise, any lot containing slabs needs 15+ slabs AND $3,000+ combined.
     if slab_count > 0:
         return combined >= MIN_LOT_VALUE and slab_count >= MIN_SLAB_COUNT
-    # Singles-only and under $3,000.
+    # Singles-only and below every singles threshold.
     return False
 
 def proceed_or_hold_tail(channel_id):
@@ -1257,23 +1376,30 @@ def proceed_or_hold_tail(channel_id):
     if lot_qualifies(channel_id):
         return None
     slab_count, slab_value, singles, combined = lot_summary(channel_id)
+    games = singles_by_game(channel_id)
+    op, pk = games["one piece"], games["pokemon"]
     # Empty entry (created on the CSV-rejected / helper-down paths just to gate
     # "proceed"): there's no priced lot to itemize, so don't tell a slab customer
-    # they're "$3,000 of One Piece singles short" — their quote simply isn't done.
+    # they're "$3,000 of singles short" — their quote simply isn't done.
     if slab_count == 0 and singles == 0:
         return ("⏳ **Your quote isn't finalized yet** — Kevin is reviewing it and "
                 "will confirm shortly. Hang tight!")
     lines = ["📊 **Heads up — this lot doesn't meet our buying minimums yet.**", ""]
-    if slab_count and singles:
-        lines.append(
-            f"PSA slabs: **{slab_count}** (${slab_value:,.2f})  •  "
-            f"One Piece singles: **${singles:,.2f}**  •  Combined: **${combined:,.2f}**"
-        )
-    elif slab_count:
-        lines.append(f"PSA slabs: **{slab_count}** (${slab_value:,.2f})")
-    else:
-        lines.append(f"One Piece singles: **${singles:,.2f}**")
+    parts = []
+    if slab_count:
+        parts.append(f"PSA slabs: **{slab_count}** (${slab_value:,.2f})")
+    if op:
+        parts.append(f"One Piece singles: **${op:,.2f}**")
+    if pk:
+        parts.append(f"Pokémon singles: **${pk:,.2f}**")
+    if len(parts) > 1:
+        parts.append(f"Combined: **${combined:,.2f}**")
+    lines.append("  •  ".join(parts))
     lines.append("")
+    singles_routes = (
+        f"get your **One Piece singles alone to ${MIN_LOT_VALUE:,}+** or your "
+        f"**Pokémon singles alone to ${POKEMON_SINGLES_MIN_LOT:,}+** (upload your Collectr CSV)"
+    )
     if slab_count > 0:
         if slab_count < MIN_SLAB_COUNT:
             lines.append(
@@ -1287,27 +1413,38 @@ def proceed_or_hold_tail(channel_id):
         lines += [
             "",
             "We prioritize **quantity** — we don't take just a few big slabs. Either add more **PSA slab certs** "
-            "to reach 15, **or** get your **One Piece singles alone to $3,000+** (upload your Collectr CSV) and "
+            f"to reach {MIN_SLAB_COUNT}, **or** {singles_routes} and "
             "we'll take the slabs regardless of count. Then I'll get you set up to ship! 🙌",
         ]
     else:
+        if op:
+            lines.append(
+                f"• One Piece singles need **${MIN_LOT_VALUE:,}+** on their own — "
+                f"you're **${MIN_LOT_VALUE - op:,.2f}** short."
+            )
+        if pk:
+            lines.append(
+                f"• Pokémon singles need **${POKEMON_SINGLES_MIN_LOT:,}+** on their own — "
+                f"you're **${POKEMON_SINGLES_MIN_LOT - pk:,.2f}** short."
+            )
         lines += [
-            f"• For a One Piece singles-only lot, your Collectr export must be **${MIN_LOT_VALUE:,}+** in value — "
-            f"you're **${MIN_LOT_VALUE - singles:,.2f}** short.",
             "",
-            "Add more **One Piece raw singles** and re-upload your Collectr CSV (or add **PSA slabs** — "
-            f"note that any lot containing slabs needs **{MIN_SLAB_COUNT}+** of them). 🙌",
+            "Add more raw singles and re-upload your Collectr CSV — hitting **either** singles minimum "
+            "qualifies the whole lot (or add **PSA slabs** — note that any lot containing slabs needs "
+            f"**{MIN_SLAB_COUNT}+** of them). 🙌",
         ]
     return "\n".join(lines)
 WELCOME_MSG = (
     "👋 Welcome to KTS Collectibles!\n\n"
     "We're currently buying:\n"
-    "• **PSA graded slabs** (Pokémon, Basketball, Football, MLB & One Piece) → send your cert numbers\n"
-    "• **One Piece raw singles** (English, Near Mint, $1–$150) → upload your Collectr CSV export\n\n"
-    "⚠️ We are **not** buying Pokémon raw cards at this time.\n\n"
+    "• **PSA graded slabs** (Pokémon, Basketball, Football & One Piece) → send your cert numbers\n"
+    "• **One Piece raw singles** (English, Near Mint, $1–$150 per card) → upload your Collectr CSV export\n"
+    "• **Pokémon raw singles** (English, Near Mint, ungraded, **$40–$80 per card**, **2022 or newer sets only**, "
+    "Pokémon character cards only — **no trainers**, **no Master Ball versions**) → upload your Collectr CSV export\n\n"
     "📊 **Minimum lot requirements:**\n"
-    "• Lots **with PSA slabs:** at least **15 slabs** AND **$3,000+** total value (slabs + any One Piece singles combined).\n"
-    "• **One Piece singles only:** your Collectr export must be **$3,000+** in value.\n\n"
+    "• Lots **with PSA slabs:** at least **15 slabs** AND **$3,000+** total value (slabs + any raw singles combined).\n"
+    "• **One Piece singles only:** your Collectr export must be **$3,000+** in value.\n"
+    "• **Pokémon singles only:** your Collectr export must be **$1,500+** in value.\n\n"
     "🔢 We prioritize **quantity** — we won't take a lot that's just a few big-ticket slabs.\n\n"
     "What are you looking to sell?"
 )
@@ -2585,7 +2722,7 @@ async def on_message(message):
             if not (certs or csv_attachment):
                 return
 
-    # ── COLLECTR CSV (ONE PIECE) ─────────────────────────────────────────────────
+    # ── COLLECTR CSV (ONE PIECE + POKÉMON singles) ───────────────────────────────
     if csv_attachment:
         async with message.channel.typing():
             try:
@@ -2595,38 +2732,74 @@ async def on_message(message):
                     await message.channel.send(f"Couldn't read that file — {error}. Try re-exporting from Collectr.")
                     raise _CsvDone()
 
+                # BLOCK UNTIL CLEAN: any violating row below stops the quote for
+                # the WHOLE export — the seller fixes their Collectr list and
+                # re-uploads; we never silently skip rows or partially quote.
                 issues = result.get("issues", [])
                 for issue_type, cards in issues:
                     card_list = "\n".join(cards[:5])
                     if len(cards) > 5:
                         card_list += f"\n• ...and {len(cards)-5} more"
-                    if issue_type == "pokemon":
+                    if issue_type == "other_game":
                         await message.channel.send(
-                            f"❌ **We're not buying Pokémon raw cards right now.**\n\n"
-                            f"Detected Pokémon cards in your CSV:\n{card_list}\n\n"
-                            f"We're currently only buying **One Piece raw singles** (English, NM, $1–$150). "
-                            f"We're still happy to take a look at any **PSA graded Pokémon slabs** you have — "
-                            f"just drop your cert numbers here! 🙏"
-                        )
-                    elif issue_type == "other_game":
-                        await message.channel.send(
-                            f"❌ **We only buy One Piece raw singles right now:**\n{card_list}\n\n"
+                            f"❌ **We only buy One Piece & Pokémon raw singles right now:**\n{card_list}\n\n"
                             f"Please remove these and re-export."
                         )
                     elif issue_type == "non_english":
                         await message.channel.send(
-                            f"❌ **Non-English cards — we only buy English One Piece:**\n{card_list}\n\n"
+                            f"❌ **Non-English cards — we only buy English cards:**\n{card_list}\n\n"
                             f"Please remove these and re-export."
                         )
                     elif issue_type == "over_max":
                         await message.channel.send(
-                            f"❌ **Cards over ${RAW_MAX_PRICE} — we can't buy these as raws:**\n{card_list}\n\n"
-                            f"Our limit is **${RAW_MIN_PRICE}–${RAW_MAX_PRICE} per card**. Remove these and re-export."
+                            f"❌ **One Piece cards over ${RAW_MAX_PRICE} — we can't buy these as raws:**\n{card_list}\n\n"
+                            f"Our One Piece limit is **${RAW_MIN_PRICE}–${RAW_MAX_PRICE} per card**. Remove these and re-export."
                         )
                     elif issue_type == "under_min":
                         await message.channel.send(
-                            f"❌ **Cards under ${RAW_MIN_PRICE} — we can't buy these:**\n{card_list}\n\n"
-                            f"Our minimum is **${RAW_MIN_PRICE} per card**. Remove these and re-export."
+                            f"❌ **One Piece cards under ${RAW_MIN_PRICE} — we can't buy these:**\n{card_list}\n\n"
+                            f"Our One Piece minimum is **${RAW_MIN_PRICE} per card**. Remove these and re-export."
+                        )
+                    elif issue_type == "pk_price":
+                        await message.channel.send(
+                            f"❌ **Pokémon cards outside our ${POKEMON_RAW_MIN_PRICE}–${POKEMON_RAW_MAX_PRICE} range:**\n{card_list}\n\n"
+                            f"We're only buying Pokémon singles priced **${POKEMON_RAW_MIN_PRICE}–${POKEMON_RAW_MAX_PRICE} per card** "
+                            f"this weekend. Remove these and re-export."
+                        )
+                    elif issue_type == "pk_condition":
+                        await message.channel.send(
+                            f"❌ **Pokémon cards not marked Near Mint:**\n{card_list}\n\n"
+                            f"We only buy **Near Mint** Pokémon singles. Remove these and re-export."
+                        )
+                    elif issue_type == "pk_graded":
+                        await message.channel.send(
+                            f"❌ **Graded cards in your raw-singles export:**\n{card_list}\n\n"
+                            f"Graded cards go through our **PSA slab** flow instead — remove them from the CSV "
+                            f"and drop the **cert numbers** here so we can price them as slabs! 🙏"
+                        )
+                    elif issue_type == "pk_master_ball":
+                        await message.channel.send(
+                            f"❌ **Master Ball versions — we're not buying these:**\n{card_list}\n\n"
+                            f"Please remove them and re-export."
+                        )
+                    elif issue_type == "pk_sealed":
+                        await message.channel.send(
+                            f"❌ **Sealed products — we only buy raw singles through this flow:**\n{card_list}\n\n"
+                            f"Boxes, tins, bundles, decks, and other sealed items can't go in your "
+                            f"Collectr singles export. Remove these and re-export."
+                        )
+                    elif issue_type == "pk_trainer":
+                        await message.channel.send(
+                            f"❌ **These aren't Pokémon-character cards we can buy (trainers/items/energy):**\n{card_list}\n\n"
+                            f"We're only buying **Pokémon character cards** — no trainer cards at all. "
+                            f"If something here IS actually a Pokémon card, let us know and Kevin will take a look! 🙏\n"
+                            f"Otherwise, remove these and re-export."
+                        )
+                    elif issue_type == "pk_old_set":
+                        await message.channel.send(
+                            f"❌ **Pokémon cards from pre-2022 sets:**\n{card_list}\n\n"
+                            f"We're only buying Pokémon singles from **2022 or newer sets** this weekend. "
+                            f"Remove these and re-export."
                         )
                 if issues:
                     await ping_kevin(
@@ -2643,12 +2816,26 @@ async def on_message(message):
 
                 total = result["total"]
                 card_count = result["card_count"]
-                rate, tier_label = get_payout_rate(total, username)
-                payout = total * rate
+                game_totals = result.get("game_totals") or {'one piece': float(total)}
+                game_counts = result.get("game_counts") or {'one piece': card_count}
+
+                # Price each game's portion on its OWN tier: One Piece hits 88%
+                # at $10k+ of One Piece, Pokémon at $5k+ of Pokémon.
+                GAME_LABELS = {'one piece': 'One Piece', 'pokemon': 'Pokémon'}
+                portions = []   # (game, count, value, rate, payout)
+                for _g in ('one piece', 'pokemon'):
+                    _val = float(game_totals.get(_g, 0))
+                    if _val <= 0:
+                        continue
+                    _rate, _ = get_raw_rate(_g, _val, username)
+                    portions.append((_g, int(game_counts.get(_g, 0)), _val, _rate, _val * _rate))
+                payout = sum(p[4] for p in portions)
+                # rate is only meaningful for a single-game lot; None when mixed.
+                rate = portions[0][3] if len(portions) == 1 else None
                 last_offer[channel_id] = {"payout": payout, "total": total, "rate": rate}
 
-                # Record singles value toward the buying minimums.
-                set_singles_value(channel_id, total)
+                # Record per-game singles value toward the buying minimums.
+                set_singles_value(channel_id, game_totals)
                 _sc, _sv, combined_singles, combined = lot_summary(channel_id)
 
                 # Save CSV to Google Drive
@@ -2672,18 +2859,41 @@ async def on_message(message):
                     print(f"CSV Drive save error (non-critical): {e}")
 
                 hold_tail = proceed_or_hold_tail(channel_id)
-                offer_body = (
-                    f"✅ **Your offer:**\n\n"
-                    f"📦 **{card_count} cards** | Market value: **${total:,.2f}**\n"
-                    f"💰 **Payout: ${payout:,.2f}** ({int(rate*100)}%)\n\n"
-                )
+                if len(portions) <= 1:
+                    # Single-game lot — keep the long-standing message format.
+                    _pct = int(round((rate or 0) * 100))
+                    offer_body = (
+                        f"✅ **Your offer:**\n\n"
+                        f"📦 **{card_count} cards** | Market value: **${total:,.2f}**\n"
+                        f"💰 **Payout: ${payout:,.2f}** ({_pct}%)\n\n"
+                    )
+                else:
+                    # Mixed lot — each game's portion is priced on its own tier.
+                    _lines = ["✅ **Your offer:**", ""]
+                    for _g, _cnt, _val, _rate, _pay in portions:
+                        _lines.append(
+                            f"📦 **{GAME_LABELS[_g]}** — {_cnt} cards | Market value: **${_val:,.2f}** | "
+                            f"**${_pay:,.2f}** ({int(round(_rate*100))}%)"
+                        )
+                    _lines += ["", f"💰 **Total payout: ${payout:,.2f}**", ""]
+                    offer_body = "\n".join(_lines)
                 offer_body += hold_tail if hold_tail else "Let me know if you'd like to proceed!"
                 for chunk in _split_for_discord(offer_body):
                     await message.channel.send(chunk)
                 kevin_prefix = "" if lot_qualifies(channel_id) else f"⏳ **[BELOW MINIMUM — HOLD]** "
+                games_label = " + ".join(GAME_LABELS[p[0]] for p in portions) or "Collectr"
+                if len(portions) <= 1:
+                    kevin_body = (
+                        f"{card_count} cards | ${total:,.2f} market | {int(round((rate or 0)*100))}% | **${payout:,.2f}**"
+                    )
+                else:
+                    kevin_body = " • ".join(
+                        f"{GAME_LABELS[_g]}: {_cnt} cards | ${_val:,.2f} @ {int(round(_rate*100))}% = ${_pay:,.2f}"
+                        for _g, _cnt, _val, _rate, _pay in portions
+                    ) + f" • **total ${payout:,.2f}**"
                 kevin_msg = (
-                    f"{kevin_prefix}💚 **Collectr offer sent — {username}** (One Piece)\n"
-                    f"{card_count} cards | ${total:,.2f} market | {int(rate*100)}% | **${payout:,.2f}**"
+                    f"{kevin_prefix}💚 **Collectr offer sent — {username}** ({games_label})\n"
+                    + kevin_body
                     + (f" | combined ${combined:,.2f}" if combined != total else "")
                 )
                 top = "\n".join(result["top_cards"][:3]) if result["top_cards"] else ""
