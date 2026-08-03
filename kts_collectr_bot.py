@@ -546,7 +546,7 @@ def parse_collectr_csv(content_bytes):
         elif (pokemon_species.find_species(name) is None
                 or pokemon_species.is_trainer_with_species_name(name)):
             pk_trainer.append(label)
-        if pokemon_species.is_pre_2022_set(set_name):
+        if pokemon_species.is_pre_2022_set(set_name, _cell(row, 'Card Number'), name):
             pk_old_set.append(label)
 
     issues = []

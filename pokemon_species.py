@@ -22,6 +22,7 @@ on 2026-07-31. Slugs use "-" where card names use spaces/punctuation;
 canon() folds both to the same form.
 """
 
+import re
 import unicodedata
 
 SPECIES_SLUGS = [
@@ -237,17 +238,47 @@ PRE_2022_SETS = [
     # "Scarlet & Violet Promo" / "Sv Black Star Promo" / "Me Black Star Promo"
     # and those never match these entries)
     "Black Star Promo", "Black Star Promos", "Promo Black Star",
-    "Black Star Promos - Sun & Moon", "Black Star Promos - Sword & Shield",
+    "Black Star Promos - Sun & Moon",
     "League Promo", "League Promo Black Star", "League & Championship Cards",
     "World Championships Promo", "Mega Powers Collection Promo",
     "Premium Trainer Xy Collection Promo",
     "Asia 25th Anniversary Promo", "League Energize Your Game Cycle",
     "Deck Exclusives",
-    # Can't-date buckets — sealed/oddball products file here across ALL eras
-    # (e.g. a 2016 "Mega Charizard X EX UPC" lives in Miscellaneous), so they
-    # can't pass a "2022+ only" rule. Bare "Promo" gives no era at all.
-    "Miscellaneous Cards & Products", "Jumbo Cards", "Promo",
 ]
+
+# Buckets that pool products from EVERY era ("Miscellaneous Cards & Products"
+# holds a 2016 Mega Charizard UPC and a 2025 Destined Rivals stamped promo).
+# A row here is dated by its PRODUCT NAME instead: a reference to a known
+# 2022+ set allows it ("... (Destined Rivals Stamp)"); anything else stays
+# blocked (fail closed — Kevin can override in the ticket).
+UNDATABLE_SETS = ["Miscellaneous Cards & Products", "Jumbo Cards", "Promo"]
+
+# Known 2022+ English sets, for dating undatable-bucket rows by name reference.
+MODERN_SET_REFERENCES = [
+    "Brilliant Stars", "Astral Radiance", "Pokemon GO", "Lost Origin",
+    "Silver Tempest", "Crown Zenith", "Scarlet & Violet", "Paldea Evolved",
+    "Obsidian Flames", "151", "Paradox Rift", "Paldean Fates",
+    "Temporal Forces", "Twilight Masquerade", "Shrouded Fable",
+    "Stellar Crown", "Surging Sparks", "Prismatic Evolutions",
+    "Journey Together", "Destined Rivals", "Black Bolt", "White Flare",
+    "Mega Evolution", "Phantasmal Flames", "Perfect Order", "Chaos Rising",
+    "Ascended Heroes", "Pitch Black", "Trick or Trade",
+]
+
+# "Sword & Shield Promo" spans 2019-2022, so it's gated by PROMO NUMBER, not
+# blanket-blocked: SWSH numbering is chronological and the 2022 run starts at
+# SWSH185 (the Brilliant Stars Build & Battle stamps, Feb 2022 — verified
+# against pokemon-tcg-data, whose F-regulation run starts exactly at SWSH185;
+# SWSH179-184 are the Sept 2021 Eevee VMAX boxes). >=185 is 2022+; a row with
+# no parseable SWSH number stays blocked (fail closed).
+SWSH_PROMO_2022_FIRST = 185
+_SWSH_PROMO_SET_NAMES = (
+    "sword and shield promo", "sword and shield promos",
+    "swsh promo", "swsh promos",
+    "swsh black star promo", "swsh black star promos",
+    "sword and shield black star promo", "sword and shield black star promos",
+    "black star promos sword and shield", "black star promo sword and shield",
+)
 
 # JAPANESE-ONLY sets that Collectr lists with plain Latin names and NO
 # "Japanese" marker (most JP rows say "... Japanese" or "Pokemon Japanese ..."
@@ -325,6 +356,8 @@ _SPECIES_CANON = frozenset(canon(s) for s in SPECIES_SLUGS) | frozenset(EXTRA_SP
 _TRAINER_WITH_SPECIES_CANON = frozenset(canon(s) for s in TRAINER_CARDS_WITH_SPECIES)
 _BLOCKED_SET_CANON = frozenset(canon(s) for s in PRE_2022_SETS)
 _JAPANESE_SET_CANON = frozenset(canon(s) for s in JAPANESE_ONLY_SETS)
+_UNDATABLE_SET_CANON = frozenset(canon(s) for s in UNDATABLE_SETS)
+_MODERN_REFERENCE_CANON = frozenset(canon(s) for s in MODERN_SET_REFERENCES)
 
 
 def find_species(product_name):
@@ -388,15 +421,33 @@ def _blocked(c):
     return False
 
 
-def is_pre_2022_set(set_name):
-    """True if the set is a known pre-2022 English set (Collectr naming).
+def _swsh_promo_number(card_number):
+    m = re.search(r'swsh\s*0*(\d+)', str(card_number or ''), re.IGNORECASE)
+    return int(m.group(1)) if m else None
+
+
+def _has_modern_reference(product_name):
+    padded = " " + canon(product_name) + " "
+    return any(" " + m + " " in padded for m in _MODERN_REFERENCE_CANON)
+
+
+def is_pre_2022_set(set_name, card_number="", product_name=""):
+    """True if the row is from a known pre-2022 English set (Collectr naming).
     Unknown -> False (assumed newer, allowed — new sets keep working with no
-    code change). Scarlet & Violet / SV era is entirely 2023+."""
+    code change). Scarlet & Violet / SV era is entirely 2023+. Two sets need
+    row context: "Sword & Shield Promo" is gated by SWSH promo number (>=185
+    is 2022+), and undatable buckets ("Miscellaneous Cards & Products") pass
+    only when the product name references a known 2022+ set."""
     c = _strip_pokemon_prefix(canon(set_name))
     if not c:
         return False
     if c.startswith("scarlet and violet") or c.startswith("sv ") or c == "sv":
         return False
+    if c in _SWSH_PROMO_SET_NAMES:
+        n = _swsh_promo_number(card_number)
+        return n is None or n < SWSH_PROMO_2022_FIRST
+    if c in _UNDATABLE_SET_CANON:
+        return not _has_modern_reference(product_name)
     if _blocked(c):
         return True
     for p in _ERA_PREFIXES:
