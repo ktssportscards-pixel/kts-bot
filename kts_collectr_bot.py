@@ -1557,6 +1557,56 @@ def upsert_owed(rec):
     OWED_STORE.append(rec)
     _save_owed()
 
+# ── ACCEPTED SHIP-LISTS (per ticket) ──────────────────────────────────────────────
+# Recorded when a seller agrees to the offer; served at GET /tickets so the local
+# ticket-tracker HTML can sync them (same pattern as OWED_STORE -> /owed).
+TICKETS_FILE = os.path.join(DATA_DIR, "tickets_store.json")
+try:
+    with open(TICKETS_FILE) as _f:
+        TICKETS_STORE = json.load(_f)
+except Exception:
+    TICKETS_STORE = []
+
+def _save_tickets():
+    try:
+        with open(TICKETS_FILE, "w") as _f:
+            json.dump(TICKETS_STORE, _f)
+    except Exception as e:
+        print(f"tickets store save failed (non-critical): {e}")
+
+def upsert_ticket(rec):
+    for i, t in enumerate(TICKETS_STORE):
+        if t.get("id") == rec["id"]:
+            TICKETS_STORE[i] = {**t, **rec}
+            _save_tickets()
+            return
+    TICKETS_STORE.append(rec)
+    _save_tickets()
+
+def record_accepted_ship_list(channel_id, username):
+    """Snapshot the accepted lot for this ticket (certs + CL comp values, singles
+    totals, offer rate). lot_state is memory-only, so after a redeploy between
+    quote and 'ship' there may be nothing to record — skip silently; the tracker's
+    manual paste path covers that rare case."""
+    entry = lot_state.get(channel_id) or {}
+    certs = entry.get("slab_certs") or {}
+    singles = entry.get("singles") or {}
+    if not certs and not singles:
+        return None
+    offer = last_offer.get(channel_id) or {}
+    rec = {
+        "id": f"tk_{channel_id}",
+        "user": username,
+        "channel_id": channel_id,
+        "date": date.today().isoformat(),
+        "certs": {str(c): float(v or 0) for c, v in certs.items()},
+        "singles": {g: float(v or 0) for g, v in singles.items()},
+        "rate": offer.get("rate"),
+        "status": "accepted",
+    }
+    upsert_ticket(rec)
+    return rec
+
 class _CsvDone(Exception):
     """Control-flow sentinel: 'done with the Collectr CSV block, skip its remainder'.
     Raised on the early-exit paths (parse error, validation issues) inside the CSV
@@ -2165,6 +2215,18 @@ async def _owed_paid(request):
             return _cors(_ow_web.json_response({"ok": True}))
     return _cors(_ow_web.json_response({"ok": False, "error": "not found"}, status=404))
 
+async def _tickets_get(request):
+    """Accepted ship-lists for the ticket tracker. Filters: ?user=<name>
+    (case-insensitive substring) and ?since=YYYY-MM-DD."""
+    data = TICKETS_STORE
+    user_q = (request.query.get("user") or "").strip().lower()
+    if user_q:
+        data = [t for t in data if user_q in (t.get("user") or "").lower()]
+    since = (request.query.get("since") or "").strip()
+    if since:
+        data = [t for t in data if (t.get("date") or "") >= since]
+    return _cors(_ow_web.json_response(data))
+
 async def _owed_root(request):
     return _cors(_ow_web.Response(text="KTS bot owed endpoint OK"))
 
@@ -2345,6 +2407,7 @@ async def start_owed_webserver():
         _ow_web.get("/health", _owed_root),
         _ow_web.get("/owed", _owed_get),
         _ow_web.get("/owed/paid", _owed_paid),
+        _ow_web.get("/tickets", _tickets_get),
         _ow_web.get("/leaderboard", _leaderboard_get),
         _ow_web.post("/leaderboard", _leaderboard_set),
         _ow_web.get("/links", _links_get),
@@ -3015,7 +3078,15 @@ async def on_message(message):
             )
             return
         await message.channel.send(SHIPPING_MSG)
-        await ping_kevin(f"✅ **{username} agreed** — shipping address sent.", message.channel)
+        # Snapshot the accepted ship-list for the local ticket tracker (GET /tickets).
+        try:
+            _rec = record_accepted_ship_list(channel_id, username)
+        except Exception as e:
+            _rec = None
+            print(f"ship-list record failed (non-critical): {e}")
+        _rec_note = (f" 📦 Ship-list recorded ({len(_rec['certs'])} certs) — tracker → Sync from bot."
+                     if _rec else " ⚠️ No lot on record to snapshot (redeploy?) — add this one to the tracker manually.")
+        await ping_kevin(f"✅ **{username} agreed** — shipping address sent.{_rec_note}", message.channel)
         # Resolve the sheet through the cache + Drive fallback (channel_sheet used
         # to be memory-only, so a redeploy between quote and "ship" silently
         # skipped the tracking row).
