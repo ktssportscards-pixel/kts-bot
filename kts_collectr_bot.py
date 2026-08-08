@@ -69,7 +69,11 @@ RAW_PAYOUT_TIERS = [
 RAW_MIN_PRICE = 1
 RAW_MAX_PRICE = 150
 
-# Pokémon raw singles (added Jul 31 2026 weekend): $40-$80 per card, English
+# Raw Pokémon singles: OFF for the Aug 7 weekend — absent from the flyer (same
+# convention as MLB). Flip BUYING_POKEMON_RAW to True to resume with the rules
+# below; everything (validation, rates, minimums) stays wired up behind the flag.
+BUYING_POKEMON_RAW = False
+# Pokémon raw singles rules (Jul 31 2026 weekend spec): $40-$80 per card, English
 # Near Mint UNGRADED, 2022+ sets only, no trainers, no Master Ball versions
 # (rules data + helpers live in pokemon_species.py). 85% base, 88% when the
 # POKÉMON portion of the lot is $5k+. Pokémon-singles lots need $1,500+
@@ -91,19 +95,33 @@ PSA_MAX_AGE_DAYS = 30
 # any-grade waiver AND the "one sale ever" age (inf) apply to every in-range NBA card.
 NBA_ANY_GRADE_MAX_PRICE = 200
 # Per-sport price ceilings — sports not listed here are rejected outright, and any
-# slab priced ABOVE its ceiling is rejected (Jul 31 weekend flyer).
-# pokemon: $750. basketball (NBA): $200. one piece: $750. football (NFL): $200.
-# MLB REMOVED Jul 31 — baseball slabs are rejected (absent from the flyer).
+# slab priced ABOVE its ceiling is rejected (Aug 7 weekend flyer).
+# pokemon: $500 (with a $200-$400 GAP — see POKEMON_GAP). basketball (NBA): $200.
+# one piece: $750. football (NFL): $100 (the $100-$200 band is GONE this week).
+# MLB still absent from the flyer — baseball slabs are rejected.
 PSA_SPORT_MAX_PRICE = {
-    'pokemon': 750,
+    'pokemon': 500,
     'basketball': 200,
     'one piece': 750,
-    'football': 200,   # NFL slabs
+    'football': 100,   # NFL slabs
 }
-# Pokémon $150+ requires PSA 8-10 (the $1-$150 bands stay PSA 7+).
+# Aug 7 flyer lists Pokémon $1-$200 and $400-$500 ONLY — the $200-$400 middle is
+# not a buy band. Exactly $200 buys (first-band top inclusive), exactly $400 buys.
+POKEMON_GAP = (200, 400)   # exclusive bounds: 200 < value < 400 → rejected
+# PIKACHU LANE (Kevin, Aug 7): any card whose NAME contains "pikachu" (tag teams
+# and variants included) is bought at a flat 88% for $17-$5,000, ANY grade, with
+# a sale in the past 2 months. Overrides the pokemon ceiling/gap/grade/age rules
+# for qualifying cards; pricing takes the BETTER of this lane and the card's
+# normal band rate (matters for VIPs whose band rates exceed 88%).
+PIKACHU_MIN_PRICE = 17
+PIKACHU_MAX_PRICE = 5000
+PIKACHU_RATE = 0.88
+PIKACHU_MAX_AGE_DAYS = 60
+# Pokémon $150+ requires PSA 8-10 (below $150 stays PSA 7+) — carried forward
+# from the Jul 31 flyer; the Aug 7 flyer is silent on grades.
 POKEMON_HIGH_BAND_MIN = 150
 POKEMON_HIGH_BAND_MIN_GRADE = 8
-# One Piece slabs require PSA 8-10 across the board (Jul 31 weekend).
+# One Piece slabs require PSA 8-10 across the board (flyer "PSA 8+").
 ONE_PIECE_MIN_GRADE = 8
 # Per-sport max age of last sale (days). pokemon / basketball / football / mlb are
 # value-dependent and handled directly in classify_psa_comp; the rest use this dict.
@@ -180,34 +198,32 @@ def apply_avg3_value(comp, threshold=0):
         # else cl <= threshold: keep the direct CardLadder value
     return comp
 
-# ── PER-CARD PAYOUT TIERS BY SPORT (Jul 10 weekend flyer) ─────────────────────────
+# ── PER-CARD PAYOUT TIERS BY SPORT (Aug 7 weekend flyer) ──────────────────────────
 # Low end of each flyer range. Grade, reject-zones, and the Pokémon manual bucket
 # live in classify_psa_comp, so only in-band cards reach these blends. CL-confidence
 # requirements can't be enforced (no CL score in the data) — priced on value+grade.
-# Pokémon (Jul 31 weekend): $1-$100 → 89% (flyer says 89-90 — pay the low end),
-# $100-$150 → 87%, $150-$750 → 84% (PSA 8-10 only — enforced in classify_psa_comp).
-# Ceiling $750.
+# Pokémon (Aug 7): $1-$200 → 85% (flyer 85-88 — pay the low end),
+# $400-$500 → 83% (flyer 83-85). The $200-$400 gap is rejected in
+# classify_psa_comp (POKEMON_GAP) — it never reaches these tiers. Ceiling $500.
 PSA_POKEMON_PER_CARD_TIERS = [
-    (0,      100.01,       0.89),   # $1-$100 → 89%  (.01 so exactly $100 is 89%)
-    (100.01, 150,          0.87),   # $100-$150 → 87%
-    (150,    float('inf'), 0.84),   # $150-$750 → 84%  ($750 ceiling rejects above)
+    (0,   200.01,        0.85),   # $1-$200 → 85%  (.01 so exactly $200 is 85%)
+    (400, float('inf'),  0.83),   # $400-$500 → 83%  ($500 ceiling rejects above)
 ]
-# Basketball (NBA, Jul 31 weekend): $1-$200 → 95%, ANY grade, one sale ever.
-# Ceiling $200.
+# Basketball (NBA, Aug 7): $1-$30 → 100% (flyer 100-105), $30-$200 → 95%.
+# ANY grade, one sale ever. Ceiling $200.
 PSA_BASKETBALL_PER_CARD_TIERS = [
-    (0, float('inf'), 0.95),   # $1-$200 → 95%  ($200 ceiling rejects above)
+    (0,     30.01,        1.00),   # $1-$30 → 100%  (.01 so exactly $30 is 100%)
+    (30.01, float('inf'), 0.95),   # $30-$200 → 95%  ($200 ceiling rejects above)
 ]
 PSA_ONE_PIECE_PER_CARD_TIERS = [
     (0,      100.01,       0.88),   # $1-$100 → 88%  (.01 so exactly $100 is 88%)
     (100.01, float('inf'), 0.83),   # $101-$750 → 83%  ($750 ceiling rejects above)
 ]
-# NFL / football (Jul 31 weekend): $1-30 → 100%, $30-100 → 92%, $100-200 → 90%.
-# Ceiling $200. (The flyer's "CL 3+" on the $100-200 band is a CardLadder
-# confidence requirement the bot cannot read — Kevin eyeballs it.)
+# NFL / football (Aug 7): $1-$30 → 100% (flyer 100-105), $30-$100 → 90%
+# (flyer 90-92). Ceiling $100 — the old $100-$200 band is gone this week.
 PSA_FOOTBALL_PER_CARD_TIERS = [
     (0,     30.01,        1.00),   # $1-$30 → 100%  (.01 so exactly $30 is 100%)
-    (30.01, 100,          0.92),   # $30-$100 → 92%
-    (100,   float('inf'), 0.90),   # $100-$200 → 90%  ($200 ceiling rejects above)
+    (30.01, float('inf'), 0.90),   # $30-$100 → 90%  ($100 ceiling rejects above)
 ]
 
 # ── BASKETBALL-SPECIFIC REJECTION RULES ──────────────────────────────────────────
@@ -338,6 +354,23 @@ def _blended_per_card_rate(tiers, card_values):
         else:
             payout += cv * tiers[-1][2]
     return payout / total
+
+
+def _pokemon_card_rate(c, vip_tiers=None):
+    """Per-card Pokémon rate: the BETTER of the card's band rate (standard or
+    VIP — only if it passed the normal band rules, comp['pokemon_band_ok']) and
+    the Pikachu lane (flat PIKACHU_RATE for lane-qualified cards)."""
+    cv = float(c['clValue'])
+    tiers = vip_tiers or PSA_POKEMON_PER_CARD_TIERS
+    cands = []
+    if c.get('pokemon_band_ok', True):
+        for low, high, r in tiers:
+            if low <= cv < high:
+                cands.append(r)
+                break
+    if c.get('pikachu_lane'):
+        cands.append(PIKACHU_RATE)
+    return max(cands) if cands else tiers[-1][2]
 
 
 def get_psa_payout_rate(sport, sport_lot_total, card_values=None):
@@ -482,6 +515,7 @@ def parse_collectr_csv(content_bytes):
     op_over_max, op_under_min = [], []
     pk_price, pk_condition, pk_graded = [], [], []
     pk_master_ball, pk_trainer, pk_old_set, pk_sealed = [], [], [], []
+    pokemon_off = []
 
     def _cell(row, col):
         """Cell as a clean string: pandas turns blanks into NaN and
@@ -499,6 +533,12 @@ def parse_collectr_csv(content_bytes):
         if game == 'other':
             cat = _cell(row, game_col) if game_col else ''
             other_game_cards.append(f"{label} — {cat or '(no category)'}")
+            continue
+
+        # Raw Pokémon toggled OFF (absent from this week's flyer) — decline the
+        # rows without running the per-card rules.
+        if game == 'pokemon' and not BUYING_POKEMON_RAW:
+            pokemon_off.append(label)
             continue
 
         # English only (both games). Collectr marks foreign cards two ways:
@@ -550,6 +590,8 @@ def parse_collectr_csv(content_bytes):
             pk_old_set.append(label)
 
     issues = []
+    if pokemon_off:
+        issues.append(("pokemon_off", pokemon_off))
     if other_game_cards:
         issues.append(("other_game", other_game_cards))
     if non_english:
@@ -804,29 +846,56 @@ def classify_psa_comp(comp):
     if max_price is None:
         sport_label = sport or 'unknown sport'
         return ('rejected', f"{sport_label} (we only buy pokemon, basketball, football, and one piece right now)")
+    # PIKACHU LANE (Aug 7): name contains "pikachu", $17-$5,000, sale ≤2mo, ANY
+    # grade. Lane cards skip the pokemon ceiling/gap/grade/age rejections below;
+    # band_fail records whether they ALSO pass the normal bands so pricing can
+    # take the better rate (comp['pokemon_band_ok']).
+    pikachu_lane = False
+    if (sport == 'pokemon' and PIKACHU_MIN_PRICE <= cv <= PIKACHU_MAX_PRICE
+            and 'pikachu' in str(comp.get('cardName') or '').lower()):
+        try:
+            _d = datetime.strptime(str(comp.get('lastSaleDate') or '').strip(), '%Y-%m-%d').date()
+            pikachu_lane = (date.today() - _d).days <= PIKACHU_MAX_AGE_DAYS
+        except (ValueError, AttributeError):
+            pikachu_lane = False
+    comp['pikachu_lane'] = pikachu_lane
+    band_fail = False
     if cv > max_price:
-        # Two decimals so a $200.40 NBA card reads "over our $200 max" sensibly
-        # instead of the contradictory "$200 (over our $200 max)".
-        return ('rejected', f"${cv:,.2f} (over our ${max_price} {sport} max)")
+        if not pikachu_lane:
+            # Two decimals so a $200.40 NBA card reads "over our $200 max" sensibly
+            # instead of the contradictory "$200 (over our $200 max)".
+            return ('rejected', f"${cv:,.2f} (over our ${max_price} {sport} max)")
+        band_fail = True
     if cv < PSA_MIN_PRICE:
         return ('rejected', f"${cv:.2f} (under ${PSA_MIN_PRICE} min)")
+    # Aug 7 flyer: Pokémon has NO buy band between $200 and $400.
+    if sport == 'pokemon' and POKEMON_GAP[0] < cv < POKEMON_GAP[1]:
+        if not pikachu_lane:
+            return ('rejected',
+                    f"${cv:,.2f} (outside our Pokémon buy ranges — "
+                    f"${POKEMON_GAP[0]}-${POKEMON_GAP[1]} isn't a buy band this weekend)")
+        band_fail = True
     grade_raw = str(comp.get('grade') or '').replace('PSA', '').strip()
     try:
         g = float(grade_raw)
     except ValueError:
         return ('rejected', f"grade '{grade_raw}' unrecognized")
-    # Grade floor. NBA (whole $1-$200 band) → ANY grade accepted; everything else
-    # (all Pokémon, football, mlb, one piece) → PSA_MIN_GRADE+.
+    # Grade floor. NBA (whole $1-$200 band) → ANY grade accepted; Pikachu lane →
+    # ANY grade; everything else (pokemon, football, mlb, one piece) → PSA_MIN_GRADE+.
     nba_any_grade = (sport == 'basketball' and cv <= NBA_ANY_GRADE_MAX_PRICE)
     if not nba_any_grade and g < PSA_MIN_GRADE:
-        return ('rejected', f"PSA {grade_raw} (we buy {PSA_MIN_GRADE}-10 only)")
-    # Pokémon $200+ band is PSA 8-10 only (the $1-$200 bands stay PSA 7+).
+        if not pikachu_lane:
+            return ('rejected', f"PSA {grade_raw} (we buy {PSA_MIN_GRADE}-10 only)")
+        band_fail = True
+    # Pokémon $150+ needs PSA 8-10 (below $150 stays PSA 7+).
     if (sport == 'pokemon' and cv >= POKEMON_HIGH_BAND_MIN
             and g < POKEMON_HIGH_BAND_MIN_GRADE):
-        return ('rejected',
-                f"PSA {grade_raw} (${cv:,.0f} Pokémon needs PSA "
-                f"{POKEMON_HIGH_BAND_MIN_GRADE}-10 at ${POKEMON_HIGH_BAND_MIN}+)")
-    # One Piece slabs are PSA 8-10 only (whole $1-$750 range, Jul 31 weekend).
+        if not pikachu_lane:
+            return ('rejected',
+                    f"PSA {grade_raw} (${cv:,.0f} Pokémon needs PSA "
+                    f"{POKEMON_HIGH_BAND_MIN_GRADE}-10 at ${POKEMON_HIGH_BAND_MIN}+)")
+        band_fail = True
+    # One Piece slabs are PSA 8-10 only (whole $1-$750 range).
     if sport == 'one piece' and g < ONE_PIECE_MIN_GRADE:
         return ('rejected',
                 f"PSA {grade_raw} (One Piece slabs are PSA {ONE_PIECE_MIN_GRADE}-10 only)")
@@ -843,11 +912,15 @@ def classify_psa_comp(comp):
     elif sport == 'basketball':
         max_age = float('inf') if cv <= NBA_ANY_GRADE_MAX_PRICE else 90     # whole $1-200 band: one sale ever
     elif sport in ('football', 'mlb'):
-        max_age = float('inf') if cv < 100 else 90                         # $1-100 just needs one sale on record
+        max_age = float('inf') if cv <= 100 else 90                        # whole $1-100 range: one sale on record (ceiling is $100)
     else:
         max_age = PSA_SPORT_MAX_AGE_DAYS.get(sport, PSA_MAX_AGE_DAYS)
     if (date.today() - last_d).days > max_age:
-        return ('rejected', f"last sale {last_sale} (>{max_age:g}d ago)")
+        if not pikachu_lane:
+            return ('rejected', f"last sale {last_sale} (>{max_age:g}d ago)")
+        band_fail = True
+    if sport == 'pokemon':
+        comp['pokemon_band_ok'] = not band_fail
 
     # NBA: reject the $400-$1000 dead zone (not a buy band), then apply player/set bans.
     if sport == 'basketball':
@@ -1104,9 +1177,11 @@ async def price_and_send_psa_offer(channel, channel_id, username, certs, comps,
     for sp, comps_in_sport in sport_groups.items():
         card_values = [float(c['clValue']) for c in comps_in_sport]
         sport_total = sum(card_values)
-        if sp == 'pokemon' and vip_tiers:
-            # Negotiated per-customer Pokémon rates (see VIP_RATES / !vip).
-            rate = _blended_per_card_rate(vip_tiers, card_values)
+        if sp == 'pokemon':
+            # Per-card: band rate (standard or VIP) vs Pikachu lane — better wins.
+            _payout = sum(float(c['clValue']) * _pokemon_card_rate(c, vip_tiers)
+                          for c in comps_in_sport)
+            rate = (_payout / sport_total) if sport_total else PSA_POKEMON_PER_CARD_TIERS[0][2]
         else:
             rate = get_psa_payout_rate(sp, sport_total, card_values)
         sport_breakdown.append({
@@ -1434,18 +1509,28 @@ def proceed_or_hold_tail(channel_id):
             f"**{MIN_SLAB_COUNT}+** of them). 🙌",
         ]
     return "\n".join(lines)
+_POKEMON_RAW_WELCOME_LINE = (
+    "• **Pokémon raw singles** (English, Near Mint, ungraded, **$40–$80 per card**, **2022 or newer sets only**, "
+    "Pokémon character cards only — **no trainers**, **no Master Ball versions**) → upload your Collectr CSV export\n"
+) if BUYING_POKEMON_RAW else ""
+_POKEMON_RAW_MIN_LINE = (
+    "• **Pokémon singles only:** your Collectr export must be **$1,500+** in value.\n"
+) if BUYING_POKEMON_RAW else ""
+_POKEMON_RAW_OFF_LINE = (
+    "" if BUYING_POKEMON_RAW else "⚠️ We are **not** buying Pokémon raw cards this weekend.\n\n"
+)
 WELCOME_MSG = (
     "👋 Welcome to KTS Collectibles!\n\n"
     "We're currently buying:\n"
     "• **PSA graded slabs** (Pokémon, Basketball, Football & One Piece) → send your cert numbers\n"
     "• **One Piece raw singles** (English, Near Mint, $1–$150 per card) → upload your Collectr CSV export\n"
-    "• **Pokémon raw singles** (English, Near Mint, ungraded, **$40–$80 per card**, **2022 or newer sets only**, "
-    "Pokémon character cards only — **no trainers**, **no Master Ball versions**) → upload your Collectr CSV export\n\n"
+    + _POKEMON_RAW_WELCOME_LINE +
+    "\n" + _POKEMON_RAW_OFF_LINE +
     "📊 **Minimum lot requirements:**\n"
     "• Lots **with PSA slabs:** at least **15 slabs** AND **$3,000+** total value (slabs + any raw singles combined).\n"
     "• **One Piece singles only:** your Collectr export must be **$3,000+** in value.\n"
-    "• **Pokémon singles only:** your Collectr export must be **$1,500+** in value.\n\n"
-    "🔢 We prioritize **quantity** — we won't take a lot that's just a few big-ticket slabs.\n\n"
+    + _POKEMON_RAW_MIN_LINE +
+    "\n🔢 We prioritize **quantity** — we won't take a lot that's just a few big-ticket slabs.\n\n"
     "What are you looking to sell?"
 )
 
@@ -1929,30 +2014,43 @@ def build_sheet_h_formula(r, pokemon_tiers=None):
     """The per-row payout formula written into buying sheets — generated from the
     bot's CURRENT rate constants so bot and sheet can't disagree. pokemon_tiers
     overrides only the Pokémon band RATES (VIP sheets). NOTE: assumes the current
-    band structure (3 pokemon bands, 3 football bands, 2 one piece bands) — if a
-    weekly flyer changes the band COUNT, update this builder with it."""
+    band structure (Aug 7: 2 pokemon bands with a $200-$400 gap, 2 football bands,
+    2 basketball bands, 2 one piece bands) — if a weekly flyer changes the band
+    COUNT, update this builder with it."""
     def _n(v):
-        return f"{v:g}"   # 1.0 -> "1", 0.89 -> "0.89" (matches the template's style)
+        return f"{v:g}"   # 1.0 -> "1", 0.85 -> "0.85" (matches the template's style)
     pt = pokemon_tiers or PSA_POKEMON_PER_CARD_TIERS
-    p1, p2, p3 = _n(pt[0][2]), _n(pt[1][2]), _n(pt[2][2])
-    p_mid_top = int(pt[1][1])
+    p1, p2 = _n(pt[0][2]), _n(pt[1][2])
+    p_low_top = int(pt[0][1])            # 200 (band 1 top, inclusive)
+    p_high_low = int(pt[1][0])           # 400 (band 2 start; the gap sits between)
     pok_max = PSA_SPORT_MAX_PRICE['pokemon']
     nba_max = PSA_SPORT_MAX_PRICE['basketball']
     op_max = PSA_SPORT_MAX_PRICE['one piece']
     nfl_max = PSA_SPORT_MAX_PRICE['football']
-    f1, f2, f3 = (_n(PSA_FOOTBALL_PER_CARD_TIERS[0][2]), _n(PSA_FOOTBALL_PER_CARD_TIERS[1][2]),
-                  _n(PSA_FOOTBALL_PER_CARD_TIERS[2][2]))
+    b1, b2 = _n(PSA_BASKETBALL_PER_CARD_TIERS[0][2]), _n(PSA_BASKETBALL_PER_CARD_TIERS[1][2])
+    b_split = int(PSA_BASKETBALL_PER_CARD_TIERS[0][1])
+    f1, f2 = _n(PSA_FOOTBALL_PER_CARD_TIERS[0][2]), _n(PSA_FOOTBALL_PER_CARD_TIERS[1][2])
+    f_split = int(PSA_FOOTBALL_PER_CARD_TIERS[0][1])
     op1, op2 = _n(PSA_ONE_PIECE_PER_CARD_TIERS[0][2]), _n(PSA_ONE_PIECE_PER_CARD_TIERS[1][2])
     g = PSA_MIN_GRADE
     gp = POKEMON_HIGH_BAND_MIN_GRADE
+    hb = POKEMON_HIGH_BAND_MIN
     gop = ONE_PIECE_MIN_GRADE
-    maxage = (f'IF(F{r}="pokemon",IF(G{r}<100,60,30),IF(F{r}="basketball",IF(G{r}<={nba_max},99999,90),'
-              f'IF(OR(F{r}="football",F{r}="mlb",F{r}="baseball"),IF(G{r}<100,99999,90),'
+    pika = _n(PIKACHU_RATE)
+    pika_test = (f'AND(ISNUMBER(SEARCH("pikachu",D{r})),'
+                 f'G{r}>={PIKACHU_MIN_PRICE},G{r}<={PIKACHU_MAX_PRICE})')
+    maxage = (f'IF(F{r}="pokemon",IF({pika_test},{PIKACHU_MAX_AGE_DAYS},IF(G{r}<100,60,30)),'
+              f'IF(F{r}="basketball",IF(G{r}<={nba_max},99999,90),'
+              f'IF(OR(F{r}="football",F{r}="mlb",F{r}="baseball"),IF(G{r}<={nfl_max},99999,90),'
               f'IF(F{r}="other",60,30))))')
+    # Pokémon = MAX(normal band rate incl. grade gates, Pikachu lane). The lane
+    # ignores grade and spans the gap/ceiling ($17-$5,000, name contains pikachu).
+    pok_band = (f'IF(N(E{r})<IF(G{r}<{hb},{g},{gp}),0,'
+                f'IF(G{r}<={p_low_top},{p1},IF(G{r}<{p_high_low},0,IF(G{r}<={pok_max},{p2},0))))')
     rate = (f'IFS('
-            f'F{r}="pokemon",IF(G{r}<=100,IF(N(E{r})<{g},0,{p1}),IF(G{r}<{p_mid_top},IF(N(E{r})<{g},0,{p2}),IF(G{r}<={pok_max},IF(N(E{r})<{gp},0,{p3}),0))),'
-            f'F{r}="basketball",IF(G{r}<={nba_max},0.95,0),'
-            f'F{r}="football",IF(N(E{r})<{g},0,IF(G{r}>{nfl_max},0,IF(G{r}<=30,{f1},IF(G{r}<100,{f2},{f3})))),'
+            f'F{r}="pokemon",MAX({pok_band},IF({pika_test},{pika},0)),'
+            f'F{r}="basketball",IF(G{r}<={b_split},{b1},IF(G{r}<={nba_max},{b2},0)),'
+            f'F{r}="football",IF(N(E{r})<{g},0,IF(G{r}>{nfl_max},0,IF(G{r}<={f_split},{f1},{f2}))),'
             f'OR(F{r}="mlb",F{r}="baseball"),0,'
             f'F{r}="other",IF(N(E{r})<{gop},0,IF(AND(G{r}>=1,G{r}<=100),{op1},IF(G{r}<={op_max},{op2},0))),'
             f'TRUE,0)')
@@ -2803,9 +2901,17 @@ async def on_message(message):
                     card_list = "\n".join(cards[:5])
                     if len(cards) > 5:
                         card_list += f"\n• ...and {len(cards)-5} more"
-                    if issue_type == "other_game":
+                    if issue_type == "pokemon_off":
                         await message.channel.send(
-                            f"❌ **We only buy One Piece & Pokémon raw singles right now:**\n{card_list}\n\n"
+                            f"❌ **We're not buying Pokémon raw cards this weekend.**\n\n"
+                            f"Detected Pokémon cards in your CSV:\n{card_list}\n\n"
+                            f"We're currently buying **One Piece raw singles** (English, NM, $1–$150). "
+                            f"We're still happy to look at any **PSA graded Pokémon slabs** you have — "
+                            f"just drop your cert numbers here! 🙏"
+                        )
+                    elif issue_type == "other_game":
+                        await message.channel.send(
+                            f"❌ **We only buy One Piece raw singles right now:**\n{card_list}\n\n"
                             f"Please remove these and re-export."
                         )
                     elif issue_type == "non_english":
