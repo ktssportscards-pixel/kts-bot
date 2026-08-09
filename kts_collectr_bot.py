@@ -1946,6 +1946,22 @@ def handle_vip_command(content, mentions=None, guild=None):
             lines.append(f"• **{name}**: {_vip_rate_summary(name)}")
         return "\n".join(lines)
 
+    if sub == "clear":
+        # Full reset, two-step: bare `!vip clear` previews the roster (so Kevin
+        # can review before nuking), `!vip clear yes` wipes it.
+        if not VIP_RATES:
+            return "VIP list is already empty."
+        if len(toks) > 1 and toks[1].lower() in ("yes", "confirm"):
+            n = len(VIP_RATES)
+            names = ", ".join(sorted(VIP_RATES))
+            VIP_RATES.clear()
+            _save_vip()
+            return (f"🧹 VIP list cleared — removed {n} user{'s' if n != 1 else ''}: {names}.\n"
+                    f"Re-add with `!vip add <username> <rates>` or `!vip bulk`.")
+        preview = "\n".join(f"• **{name}**: {_vip_rate_summary(name)}" for name in sorted(VIP_RATES))
+        return (f"⚠️ **This removes ALL {len(VIP_RATES)} VIP entries:**\n{preview}\n\n"
+                f"Type `!vip clear yes` to confirm.")
+
     if sub in ("bulk", "batch", "all"):
         rates, err = _vip_parse_rates(toks[1:])
         if err:
