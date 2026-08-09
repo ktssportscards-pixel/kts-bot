@@ -96,11 +96,12 @@ PSA_MAX_AGE_DAYS = 30
 NBA_ANY_GRADE_MAX_PRICE = 200
 # Per-sport price ceilings — sports not listed here are rejected outright, and any
 # slab priced ABOVE its ceiling is rejected (Aug 7 weekend flyer).
-# pokemon: $500 (with a $200-$400 GAP — see POKEMON_GAP). basketball (NBA): $200.
-# one piece: $750. football (NFL): $100 (the $100-$200 band is GONE this week).
-# MLB still absent from the flyer — baseball slabs are rejected.
+# pokemon: $600 (Kevin, Aug 7 evening: "can also take 450-600" — top band
+# extended from the flyer's $500; still has the $200-$400 GAP, see POKEMON_GAP).
+# basketball (NBA): $200. one piece: $750. football (NFL): $100 (the $100-$200
+# band is GONE this week). MLB still absent from the flyer — rejected.
 PSA_SPORT_MAX_PRICE = {
-    'pokemon': 500,
+    'pokemon': 600,
     'basketball': 200,
     'one piece': 750,
     'football': 100,   # NFL slabs
@@ -207,7 +208,7 @@ def apply_avg3_value(comp, threshold=0):
 # classify_psa_comp (POKEMON_GAP) — it never reaches these tiers. Ceiling $500.
 PSA_POKEMON_PER_CARD_TIERS = [
     (0,   200.01,        0.85),   # $1-$200 → 85%  (.01 so exactly $200 is 85%)
-    (400, float('inf'),  0.83),   # $400-$500 → 83%  ($500 ceiling rejects above)
+    (400, float('inf'),  0.83),   # $400-$600 → 83%  ($600 ceiling rejects above)
 ]
 # Basketball (NBA, Aug 7): $1-$30 → 100% (flyer 100-105), $30-$200 → 95%.
 # ANY grade, one sale ever. Ceiling $200.
