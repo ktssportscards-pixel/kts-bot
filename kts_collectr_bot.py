@@ -2636,6 +2636,36 @@ def _sanitize_channel_name(name):
     s = re.sub(r'[^a-z0-9_-]', '', (name or '').lower().replace(' ', '-'))
     return s[:90]
 
+# ── TICKET CHANNEL REGISTRY — survives category overflow ─────────────────────
+# Discord caps categories at 50 channels. When "open ticket" is full, Ticket
+# Tool drops new tickets OUTSIDE the category (they float below the previous
+# category, e.g. under announcements). After the rename to the customer's
+# username those channels carry no "ticket" marker anywhere, so the
+# name/category gate can't see them and the bot goes silent. Fix: remember
+# every ticket channel's ID at CREATION (they're always born "ticket-XXXX")
+# and let the gate match on the remembered ID too. `!adopt` (Kevin, in-channel)
+# registers a channel manually — the rescue for tickets opened before this
+# existed or after a redeploy wiped the store (DATA_DIR volume still pending).
+TICKET_CHANNELS_FILE = os.path.join(DATA_DIR, "ticket_channels_store.json")
+try:
+    with open(TICKET_CHANNELS_FILE) as _f:
+        TICKET_CHANNELS = set(json.load(_f))
+except Exception:
+    TICKET_CHANNELS = set()
+
+def _save_ticket_channels():
+    try:
+        with open(TICKET_CHANNELS_FILE + ".tmp", "w") as _f:
+            json.dump(sorted(TICKET_CHANNELS), _f)
+        os.replace(TICKET_CHANNELS_FILE + ".tmp", TICKET_CHANNELS_FILE)
+    except Exception as e:
+        print(f"ticket-channel store save failed (non-critical): {e}")
+
+def remember_ticket_channel(channel_id):
+    if channel_id not in TICKET_CHANNELS:
+        TICKET_CHANNELS.add(channel_id)
+        _save_ticket_channels()
+
 @bot.event
 async def on_guild_channel_create(channel):
     """Rename a freshly-opened ticket channel to the opener's Discord username
@@ -2650,6 +2680,9 @@ async def on_guild_channel_create(channel):
     cat = (channel.category.name.lower() if channel.category else "")
     if "ticket" not in channel.name.lower() and "ticket" not in cat:
         return
+    # Remember the ID for good: once renamed (and if it sits outside a FULL
+    # "open ticket" category), nothing else identifies this as a ticket.
+    remember_ticket_channel(channel.id)
     opener = None
     for _ in range(10):
         fresh_ch = bot.get_channel(channel.id) or channel
@@ -2830,7 +2863,22 @@ async def on_message(message):
     # keeps the bot working no matter what the individual channel is named.
     _is_text = isinstance(message.channel, discord.TextChannel)
     _cat_name = message.channel.category.name.lower() if _is_text and message.channel.category else ""
-    is_ticket = _is_text and ("ticket" in message.channel.name.lower() or "ticket" in _cat_name)
+    is_ticket = _is_text and (message.channel.id in TICKET_CHANNELS
+                              or "ticket" in message.channel.name.lower()
+                              or "ticket" in _cat_name)
+
+    # ── !adopt (Kevin only): force-register THIS channel as a buying ticket —
+    # rescue for overflow tickets that predate the ID registry (or lost it to
+    # a redeploy while the DATA_DIR volume is still missing) ──
+    if _is_text and message.content.strip().lower() == '!adopt':
+        if message.author.id == YOUR_DISCORD_USER_ID:
+            remember_ticket_channel(message.channel.id)
+            await message.channel.send(
+                "✅ This channel now counts as a **buying ticket** — cert numbers "
+                "and Collectr CSVs will process here."
+            )
+        return
+
     if not is_ticket:
         return
 
