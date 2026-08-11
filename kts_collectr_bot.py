@@ -2598,6 +2598,10 @@ async def on_ready():
             "⚠️ **VIP store failed to load** — every VIP is quoting at STANDARD "
             "rates until you re-add them with `!vip add`. The unreadable file "
             "was kept as vip_store.json.corrupt.")
+    # Pick up overflow tickets (category was full) that opened while the bot
+    # was down or that a store wipe forgot — runs on every (re)connect, cheap
+    # and idempotent.
+    await _sweep_overflow_tickets()
 
 async def handle_owe(message):
     """!owe <@seller|name> <amount> [ach] [note...] — log a package Kevin owes (default Wire)."""
@@ -2665,6 +2669,48 @@ def remember_ticket_channel(channel_id):
     if channel_id not in TICKET_CHANNELS:
         TICKET_CHANNELS.add(channel_id)
         _save_ticket_channels()
+
+def _ticket_fingerprint(channel_name, everyone_can_view, member_names):
+    """Pure Ticket-Tool fingerprint check: a ticket is PRIVATE to @everyone and
+    named after a member who holds an explicit access overwrite (that's exactly
+    what our rename-at-creation produces). Public channels and private channels
+    named anything else (staff rooms etc.) don't match."""
+    if everyone_can_view:
+        return False
+    return any(_sanitize_channel_name(n) == channel_name for n in member_names if n)
+
+def _looks_like_ticket_channel(channel):
+    """Discord-side wrapper for _ticket_fingerprint. Best-effort: any API
+    weirdness returns False (fail closed — !adopt still exists)."""
+    try:
+        eo = channel.overwrites_for(channel.guild.default_role)
+        everyone_can_view = eo.view_channel is not False
+        member_names = [t.name for t in channel.overwrites
+                        if isinstance(t, discord.Member) and not t.bot]
+        return _ticket_fingerprint(channel.name, everyone_can_view, member_names)
+    except Exception:
+        return False
+
+async def _sweep_overflow_tickets():
+    """Startup sweep: register every channel that walks and quacks like a
+    ticket but sits outside the (full) ticket category — so overflow tickets
+    opened while the bot was down, or forgotten in a store wipe, work again
+    without Kevin touching them. Registering is silent (no welcome blast)."""
+    found = 0
+    try:
+        for ch in bot.get_all_channels():
+            if not isinstance(ch, discord.TextChannel) or ch.id in TICKET_CHANNELS:
+                continue
+            cat = (ch.category.name.lower() if ch.category else "")
+            if "ticket" in ch.name.lower() or "ticket" in cat:
+                continue   # normal gate already sees these
+            if _looks_like_ticket_channel(ch):
+                remember_ticket_channel(ch.id)
+                found += 1
+        if found:
+            print(f"Ticket sweep: auto-registered {found} overflow ticket channel(s)")
+    except Exception as e:
+        print(f"Ticket sweep failed (non-critical): {e}")
 
 @bot.event
 async def on_guild_channel_create(channel):
@@ -2866,6 +2912,12 @@ async def on_message(message):
     is_ticket = _is_text and (message.channel.id in TICKET_CHANNELS
                               or "ticket" in message.channel.name.lower()
                               or "ticket" in _cat_name)
+    # Lazy auto-adopt: an unregistered channel that matches the Ticket-Tool
+    # fingerprint (private + named after its opener) is an overflow ticket the
+    # sweep hasn't seen yet — register it and process normally.
+    if _is_text and not is_ticket and _looks_like_ticket_channel(message.channel):
+        remember_ticket_channel(message.channel.id)
+        is_ticket = True
 
     # ── !adopt (Kevin only): force-register THIS channel as a buying ticket —
     # rescue for overflow tickets that predate the ID registry (or lost it to
