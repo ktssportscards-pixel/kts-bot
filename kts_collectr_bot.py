@@ -1372,7 +1372,7 @@ channel_sheet = {}
 # regardless of count, matching the long-standing One Piece behavior).
 # Slabs and singles can arrive in either order / separate messages, so we keep a
 # running per-ticket total and only let a seller proceed/ship once it qualifies.
-MIN_LOT_VALUE = 3000
+MIN_LOT_VALUE = 1000   # dropped from 3000 for the Aug 14 weekend (Kevin) — restore later if asked
 MIN_SLAB_COUNT = 15
 
 # Per-ticket running lot.
@@ -1518,8 +1518,8 @@ WELCOME_MSG = (
     + _POKEMON_RAW_WELCOME_LINE +
     "\n" + _POKEMON_RAW_OFF_LINE +
     "📊 **Minimum lot requirements:**\n"
-    "• Lots **with PSA slabs:** at least **15 slabs** AND **$3,000+** total value (slabs + any raw singles combined).\n"
-    "• **One Piece singles only:** your Collectr export must be **$3,000+** in value.\n"
+    f"• Lots **with PSA slabs:** at least **{MIN_SLAB_COUNT} slabs** AND **${MIN_LOT_VALUE:,}+** total value (slabs + any raw singles combined).\n"
+    f"• **One Piece singles only:** your Collectr export must be **${MIN_LOT_VALUE:,}+** in value.\n"
     + _POKEMON_RAW_MIN_LINE +
     "\n🔢 We prioritize **quantity** — we won't take a lot that's just a few big-ticket slabs.\n\n"
     "What are you looking to sell?"
