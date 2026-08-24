@@ -34,6 +34,7 @@ import gspread
 import asyncio
 import re
 import io
+import time
 import os
 import json
 import pandas as pd
@@ -2563,16 +2564,25 @@ def build_recent_tickets_csv(days=3, chan_links=None):
     by_cert = {}   # cert -> csv row (dedupes resubmitted lots; last sheet wins)
     n_skipped = n_dupes = 0
     tickets = []
+    error_rows = []
     for f in files:
         username = f['name'].split(' discord')[0].strip()
         day = f['createdTime'][:10]
         ticket_url = chan_links.get(_sanitize_channel_name(username), '')
-        try:
-            ws = gcl.open_by_key(f['id']).get_worksheet(0)
-            rows = ws.get_values("A2:H1000")
-        except Exception as e:
-            lines.append(f'{day},{username},SHEET READ FAILED,{str(e)[:40]},,,,')
+        rows = None
+        for _attempt in (1, 2, 3):
+            try:
+                ws = gcl.open_by_key(f['id']).get_worksheet(0)
+                rows = ws.get_values("A2:H1000")
+                break
+            except Exception as e:
+                _err = e
+                if _attempt < 3:
+                    time.sleep(35)   # Sheets read quota resets per minute
+        if rows is None:
+            error_rows.append(f'{day},{username},SHEET READ FAILED,"{str(_err)[:60]}",,,,,')
             continue
+        time.sleep(1.2)   # pace reads to stay under the per-minute quota
         t_cards = 0
         t_value = 0.0
         for row in rows:
@@ -2603,11 +2613,12 @@ def build_recent_tickets_csv(days=3, chan_links=None):
                            + (f" — <{ticket_url}>" if ticket_url else ""))
     total_value = sum(x[1] for x in by_cert.values())
     total_payout = sum(x[2] for x in by_cert.values())
-    lines = [header] + [x[0] for x in by_cert.values()]
+    lines = [header] + [x[0] for x in by_cert.values()] + error_rows
     summary = (f"🧾 **Last {days} day{'s' if days != 1 else ''}:** {len(files)} sheets, "
                f"{len(by_cert)} accepted cards, ${total_value:,.2f} comp → ${total_payout:,.2f} payout"
                + (f" ({n_skipped} zero-rate rows left out)" if n_skipped else "")
-               + (f" ({n_dupes} duplicate certs collapsed)" if n_dupes else "") + "\n"
+               + (f" ({n_dupes} duplicate certs collapsed)" if n_dupes else "")
+               + (f" ⚠️ {len(error_rows)} sheet(s) unreadable — see CSV bottom" if error_rows else "") + "\n"
                + "\n".join(f"• {t}" for t in tickets[:25]))
     return "\n".join(lines), summary
 
