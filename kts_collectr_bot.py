@@ -2545,6 +2545,75 @@ async def helper_health_monitor(interval_s=300):
                 )
 
 @bot.event
+async def requote_stalled_tickets(days=7):
+    """One-shot recovery sweep (!requoteall): find sheets from the last N days
+    that have certs but NO comps (a crashed or interrupted quote), match each
+    back to its ticket channel by username (channels are named after their
+    opener), re-run the comps, and post the quote — reusing the EXISTING sheet.
+    Sequential; helper lookups are already serialized/paced. Returns a summary."""
+    guild = bot.guilds[0] if bot.guilds else None
+    if guild is None:
+        return "Bot isn't in a server yet."
+    from datetime import timedelta as _td
+    since = (datetime.utcnow() - _td(days=days)).strftime('%Y-%m-%dT%H:%M:%S')
+    def _list_sheets():
+        return get_drive_service().files().list(
+            q=f"'{PSA_FOLDER_ID}' in parents and trashed=false and createdTime > '{since}'",
+            orderBy='createdTime asc', pageSize=100,
+            fields='files(name,id)').execute().get('files', [])
+    try:
+        files = await asyncio.to_thread(_list_sheets)
+    except Exception as e:
+        return f"Drive scan failed: {e}"
+    done = skipped = failed = 0
+    quoted_channels = set()
+    for f in files:
+        def _read(fid=f['id']):
+            ws = get_gspread_client().open_by_key(fid).get_worksheet(0)
+            certs = [c for c in ws.col_values(2)[1:] if str(c).strip().isdigit()]
+            filled = [v for v in ws.col_values(7)[1:] if str(v).strip() not in ('', 'not found')]
+            return certs, filled
+        try:
+            certs, filled = await asyncio.to_thread(_read)
+        except Exception as e:
+            failed += 1
+            await ping_kevin(f"🔁 {f['name']}: sheet read failed ({str(e)[:80]})")
+            continue
+        if not certs or filled:
+            continue   # healthy quote or empty sheet — not stalled
+        username = f['name'].split(' discord')[0].strip()
+        channel = discord.utils.get(guild.text_channels, name=_sanitize_channel_name(username))
+        if channel is None:
+            skipped += 1
+            await ping_kevin(f"🔁 **{f['name']}**: stalled ({len(certs)} certs) but no ticket "
+                             f"channel named after the customer — re-send certs there manually.")
+            continue
+        if channel.id in quoted_channels:
+            skipped += 1
+            await ping_kevin(f"🔁 **{f['name']}**: second stalled sheet for #{channel.name} — "
+                             f"skipped (already requoted the first; handle by hand if both were real).")
+            continue
+        remember_ticket_channel(channel.id)
+        remember_channel_sheet(channel.id, f['id'])
+        sheet_url = f"https://docs.google.com/spreadsheets/d/{f['id']}/edit"
+        try:
+            comps = await asyncio.to_thread(lookup_comps, certs)
+            returned = {str(c.get('cert', '')).strip() for c in comps or []}
+            if not comps or any(str(c).strip() not in returned for c in certs):
+                failed += 1
+                await ping_kevin(f"🔁 **{username}**: partial comp coverage "
+                                 f"({len(returned)}/{len(certs)}) — not quoting, run !requoteall again later.")
+                continue
+            await price_and_send_psa_offer(channel, channel.id, username, certs,
+                                           comps, f['id'], sheet_url, delayed=True)
+            quoted_channels.add(channel.id)
+            done += 1
+        except Exception as e:
+            failed += 1
+            await ping_kevin(f"🔁 **{username}**: requote FAILED — {str(e)[:120]}\n{sheet_url}", channel)
+    return (f"🔁 **Requote sweep done** — {done} ticket{'s' if done != 1 else ''} quoted, "
+            f"{skipped} skipped, {failed} failed.")
+
 async def on_ready():
     global _OWED_WEB_STARTED, _HELPER_MONITOR_STARTED
     print(f"✅ KTS Collectibles Bot online as {bot.user}")
@@ -2726,6 +2795,17 @@ async def on_guild_channel_create(channel):
 @bot.event
 async def on_message(message):
     if message.author.bot:
+        return
+
+    # ── !requoteall [days] (Kevin only, DM ok): auto-requote every stalled
+    # sheet (certs but no comps) from the last N days — no pasting needed ──
+    if message.content.strip().lower().startswith('!requoteall'):
+        if message.author.id == YOUR_DISCORD_USER_ID:
+            _toks = message.content.split()
+            _days = int(_toks[1]) if len(_toks) > 1 and _toks[1].isdigit() else 7
+            await message.channel.send(f"🔁 Requote sweep started (last {_days} days) — per-ticket updates land in your DMs.")
+            _summary = await requote_stalled_tickets(_days)
+            await message.channel.send(_summary)
         return
 
     # ── !payinfo (Kevin only) — sellers' wire/ACH details, DM-routed ──
