@@ -2544,7 +2544,6 @@ async def helper_health_monitor(interval_s=300):
                     "~10 min, check the VM."
                 )
 
-@bot.event
 async def requote_stalled_tickets(days=7):
     """One-shot recovery sweep (!requoteall): find sheets from the last N days
     that have certs but NO comps (a crashed or interrupted quote), match each
@@ -2614,6 +2613,7 @@ async def requote_stalled_tickets(days=7):
     return (f"🔁 **Requote sweep done** — {done} ticket{'s' if done != 1 else ''} quoted, "
             f"{skipped} skipped, {failed} failed.")
 
+@bot.event
 async def on_ready():
     global _OWED_WEB_STARTED, _HELPER_MONITOR_STARTED
     print(f"✅ KTS Collectibles Bot online as {bot.user}")
