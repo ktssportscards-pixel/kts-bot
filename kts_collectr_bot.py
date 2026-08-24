@@ -1078,7 +1078,11 @@ async def price_and_send_psa_offer(channel, channel_id, username, certs, comps,
             # (Was hardcoded 250 — left a $200-250 gap where cards
             # were rejected on raw CL value while identical cards
             # above $250 got discounted and accepted.)
-            apply_avg3_value(_c, threshold=PSA_SPORT_MAX_PRICE['basketball'])
+            # .get with an inf default: basketball may be absent from
+            # PSA_SPORT_MAX_PRICE while sports are off (Aug 12) — a stray
+            # basketball-classified cert in a lot must not crash the quote
+            # (classify rejects it right after anyway).
+            apply_avg3_value(_c, threshold=PSA_SPORT_MAX_PRICE.get('basketball', float('inf')))
     if sheet_id and comps:
         try:
             await asyncio.to_thread(fill_buying_sheet, sheet_id, comps)
