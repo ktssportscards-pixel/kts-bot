@@ -2544,6 +2544,68 @@ async def helper_health_monitor(interval_s=300):
                     "~10 min, check the VM."
                 )
 
+def build_recent_tickets_csv(days=3):
+    """Collect every buying sheet created in the last N days into one CSV —
+    a row per card with a nonzero payout rate (what Kevin is actually buying),
+    spreadsheet-ready for the send-to-boss tracker. Returns (csv_text, summary).
+    Blocking — run via asyncio.to_thread."""
+    from datetime import timedelta as _td
+    since = (datetime.utcnow() - _td(days=days)).strftime('%Y-%m-%dT%H:%M:%S')
+    files = get_drive_service().files().list(
+        q=f"'{PSA_FOLDER_ID}' in parents and trashed=false and createdTime > '{since}'",
+        orderBy='createdTime asc', pageSize=200,
+        fields='files(name,id,createdTime)').execute().get('files', [])
+    gcl = get_gspread_client()
+    header = "Date,Customer,Cert,Card,Grade,Value,Rate,Payout"
+    by_cert = {}   # cert -> csv row (dedupes resubmitted lots; last sheet wins)
+    n_skipped = n_dupes = 0
+    tickets = []
+    for f in files:
+        username = f['name'].split(' discord')[0].strip()
+        day = f['createdTime'][:10]
+        try:
+            ws = gcl.open_by_key(f['id']).get_worksheet(0)
+            rows = ws.get_values("A2:H1000")
+        except Exception as e:
+            lines.append(f'{day},{username},SHEET READ FAILED,{str(e)[:40]},,,,')
+            continue
+        t_cards = 0
+        t_value = 0.0
+        for row in rows:
+            row += [''] * (8 - len(row))
+            cert, name, grade, value, rate = row[1], row[3], row[4], row[6], row[7]
+            if not str(cert).strip().isdigit():
+                continue
+            try:
+                v = float(str(value).replace('$', '').replace(',', ''))
+                rt = float(str(rate).replace('%', '') or 0)
+            except ValueError:
+                continue
+            if rt > 1.5:
+                rt = rt / 100.0   # sheet renders H as "86", not 0.86
+            if rt <= 0:
+                n_skipped += 1
+                continue
+            safe_name = str(name).replace('"', "'")
+            cert_key = str(cert).strip()
+            if cert_key in by_cert:
+                n_dupes += 1
+            by_cert[cert_key] = (f'{day},{username},{cert_key},"{safe_name}",{grade},'
+                                 f'{v:.2f},{rt*100:g}%,{v*rt:.2f}', v, v*rt)
+            t_cards += 1
+            t_value += v
+        if t_cards:
+            tickets.append(f"{username} ({day[5:]}): {t_cards} cards ${t_value:,.2f}")
+    total_value = sum(x[1] for x in by_cert.values())
+    total_payout = sum(x[2] for x in by_cert.values())
+    lines = [header] + [x[0] for x in by_cert.values()]
+    summary = (f"🧾 **Last {days} day{'s' if days != 1 else ''}:** {len(files)} sheets, "
+               f"{len(by_cert)} accepted cards, ${total_value:,.2f} comp → ${total_payout:,.2f} payout"
+               + (f" ({n_skipped} zero-rate rows left out)" if n_skipped else "")
+               + (f" ({n_dupes} duplicate certs collapsed)" if n_dupes else "") + "\n"
+               + "\n".join(f"• {t}" for t in tickets[:25]))
+    return "\n".join(lines), summary
+
 async def requote_stalled_tickets(days=7):
     """One-shot recovery sweep (!requoteall): find sheets from the last N days
     that have certs but NO comps (a crashed or interrupted quote), match each
@@ -2795,6 +2857,23 @@ async def on_guild_channel_create(channel):
 @bot.event
 async def on_message(message):
     if message.author.bot:
+        return
+
+    # ── !recent [days] (Kevin only, DM ok): CSV of all cards from tickets in
+    # the last N days (default 3) — for the send-to-boss spreadsheet ──
+    if message.content.strip().lower().startswith('!recent'):
+        if message.author.id == YOUR_DISCORD_USER_ID:
+            _toks = message.content.split()
+            _days = int(_toks[1]) if len(_toks) > 1 and _toks[1].isdigit() else 3
+            await message.channel.send(f"🧾 Pulling tickets from the last {_days} day{'s' if _days != 1 else ''}...")
+            try:
+                _csv, _summary = await asyncio.to_thread(build_recent_tickets_csv, _days)
+                _fp = io.BytesIO(_csv.encode('utf-8'))
+                await message.channel.send(
+                    _summary,
+                    file=discord.File(_fp, filename=f"tickets_last_{_days}d.csv"))
+            except Exception as e:
+                await message.channel.send(f"⚠️ Couldn't build the list: {str(e)[:150]}")
         return
 
     # ── !requoteall [days] (Kevin only, DM ok): auto-requote every stalled
