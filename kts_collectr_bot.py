@@ -2544,11 +2544,14 @@ async def helper_health_monitor(interval_s=300):
                     "~10 min, check the VM."
                 )
 
-def build_recent_tickets_csv(days=3):
+def build_recent_tickets_csv(days=3, chan_links=None):
     """Collect every buying sheet created in the last N days into one CSV —
     a row per card with a nonzero payout rate (what Kevin is actually buying),
-    spreadsheet-ready for the send-to-boss tracker. Returns (csv_text, summary).
+    spreadsheet-ready for the send-to-boss tracker. chan_links maps sanitized
+    channel names -> Discord jump URLs so every row and summary line links
+    straight to the ticket. Returns (csv_text, summary).
     Blocking — run via asyncio.to_thread."""
+    chan_links = chan_links or {}
     from datetime import timedelta as _td
     since = (datetime.utcnow() - _td(days=days)).strftime('%Y-%m-%dT%H:%M:%S')
     files = get_drive_service().files().list(
@@ -2556,13 +2559,14 @@ def build_recent_tickets_csv(days=3):
         orderBy='createdTime asc', pageSize=200,
         fields='files(name,id,createdTime)').execute().get('files', [])
     gcl = get_gspread_client()
-    header = "Date,Customer,Cert,Card,Grade,Value,Rate,Payout"
+    header = "Date,Customer,Cert,Card,Grade,Value,Rate,Payout,Ticket"
     by_cert = {}   # cert -> csv row (dedupes resubmitted lots; last sheet wins)
     n_skipped = n_dupes = 0
     tickets = []
     for f in files:
         username = f['name'].split(' discord')[0].strip()
         day = f['createdTime'][:10]
+        ticket_url = chan_links.get(_sanitize_channel_name(username), '')
         try:
             ws = gcl.open_by_key(f['id']).get_worksheet(0)
             rows = ws.get_values("A2:H1000")
@@ -2591,11 +2595,12 @@ def build_recent_tickets_csv(days=3):
             if cert_key in by_cert:
                 n_dupes += 1
             by_cert[cert_key] = (f'{day},{username},{cert_key},"{safe_name}",{grade},'
-                                 f'{v:.2f},{rt*100:g}%,{v*rt:.2f}', v, v*rt)
+                                 f'{v:.2f},{rt*100:g}%,{v*rt:.2f},{ticket_url}', v, v*rt)
             t_cards += 1
             t_value += v
         if t_cards:
-            tickets.append(f"{username} ({day[5:]}): {t_cards} cards ${t_value:,.2f}")
+            tickets.append(f"{username} ({day[5:]}): {t_cards} cards ${t_value:,.2f}"
+                           + (f" — <{ticket_url}>" if ticket_url else ""))
     total_value = sum(x[1] for x in by_cert.values())
     total_payout = sum(x[2] for x in by_cert.values())
     lines = [header] + [x[0] for x in by_cert.values()]
@@ -2867,7 +2872,10 @@ async def on_message(message):
             _days = int(_toks[1]) if len(_toks) > 1 and _toks[1].isdigit() else 3
             await message.channel.send(f"🧾 Pulling tickets from the last {_days} day{'s' if _days != 1 else ''}...")
             try:
-                _csv, _summary = await asyncio.to_thread(build_recent_tickets_csv, _days)
+                _g = message.guild or (bot.guilds[0] if bot.guilds else None)
+                _links = ({ch.name: f"https://discord.com/channels/{_g.id}/{ch.id}"
+                           for ch in _g.text_channels} if _g else {})
+                _csv, _summary = await asyncio.to_thread(build_recent_tickets_csv, _days, _links)
                 _fp = io.BytesIO(_csv.encode('utf-8'))
                 await message.channel.send(
                     _summary,
