@@ -1360,8 +1360,8 @@ channel_sheet = {}
 # regardless of count, matching the long-standing One Piece behavior).
 # Slabs and singles can arrive in either order / separate messages, so we keep a
 # running per-ticket total and only let a seller proceed/ship once it qualifies.
-MIN_LOT_VALUE = 3000   # standard minimum (the Aug 14 weekend's $1,000 exception expired)
-MIN_SLAB_COUNT = 15
+MIN_LOT_VALUE = 1000   # Kevin, Aug 28: $1,000 standing minimum
+MIN_SLAB_COUNT = 10    # Kevin, Aug 28: 10 slabs minimum (was 15)
 
 # Per-ticket running lot.
 #   channel_id -> {"singles": {game: market_value}, "slab_certs": {cert: comp_value}}
