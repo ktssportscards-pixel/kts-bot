@@ -1529,12 +1529,11 @@ SHIPPING_MSG = (
     "• **Slabs:** ship as-is — **no sleeves or stickers.** Slabs shipped in sleeves or with stickers = **2% deducted** from payout.\n"
     "• **No note** (or missing required info above) = **2% deducted** from payout.\n\n"
     "⚠️ Without a note we also won't know who the package is from, so payment may be delayed on top of the deduction.\n\n"
-    "🗓️ **Payouts run Thursdays & Fridays only.**\n"
+    "🗓️ **Payouts run Fridays only.**\n"
     "It's **first come, first serve** — you join the payout queue the moment your package is scanned in on arrival.\n"
-    "• Package in **Monday** → usually paid **Thursday**\n"
-    "• Package in **Tuesday** → usually paid **Friday**\n"
-    "• Arrives later in the week → rolls into the **next** Thursday/Friday payout.\n\n"
-    "👉 Best move: **overnight it Monday so it lands Tuesday** to make that week's queue. Payment via wire or ACH ⚡\n\n"
+    "• Package in **Tuesday** → usually paid that **Friday**\n"
+    "• Arrives later in the week → rolls into the **next** Friday payout.\n\n"
+    "👉 Best move: **overnight it Monday so it lands Tuesday morning** to make that week's payout. Payment via wire or ACH ⚡\n\n"
     "Once you've shipped, **drop your tracking number here** so Kevin can keep an eye out!"
 )
 
@@ -2194,8 +2193,8 @@ def build_payout_digest():
 _PAYOUT_DIGEST_MARKER = os.path.join(DATA_DIR, "payout_digest_last.txt")
 
 async def payout_digest_loop():
-    """DM the payout digest once on Thursday and Friday mornings (~8am Central).
-    Marker file survives redeploys so a restart doesn't re-send."""
+    """DM the payout digest once on Friday mornings (~8am Central) — payouts
+    are Fridays only (Kevin, Aug 28). Marker survives redeploys."""
     from zoneinfo import ZoneInfo
     tz = ZoneInfo("America/Chicago")
     while True:
@@ -2208,7 +2207,7 @@ async def payout_digest_loop():
                     last = f.read().strip()
             except Exception:
                 pass
-            if now.weekday() in (3, 4) and now.hour >= 8 and last != today:
+            if now.weekday() == 4 and now.hour >= 8 and last != today:
                 digest = build_payout_digest()
                 if digest is None or await ping_kevin(digest):
                     try:
