@@ -98,7 +98,7 @@ PSA_MAX_AGE_DAYS = 30
 # slab priced ABOVE its ceiling is rejected (Sep 4 weekend, Kevin):
 # POKEMON $1-$200 ONLY. No sports, no One Piece, no raws — nothing else.
 PSA_SPORT_MAX_PRICE = {
-    'pokemon': 200,
+    'pokemon': 100,   # Sep 5: $100-$200 allocation FILLED — $1-$100 only now
 }
 NFL_MIN_PRICE = 300   # dormant while football is off
 # Pokémon buy map (Sep 4 weekend, Kevin): single band $1-$200, PSA 7+,
@@ -192,9 +192,9 @@ def apply_avg3_value(comp, threshold=0):
 # Low end of each flyer range. Grade, reject-zones, and the Pokémon manual bucket
 # live in classify_psa_comp, so only in-band cards reach these blends. CL-confidence
 # requirements can't be enforced (no CL score in the data) — priced on value+grade.
-# Pokémon (Sep 4): $1-$200 → 87% (Kevin).
+# Pokémon (Sep 5): $1-$100 → 87% (the $100-$200 allocation is filled).
 PSA_POKEMON_PER_CARD_TIERS = [
-    (0, 200.01, 0.87),   # $1-$200 → 87%  (.01 so exactly $200 is 87%)
+    (0, 100.01, 0.87),   # $1-$100 → 87%  (.01 so exactly $100 is 87%)
 ]
 # Basketball (NBA, Aug 7): $1-$30 → 100% (flyer 100-105), $30-$200 → 95%.
 # ANY grade, one sale ever. Ceiling $200.
@@ -1493,7 +1493,7 @@ _POKEMON_RAW_OFF_LINE = (
 WELCOME_MSG = (
     "👋 Welcome to KTS Collectibles!\n\n"
     "We're currently buying:\n"
-    "• **PSA graded Pokémon slabs** ($1–$200) → send your cert numbers\n"
+    "• **PSA graded Pokémon slabs** ($1–$100) → send your cert numbers\n"
     + _POKEMON_RAW_WELCOME_LINE +
     "\n⚠️ We are **not** buying raw cards, sports, or One Piece this weekend — Pokémon PSA slabs only.\n\n"
     "📊 **Minimum lot requirements:**\n"
