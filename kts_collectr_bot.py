@@ -192,9 +192,9 @@ def apply_avg3_value(comp, threshold=0):
 # Low end of each flyer range. Grade, reject-zones, and the Pokémon manual bucket
 # live in classify_psa_comp, so only in-band cards reach these blends. CL-confidence
 # requirements can't be enforced (no CL score in the data) — priced on value+grade.
-# Pokémon (Sep 4): $1-$200 → 85% (same rate as last week's low band).
+# Pokémon (Sep 4): $1-$200 → 87% (Kevin).
 PSA_POKEMON_PER_CARD_TIERS = [
-    (0, 200.01, 0.85),   # $1-$200 → 85%  (.01 so exactly $200 is 85%)
+    (0, 200.01, 0.87),   # $1-$200 → 87%  (.01 so exactly $200 is 87%)
 ]
 # Basketball (NBA, Aug 7): $1-$30 → 100% (flyer 100-105), $30-$200 → 95%.
 # ANY grade, one sale ever. Ceiling $200.
