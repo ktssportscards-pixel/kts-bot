@@ -2047,9 +2047,12 @@ def build_sheet_h_formula(r, pokemon_tiers=None):
     is_op = (f'OR(F{r}="other",F{r}="one piece",F{r}="onepiece",'
              f'F{r}="tcg",F{r}="popculture",F{r}="pop culture")')
     is_mlb = f'OR(F{r}="baseball",F{r}="mlb")'
-    # NBA player bans, mirrored from the bot's constants (name match on column D,
-    # same lowercase-substring semantics as check_basketball_rejections).
-    ban_always = '|'.join(BBALL_PLAYERS_REJECT_ALWAYS + WNBA_PLAYERS)
+    # NBA player + collegiate-set bans, mirrored from the bot's constants (name
+    # match on column D, same lowercase-substring semantics as
+    # check_basketball_rejections — the sheet has no set column, so set-keyword
+    # matches ride on the card name like the bot's `combined` check).
+    ban_always = '|'.join(BBALL_PLAYERS_REJECT_ALWAYS + WNBA_PLAYERS
+                          + COLLEGIATE_SET_KEYWORDS)
     ban_over = '|'.join(BBALL_PLAYERS_REJECT_OVER_200)
     nba_ok = (f'IF(OR(REGEXMATCH(LOWER(D{r}&""),"{ban_always}"),'
               f'AND(G{r}>{BBALL_PLAYER_PRICE_CAP},'
