@@ -1075,8 +1075,10 @@ async def price_and_send_psa_offer(channel, channel_id, username, certs, comps,
                     if delayed else "✅ All comps loaded!")
     # ONE snapshot of the VIP state for this whole quote: the sheet stamp and the
     # quoted rates must never disagree (a !vip add/remove mid-quote would other-
-    # wise desynchronize them across the awaits below).
+    # wise desynchronize them across the awaits below). BOTH the pokemon tiers
+    # and the per-sport rates snapshot here — no later re-reads.
     vip_tiers = vip_pokemon_tiers(username)
+    vip_srates = vip_sport_rates(username)
     # Value adjustments BEFORE filling the sheet or classifying, so the sheet's
     # "Our comp" and all pricing use the adjusted value.
     # MLB uses the DIRECT CardLadder value (the min(avg-3-sales, CL) discount was
@@ -1100,14 +1102,15 @@ async def price_and_send_psa_offer(channel, channel_id, username, certs, comps,
             await asyncio.to_thread(fill_buying_sheet, sheet_id, comps)
         except Exception as e:
             print(f"Sheet fill error (offer continues): {e}")
-    # VIP customers get their negotiated Pokémon rates baked into THEIR sheet's
+    # VIP customers get their negotiated rates baked into THEIR sheet's
     # payout formulas (the template copy carries standard rates). A silent failure
     # here would make the sheet compute LESS than the quoted number and Kevin pays
     # off the sheet — so retry once, then alert him loudly.
-    if sheet_id and vip_tiers:
+    if sheet_id and (vip_tiers or vip_srates):
         for _attempt in (1, 2):
             try:
-                await asyncio.to_thread(write_custom_sheet_formulas, sheet_id, vip_tiers)
+                await asyncio.to_thread(write_custom_sheet_formulas, sheet_id,
+                                        vip_tiers, vip_srates)
                 break
             except Exception as e:
                 if _attempt == 1:
@@ -1177,15 +1180,21 @@ async def price_and_send_psa_offer(channel, channel_id, username, certs, comps,
             _payout = sum(float(c['clValue']) * _pokemon_card_rate(c, vip_tiers)
                           for c in comps_in_sport)
             rate = (_payout / sport_total) if sport_total else PSA_POKEMON_PER_CARD_TIERS[0][2]
+            is_vip = bool(vip_tiers)
+        elif sp in vip_srates:
+            # Flat VIP rate for this sport (grade/ceiling/age rules stay standard).
+            rate = vip_srates[sp]
+            is_vip = True
         else:
             rate = get_psa_payout_rate(sp, sport_total, card_values)
+            is_vip = False
         sport_breakdown.append({
             'sport': sp,
             'count': len(comps_in_sport),
             'total': sport_total,
             'rate': rate,
             'payout': sport_total * rate,
-            'vip': sp == 'pokemon' and bool(vip_tiers),
+            'vip': is_vip,
         })
     total_comp = sum(s['total'] for s in sport_breakdown)
     total_payout = sum(s['payout'] for s in sport_breakdown)
@@ -1794,8 +1803,17 @@ try:
         _raw_vip = json.load(_f)
     VIP_RATES = {}
     for _k, _v in _raw_vip.items():
-        if (isinstance(_v, dict) and isinstance(_v.get("pokemon"), list) and _v["pokemon"]
-                and all(isinstance(_x, (int, float)) for _x in _v["pokemon"])):
+        # Valid: a non-empty numeric 'pokemon' rate list, and/or flat numeric
+        # per-sport rates under other keys (multi-sport VIP, Sep 21).
+        _ok = False
+        if isinstance(_v, dict):
+            _pok = _v.get("pokemon")
+            _pok_valid = (isinstance(_pok, list) and _pok
+                          and all(isinstance(_x, (int, float)) for _x in _pok))
+            _sports_valid = any(_sk != "pokemon" and isinstance(_sv, (int, float))
+                                for _sk, _sv in _v.items())
+            _ok = _pok_valid or (_pok in (None, []) and _sports_valid)
+        if _ok:
             VIP_RATES[str(_k).lower()] = _v
         else:
             print(f"vip store: dropping malformed entry {_k!r}")
@@ -1822,13 +1840,40 @@ def _save_vip():
     except Exception as e:
         print(f"vip store save failed (non-critical): {e}")
 
+# Wired-in VIP roster (Kevin, Sep 21). DATA_DIR has NO volume on Railway, so
+# the JSON store wipes on every deploy — these seed entries survive because
+# they live in code. A !vip store entry for the same username OVERRIDES its
+# seed ('!vip clear' does NOT remove seed entries — edit this dict for that).
+# Schema per user: 'pokemon' -> list of band rates (like the store);
+# other keys -> flat VIP rate for that canonical sport.
+VIP_SEED = {
+    'cwilk_sportscards': {'pokemon': [0.92, 0.88, 0.88],
+                          'basketball': 0.95, 'mlb': 0.90, 'one piece': 0.88},
+    # Discord usernames can end in '.' — the ticket channel is named
+    # 'cwilk_sportscards.', so register both spellings.
+    'cwilk_sportscards.': {'pokemon': [0.92, 0.88, 0.88],
+                           'basketball': 0.95, 'mlb': 0.90, 'one piece': 0.88},
+}
+
+def _vip_entry(username):
+    """The user's VIP entry: store entry if present, else the code seed."""
+    key = (username or "").lower()
+    return VIP_RATES.get(key) or VIP_SEED.get(key)
+
+def vip_sport_rates(username):
+    """Non-Pokémon flat VIP rates for the user, e.g. {'basketball': 0.95}.
+    Empty dict if none. Sports keys are canonical (normalize_sport output)."""
+    entry = _vip_entry(username) or {}
+    return {k: v for k, v in entry.items()
+            if k != 'pokemon' and isinstance(v, (int, float))}
+
 def vip_pokemon_tiers(username):
     """The user's custom Pokémon tier list — band boundaries from the CURRENT
     standard tiers, rates from their VIP entry. If they were given FEWER rates
     than there are bands, the remaining bands keep the STANDARD rate (a VIP
     negotiated on the low band must not silently get a premium rate on a
     $1,500 slab). None if the user isn't a VIP."""
-    entry = VIP_RATES.get((username or "").lower())
+    entry = _vip_entry(username)
     if not entry:
         return None
     rates = entry.get("pokemon") or []
@@ -1920,9 +1965,16 @@ def _vip_resolve_target(token, mentions, guild, for_remove=False):
     return name, None, None
 
 def _vip_rate_summary(name):
-    labels = _pokemon_band_labels()
+    parts = []
     tiers = vip_pokemon_tiers(name)
-    return ", ".join(f"{labels[i]} → {t[2]*100:g}%" for i, t in enumerate(tiers))
+    if tiers:
+        labels = _pokemon_band_labels()
+        parts.append(", ".join(f"{labels[i]} → {t[2]*100:g}%" for i, t in enumerate(tiers)))
+    srates = vip_sport_rates(name)
+    if srates:
+        parts.append(", ".join(f"{_sport_label(s)} → {r*100:g}%"
+                               for s, r in sorted(srates.items())))
+    return " | ".join(parts) if parts else "(no rates?)"
 
 def handle_vip_command(content, mentions=None, guild=None):
     """Parse and apply a !vip command; returns the reply text (sync, testable).
@@ -1935,11 +1987,13 @@ def handle_vip_command(content, mentions=None, guild=None):
     sub = (toks[0].lower() if toks else "list")
 
     if sub == "list":
-        if not VIP_RATES:
+        names = sorted(set(VIP_RATES) | set(VIP_SEED))
+        if not names:
             return "No VIP users set. Add one with `!vip add <username> 91` (or `91 88 85` per band)."
-        lines = ["✨ **VIP Pokémon rates:**"]
-        for name in sorted(VIP_RATES):
-            lines.append(f"• **{name}**: {_vip_rate_summary(name)}")
+        lines = ["✨ **VIP rates:**"]
+        for name in names:
+            tag = " 🔒 (wired-in)" if name in VIP_SEED and name not in VIP_RATES else ""
+            lines.append(f"• **{name}**: {_vip_rate_summary(name)}{tag}")
         return "\n".join(lines)
 
     if sub == "clear":
@@ -1975,9 +2029,11 @@ def handle_vip_command(content, mentions=None, guild=None):
             if terr:
                 results.append(f"• {t} ✗ {terr}")
                 continue
+            _sw = (" ⚠️ replaces wired-in rates (non-Pokémon sports drop to standard)"
+                   if name in VIP_SEED and vip_sport_rates(name) else "")
             VIP_RATES[name] = {"pokemon": list(rates)}
             applied += 1
-            results.append(f"• **{name}** ✓" + (f" ({note})" if note else ""))
+            results.append(f"• **{name}** ✓" + (f" ({note})" if note else "") + _sw)
         if applied:
             _save_vip()
         pretty = "/".join(f"{r*100:g}" for r in rates)
@@ -2000,12 +2056,20 @@ def handle_vip_command(content, mentions=None, guild=None):
         rates, err = _vip_parse_rates(rest)
         if err:
             return err
+        _seed_warn = ""
+        if name in VIP_SEED and vip_sport_rates(name):
+            _dropped = ", ".join(f"{_sport_label(s)} {r*100:g}%"
+                                 for s, r in sorted(vip_sport_rates(name).items()))
+            _seed_warn = (f"\n⚠️ **{name}** has wired-in rates ({_dropped}) — this "
+                          f"override REPLACES all of them: their non-Pokémon sports "
+                          f"now quote at STANDARD rates. `!vip remove {name}` brings "
+                          f"the wired-in rates back.")
         VIP_RATES[name] = {"pokemon": rates}
         _save_vip()
         _tag = f" ({note})" if note else ""
         return (f"✨ VIP set for **{name}**{_tag}: Pokémon {_vip_rate_summary(name)}\n"
                 f"(pinned until you change it — weekly flyer updates won't move it; "
-                f"grade/ceiling/sale-age rules stay standard)")
+                f"grade/ceiling/sale-age rules stay standard)" + _seed_warn)
 
     if sub in ("remove", "delete", "del"):
         if len(toks) < 2:
@@ -2016,16 +2080,27 @@ def handle_vip_command(content, mentions=None, guild=None):
         if name in VIP_RATES:
             del VIP_RATES[name]
             _save_vip()
+            if name in VIP_SEED:
+                return (f"Removed the **{name}** override — their WIRED-IN rates "
+                        f"apply again: {_vip_rate_summary(name)}\n"
+                        f"(wired-in rates live in the bot code — ask Claude to "
+                        f"edit VIP_SEED to change or drop them)")
             return f"Removed **{name}** from VIP — they get standard rates now."
+        if name in VIP_SEED:
+            return (f"**{name}** has WIRED-IN rates ({_vip_rate_summary(name)}) — "
+                    f"those live in the bot code and can't be removed by command. "
+                    f"Ask Claude to edit VIP_SEED.")
         return f"**{name or '?'}** isn't on the VIP list. `!vip list` to see who is."
 
     return ("Commands: `!vip add <username> 91 [88 85]` · `!vip bulk 91 90 85` + list "
             "of usernames on following lines · `!vip remove <username>` · `!vip list`")
 
-def build_sheet_h_formula(r, pokemon_tiers=None):
+def build_sheet_h_formula(r, pokemon_tiers=None, sport_rates=None):
     """The per-row payout formula written into buying sheets — generated from the
     bot's CURRENT rate constants so bot and sheet can't disagree. pokemon_tiers
-    overrides only the Pokémon band RATES (VIP sheets). NOTE: assumes the current
+    overrides only the Pokémon band RATES (VIP sheets); sport_rates overrides the
+    flat rate per canonical sport ({'basketball': 0.95, 'mlb': 0.90, ...}) — all
+    other gates (grade/ceiling/age/bans) stay standard. NOTE: assumes the current
     band structure (Sep 18: pokemon 3 bands $1-100/$450-600/$1201-1600 with PSA 7+
     AND 7+ digit cert; one piece $1-100; NBA $1-350; MLB $26-400) — if a weekly
     flyer changes the band COUNT, update this builder with it.
@@ -2036,12 +2111,13 @@ def build_sheet_h_formula(r, pokemon_tiers=None):
     def _n(v):
         return f"{v:g}"   # 1.0 -> "1", 0.85 -> "0.85" (matches the template's style)
     pt = pokemon_tiers or PSA_POKEMON_PER_CARD_TIERS
+    sr = sport_rates or {}
     p1 = _n(pt[0][2])                                     # $1-$100 rate
     p2 = _n(pt[1][2] if len(pt) > 1 else pt[-1][2])       # $450-$600 rate
     p3 = _n(pt[2][2] if len(pt) > 2 else pt[-1][2])       # $1,201-$1,600 rate
-    op = _n(PSA_ONE_PIECE_PER_CARD_TIERS[0][2])
-    nba = _n(PSA_BASKETBALL_PER_CARD_TIERS[0][2])
-    mlb = _n(PSA_MLB_PER_CARD_TIERS[0][2])
+    op = _n(sr.get('one piece', PSA_ONE_PIECE_PER_CARD_TIERS[0][2]))
+    nba = _n(sr.get('basketball', PSA_BASKETBALL_PER_CARD_TIERS[0][2]))
+    mlb = _n(sr.get('mlb', PSA_MLB_PER_CARD_TIERS[0][2]))
     g = PSA_MIN_GRADE
     cd = POKEMON_MIN_CERT_DIGITS
     is_op = (f'OR(F{r}="other",F{r}="one piece",F{r}="onepiece",'
@@ -2079,16 +2155,18 @@ def build_sheet_h_formula(r, pokemon_tiers=None):
                f'IFERROR((TODAY()-DATEVALUE(J{r}))>{maxage},TRUE))')
     return f'=IF(OR(NOT(ISNUMBER(G{r})),G{r}=0),"",IF(A{r}<>"PSA",0.7,IF({too_old},0,{rate})))'
 
-def write_custom_sheet_formulas(sheet_id, pokemon_tiers, sheet_name="Form. Put Date Here."):
-    """Rewrite H2:H1000 in one customer's sheet with their VIP Pokémon rates.
-    Blocking — run via asyncio.to_thread."""
+def write_custom_sheet_formulas(sheet_id, pokemon_tiers, sport_rates=None,
+                                sheet_name="Form. Put Date Here."):
+    """Rewrite H2:H1000 in one customer's sheet with their VIP rates (Pokémon
+    band tiers and/or flat per-sport rates). Blocking — run via asyncio.to_thread."""
     gc = get_gspread_client()
     ss = gc.open_by_key(sheet_id)
     try:
         sheet = ss.worksheet(sheet_name)
     except Exception:
         sheet = ss.sheet1
-    sheet.update(values=[[build_sheet_h_formula(r, pokemon_tiers)] for r in range(2, 1001)],
+    sheet.update(values=[[build_sheet_h_formula(r, pokemon_tiers, sport_rates)]
+                         for r in range(2, 1001)],
                  range_name="H2:H1000", value_input_option="USER_ENTERED")
 
 
@@ -3412,9 +3490,10 @@ async def on_message(message):
                     # down and Kevin ends up quoting this sheet by hand (or the
                     # retry exhausts), the sheet must already carry their rates.
                     _vt = vip_pokemon_tiers(username)
-                    if _vt:
+                    _vs = vip_sport_rates(username)
+                    if _vt or _vs:
                         try:
-                            await asyncio.to_thread(write_custom_sheet_formulas, sheet_id, _vt)
+                            await asyncio.to_thread(write_custom_sheet_formulas, sheet_id, _vt, _vs)
                         except Exception as e:
                             print(f"VIP creation-time stamp failed (quote-time stamp retries): {e}")
 
