@@ -1498,6 +1498,13 @@ def lot_qualifies(channel_id):
     """True if the running lot meets the buying minimums for its path."""
     slab_count, slab_value, singles, combined = lot_summary(channel_id)
     games = singles_by_game(channel_id)
+    # An EMPTY lot never qualifies, even with minimums at 0 — the CSV-rejected
+    # and comps-pending paths create empty entries precisely so a premature
+    # "proceed"/"ship" hits the hold message instead of the shipping address.
+    # (With MIN_LOT_VALUE=0 the one-piece shortcut below would otherwise
+    # return True on 0 >= 0.)
+    if slab_count == 0 and singles == 0:
+        return False
     # A singles portion hitting its own threshold qualifies the whole lot —
     # we'll take any slabs included regardless of slab count.
     # One Piece $3,000+, Pokémon $1,500+ (Jul 31 2026).
@@ -2202,7 +2209,8 @@ def build_sheet_h_formula(r, pokemon_tiers=None, sport_rates=None):
     # any sale ever.
     maxage = (f'IFS(F{r}="pokemon",IF(N(G{r})>=400,30,60),'
               f'F{r}="basketball",IF(N(G{r})<=100,100000,60),'
-              f'F{r}="football",IF(N(G{r})<=100,100000,IF({is_goat},90,60)),'
+              f'OR(F{r}="football",F{r}="nfl"),'
+              f'IF(N(G{r})<=100,100000,IF({is_goat},90,60)),'
               f'TRUE,30)')
     # Pokémon: PSA 7+ AND a 7+ digit cert number (column B), two auto bands.
     # $3,750+ = manual review: G is masked ("Kevin will quote") so H is blank;
@@ -2220,7 +2228,7 @@ def build_sheet_h_formula(r, pokemon_tiers=None, sport_rates=None):
     rate = (f'IFS('
             f'F{r}="pokemon",{pok_band},'
             f'F{r}="basketball",IF(AND(G{r}>=1,G{r}<=250,N(E{r})>={g}),{nba_ok},0),'
-            f'F{r}="football",IF(N(E{r})>={g},{nfl_band},0),'
+            f'OR(F{r}="football",F{r}="nfl"),IF(N(E{r})>={g},{nfl_band},0),'
             f'TRUE,0)')
     too_old = (f'IF(ISNUMBER(J{r}),(TODAY()-J{r})>{maxage},'
                f'IFERROR((TODAY()-DATEVALUE(J{r}))>{maxage},TRUE))')
