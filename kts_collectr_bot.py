@@ -99,33 +99,42 @@ PSA_MAX_AGE_DAYS = 30
 # Pokémon $1-100 / $400-700 / $3,750+ (big band, NO ceiling), NBA $1-$250,
 # NFL $1-$220 ($500 for QB GOATs — enforced in classify). One Piece and MLB
 # absent from the flyer — both OFF.
+# Oct 2 weekend flyer. Ceilings here are the MAX-POSSIBLE per sport (select
+# players included); non-select caps are enforced in classify via the
+# *_GENERAL_MAX constants + the Triumph select lists (triumph_lists.py).
 PSA_SPORT_MAX_PRICE = {
-    'pokemon': 10**9,     # big band $3,750+ has no upper limit
-    'basketball': 250,
-    'football': 500,      # QB GOAT ceiling; non-GOATs capped at NFL_MAX_PRICE
+    'pokemon': 5000,
+    'one piece': 900,
+    'mlb': 5000,          # Sluggers-list ceiling; others cap at MLB_GENERAL_MAX
+    'basketball': 3750,   # 2000s-list ceiling; others cap at NBA_GENERAL_MAX
+    'football': 2000,     # QB-GOAT ceiling; others cap at NFL_GENERAL_MAX
 }
-NFL_MAX_PRICE = 220   # non-GOAT football ceiling (Sep 26 flyer $101-$220 top band)
-NFL_MIN_PRICE = 1     # dormant — no NFL floor this weekend
-MLB_MIN_PRICE = 26    # dormant while MLB is off
-# QB GOATs (Sep 26 flyer): these quarterbacks get the extended lane —
-# ceiling $500 and 90% above $100 (vs 88% $101-220 for everyone else).
-# Name match on the card name, lowercase substring (same semantics as the
-# NBA ban lists).
-QB_GOATS = [
-    "joe montana",
-    "john elway",
-    "patrick mahomes",
-    "peyton manning",
-    "tom brady",
-]
-# Pokémon buy map (Sep 26 weekend flyer): $1-$100 (91%, any conf) and
-# $400-$700 (86%, CL 4+ flagged) — both PSA 7+ AND 7+ digit cert; values
-# between bands rejected. $3,750+ = big band: ANY grade, any cert length,
-# 87%, CL 3+ AND Kevin's APPROVAL required — quoted but FLAGGED loudly.
-POKEMON_BUY_BANDS = [(1, 100), (400, 700)]   # inclusive ends (big band separate)
-POKEMON_FLAG_CL_OVER = 400    # normal bands at/above this get the CL 4+ flag
-POKEMON_BIG_BAND_MIN = 3750   # $3,750+ any-grade approval band
-POKEMON_MIN_CERT_DIGITS = 7   # 7+ digit cert numbers (normal Pokémon bands)
+MLB_GENERAL_MAX = 600    # non-Slugger baseball ceiling
+NBA_GENERAL_MAX = 3500   # non-2000s-list basketball ceiling
+NFL_GENERAL_MAX = 600    # non-GOAT football ceiling
+# Select-player bands ABOVE the general ceilings (inclusive; from the flyer's
+# SPECIALTY rows). Values between bands are rejected even for listed players.
+MLB_SLUGGER_BANDS = [(600.01, 1000), (1400, 2000), (3750, 5000)]
+NFL_GOAT_BANDS = [(600.01, 1000), (1400, 2000)]
+NBA_2000S_BAND = (3500.01, 3750)
+NFL_MIN_PRICE = 1     # dormant — no NFL floor
+MLB_MIN_PRICE = 1     # dormant — no MLB floor (flyer starts at $1)
+# Select-player name lists captured from the Triumph Partners app (Oct 2) —
+# the customer-facing checker page mirrors these (tinyurl.com/2awv494h).
+# QB_GOATS now comes from there too (6 names — includes Dan Marino).
+from triumph_lists import (TRIUMPH_MLB_SLUGGERS, TRIUMPH_NBA_2000S,
+                           TRIUMPH_QB_GOATS)
+QB_GOATS = TRIUMPH_QB_GOATS
+SELECT_CHECK_URL = "tinyurl.com/2awv494h"
+# Pokémon buy map (Oct 2 flyer): CONTINUOUS $1-$5,000, all auto-quoted.
+# $1-$100 → 90%; $100-$5,000 → 87%. Gates are value-dependent:
+# grade 7+ below $3,000 (any grade at $3,000+), cert 7+ digits at ≤$1,000
+# only, sale-age 60d ≤$100 / 30d $100-$3,000 (CL 4+) / none $3,000+
+# ("any conf"). $3,000+ still ⚠️ FLAGS Kevin (big ticket) but auto-quotes.
+POKEMON_BUY_BANDS = [(1, 5000)]       # one continuous band
+POKEMON_BIG_BAND_MIN = 3000           # any grade / any conf / flag-for-Kevin
+POKEMON_CERT_GATE_MAX = 1000          # 7+ digit certs required at ≤$1,000
+POKEMON_MIN_CERT_DIGITS = 7
 # (Pikachu lane REMOVED Aug 11 per Kevin — Pikachus follow standard Pokémon
 # rules; $5k-$20k Pikachus land in the big-ticket review band like everything
 # else.)
@@ -214,34 +223,39 @@ def apply_avg3_value(comp, threshold=0):
 # Pokémon (Sep 26): $1-$100 → 91%; $400-$700 → 86%. The $3,750+ big band is
 # NEVER auto-priced (classify returns 'review' — Kevin makes his own offer),
 # so it has no tier here. Gaps between bands are rejected in classify.
+# All rates are pure value lookups (Oct 2 flyer) — the select-player name
+# lists only gate WHICH values are reachable (classify), never the rate.
 PSA_POKEMON_PER_CARD_TIERS = [
-    (0, 100.01, 0.91),        # $1-$100 → 91%  (.01 so exactly $100 is 91%)
-    (100.01, 700.01, 0.86),   # $400-$700 band → 86% (exactly $700 included)
+    (0, 100.01, 0.90),             # $1-$100 → 90%  (.01 so exactly $100 is 90%)
+    (100.01, float('inf'), 0.87),  # $100-$5,000 → 87%
 ]
-# NBA (Sep 26): $1-$250 flat 95%, PSA 7+, one sale ever. Ceiling $250.
-# $100+ "CL 3+" flagged for Kevin's eyeball.
+# NBA (Oct 2): $1-$1,000 → 95% (ANY grade); $1,000-$3,500 → 92% (PSA 7+);
+# 2000s-list $3,500-$3,750 → 93% (PSA 7+).
 PSA_BASKETBALL_PER_CARD_TIERS = [
-    (0, float('inf'), 0.95),   # $1-$250 → 95%  ($250 ceiling rejects above)
+    (0, 1000.01, 0.95),
+    (1000.01, 3500.01, 0.92),
+    (3500.01, float('inf'), 0.93),
 ]
-# MLB: OFF this weekend (absent from PSA_SPORT_MAX_PRICE). Tiers dormant
-# (Sep 18 was $26-$400 flat 89%).
+# MLB (Oct 2): $1-$30 → 100%, $30-$100 → 90%, $100-$600 → 90%; Sluggers
+# $600-$1,000 → 90%, $1,400-$2,000 → 91%, $3,750-$5,000 → 91%. PSA 7+.
 PSA_MLB_PER_CARD_TIERS = [
-    (0, float('inf'), 0.89),
+    (0, 30.01, 1.00),
+    (30.01, 1000.01, 0.90),
+    (1000.01, float('inf'), 0.91),
 ]
-# One Piece slabs: OFF this weekend (absent from PSA_SPORT_MAX_PRICE).
-# Tiers dormant (Sep 18 was $1-$100 → 88%).
+# One Piece (Oct 2): $1-$100 → 88%; $100-$900 → 83% (CL 4+ = sale ≤30d).
+# PSA 7+.
 PSA_ONE_PIECE_PER_CARD_TIERS = [
     (0, 100.01, 0.88),
+    (100.01, float('inf'), 0.83),
 ]
-# NFL (Sep 26): $1-$30 → 100%, $30-$100 → 90%, $101-$220 → 88% (CL 3+
-# flagged). QB GOATs (QB_GOATS list): same to $100, then 90% to $500 —
-# per-card via _football_card_rate, ceilings in classify.
+# NFL (Oct 2): $1-$100 → 90%, $100-$500 → 90%, $500-$600 → 88%; QB GOATs
+# $600-$1,000 → 88%, $1,400-$2,000 → 90%. PSA 7+.
 PSA_FOOTBALL_PER_CARD_TIERS = [
-    (0, 30.01, 1.00),              # $1-$30 → 100%  (exactly $30 included)
-    (30.01, 100.01, 0.90),         # $30-$100 → 90% (exactly $100 included)
-    (100.01, float('inf'), 0.88),  # $101-$220 → 88% (GOATs get 0.90 per-card)
+    (0, 500.01, 0.90),
+    (500.01, 1000.01, 0.88),
+    (1000.01, float('inf'), 0.90),
 ]
-QB_GOAT_OVER_100_RATE = 0.90       # GOATs above $100 (to their $500 ceiling)
 
 # ── BASKETBALL-SPECIFIC REJECTION RULES ──────────────────────────────────────────
 # Players we won't buy AT ALL regardless of price.
@@ -373,23 +387,29 @@ def _blended_per_card_rate(tiers, card_values):
     return payout / total
 
 
+def _name_on_list(comp, names):
+    """True if the card name contains any name from `names` (lowercase
+    substring, same semantics as the NBA ban lists)."""
+    card = (comp.get('cardName') or '').lower()
+    return any(n in card for n in names)
+
+
 def is_qb_goat(comp):
-    """True if the card name contains one of the QB GOATs (lowercase substring,
-    same semantics as the NBA ban lists)."""
-    name = (comp.get('cardName') or '').lower()
-    return any(g in name for g in QB_GOATS)
+    return _name_on_list(comp, QB_GOATS)
 
 
-def _football_card_rate(c):
-    """Per-card NFL rate: standard tiers, except QB GOATs above $100 get
-    QB_GOAT_OVER_100_RATE (their $500 ceiling is enforced in classify)."""
-    cv = float(c['clValue'])
-    if cv > 100 and is_qb_goat(c):
-        return QB_GOAT_OVER_100_RATE
-    for low, high, r in PSA_FOOTBALL_PER_CARD_TIERS:
-        if low <= cv < high:
-            return r
-    return PSA_FOOTBALL_PER_CARD_TIERS[-1][2]
+def is_mlb_slugger(comp):
+    return _name_on_list(comp, TRIUMPH_MLB_SLUGGERS)
+
+
+def is_nba_2000s(comp):
+    return _name_on_list(comp, TRIUMPH_NBA_2000S)
+
+
+def select_list_for_sport(sport):
+    """The select-player list that unlocks a sport's extended bands, or None."""
+    return {'mlb': TRIUMPH_MLB_SLUGGERS, 'football': QB_GOATS,
+            'basketball': TRIUMPH_NBA_2000S}.get(sport)
 
 
 def _pokemon_card_rate(c, vip_tiers=None):
@@ -886,50 +906,59 @@ def classify_psa_comp(comp):
     if max_price is None:
         sport_label = sport or 'unknown sport'
         return ('rejected',
-                f"{sport_label} (this weekend we buy Pokemon, NBA and NFL slabs only)")
+                f"{sport_label} (we buy Pokemon, One Piece, MLB, NBA and NFL slabs)")
     if cv > max_price:
-        # Two decimals so a $260.40 NBA card reads "over our $250 max" sensibly.
         return ('rejected', f"${cv:,.2f} (over our ${max_price:,} {sport} max)")
     if cv < PSA_MIN_PRICE:
         return ('rejected', f"${cv:.2f} (under ${PSA_MIN_PRICE} min)")
-    # NFL: non-GOAT cards cap at $220; only the QB GOATs ride to the $500
-    # sport ceiling (checked above via PSA_SPORT_MAX_PRICE['football']).
-    if sport == 'football' and cv > NFL_MAX_PRICE and not is_qb_goat(comp):
+
+    # ── SELECT-PLAYER lanes (Oct 2): above each sport's general ceiling,
+    # only listed players qualify, and only inside the flyer's specialty
+    # bands. Non-listed cards point sellers at the public checker page.
+    if sport == 'mlb' and cv > MLB_GENERAL_MAX:
+        if not is_mlb_slugger(comp):
+            return ('rejected',
+                    f"${cv:,.2f} (over our ${MLB_GENERAL_MAX} MLB max — select "
+                    f"Sluggers only above that, check {SELECT_CHECK_URL})")
+        if not any(lo <= cv <= hi for lo, hi in MLB_SLUGGER_BANDS):
+            return ('rejected',
+                    f"${cv:,.2f} (between Slugger bands — $600-$1,000 / "
+                    f"$1,400-$2,000 / $3,750-$5,000 only)")
+    if sport == 'football' and cv > NFL_GENERAL_MAX:
+        if not is_qb_goat(comp):
+            return ('rejected',
+                    f"${cv:,.2f} (over our ${NFL_GENERAL_MAX} NFL max — QB "
+                    f"GOATs only above that, check {SELECT_CHECK_URL})")
+        if not any(lo <= cv <= hi for lo, hi in NFL_GOAT_BANDS):
+            return ('rejected',
+                    f"${cv:,.2f} (between QB GOAT bands — $600-$1,000 / "
+                    f"$1,400-$2,000 only)")
+    if sport == 'basketball' and cv > NBA_GENERAL_MAX and not is_nba_2000s(comp):
         return ('rejected',
-                f"${cv:,.2f} (over our ${NFL_MAX_PRICE} NFL max — "
-                f"only QB GOATs go to ${max_price})")
-    # Pokémon: value must land inside one of the buy bands or the $3,750+
-    # big band (gaps = allocation we don't have — rejected).
+                f"${cv:,.2f} (over our ${NBA_GENERAL_MAX:,} NBA max — 2000s-"
+                f"list players only above that, check {SELECT_CHECK_URL})")
+
+    # Pokémon: one continuous $1-$5,000 band this week; $3,000+ is the
+    # any-grade/any-conf big-ticket zone (auto-quoted, ⚠️ flagged below).
     pokemon_big = (sport == 'pokemon' and cv >= POKEMON_BIG_BAND_MIN)
-    if (sport == 'pokemon' and not pokemon_big
-            and not any(lo <= cv <= hi for lo, hi in POKEMON_BUY_BANDS)):
-        bands_txt = " / ".join(f"${lo:,}-${hi:,}" for lo, hi in POKEMON_BUY_BANDS)
-        return ('rejected',
-                f"${cv:,.2f} (outside our Pokémon buy ranges — {bands_txt} "
-                f"and ${POKEMON_BIG_BAND_MIN:,}+ only)")
-    # Pokémon $3,750+ (Kevin, Sep 26): NO auto-comp, NO auto-offer — tag Kevin
-    # so he market-checks it and makes his own offer. Any grade, any cert
-    # length, any sale age — the ONLY gate is the CardLadder value. Returns
-    # BEFORE the grade/sale-age checks below so nothing else can reject it.
-    if pokemon_big:
-        return ('review',
-                f"over ${POKEMON_BIG_BAND_MIN:,} — market-check it and make "
-                f"your own offer (flyer: any grade, CL 3+, your approval)")
-    # Pokémon normal bands: cert number must be 7+ digits (flyer "Cert 7+").
-    if (sport == 'pokemon'
+    # Cert gate (flyer "Cert 7+"): only on Pokémon ≤ $1,000.
+    if (sport == 'pokemon' and cv <= POKEMON_CERT_GATE_MAX
             and len(str(comp.get('cert', '')).strip()) < POKEMON_MIN_CERT_DIGITS):
         return ('rejected',
                 f"cert {comp.get('cert')} ({len(str(comp.get('cert', '')).strip())} digits — "
-                f"we need {POKEMON_MIN_CERT_DIGITS}+ digit cert numbers)")
-    grade_raw = str(comp.get('grade') or '').replace('PSA', '').strip()
-    try:
-        g = float(grade_raw)
-    except ValueError:
-        return ('rejected', f"grade '{grade_raw}' unrecognized")
-    # Grade floor PSA 7+ everywhere (the any-grade Pokémon $3,750+ band
-    # already returned 'review' above).
-    if g < PSA_MIN_GRADE:
-        return ('rejected', f"PSA {grade_raw} (we buy {PSA_MIN_GRADE}-10 only)")
+                f"we need {POKEMON_MIN_CERT_DIGITS}+ digit cert numbers under "
+                f"${POKEMON_CERT_GATE_MAX:,})")
+    # Grade floor PSA 7+ — EXCEPT Pokémon $3,000+ (flyer: any grade) and
+    # NBA ≤ $1,000 (flyer row carries no PSA badge; mirrors Triumph).
+    any_grade = pokemon_big or (sport == 'basketball' and cv <= 1000)
+    if not any_grade:
+        grade_raw = str(comp.get('grade') or '').replace('PSA', '').strip()
+        try:
+            g = float(grade_raw)
+        except ValueError:
+            return ('rejected', f"grade '{grade_raw}' unrecognized")
+        if g < PSA_MIN_GRADE:
+            return ('rejected', f"PSA {grade_raw} (we buy {PSA_MIN_GRADE}-10 only)")
     last_sale = comp.get('lastSaleDate')
     if not last_sale:
         return ('rejected', 'no recent sale visible')
@@ -937,34 +966,34 @@ def classify_psa_comp(comp):
         last_d = datetime.strptime(str(last_sale).strip(), '%Y-%m-%d').date()
     except (ValueError, AttributeError):
         return ('rejected', f"unparseable sale date '{last_sale}'")
-    # Sale-age limit (days). Kevin, Sep 26: CL confidence ≈ sale recency —
-    # "CL 4+ usually means sale in past 30 days; CL 3+ for sports, last 60" —
-    # so the flyer's CL badges are ENFORCED as age gates (no eyeball flags):
-    #   pokemon $400-700 (CL 4+): 30d; pokemon $1-100 (any conf): 60d.
-    #   NBA ≤$100 (any conf): one sale ever; NBA >$100 (CL 3+): 60d.
-    #   NFL ≤$100 (any conf): one sale ever; NFL >$100 non-GOAT (CL 3+): 60d;
-    #   QB GOATs >$100 (no CL badge on the flyer): 90d.
+    # Sale-age gates (Kevin's decode: CL 4+ ≈ sale ≤30d, CL 3+ ≈ ≤60d):
+    #   pokemon: ≤$100 60d · $100-$3,000 30d (CL 4+) · $3,000+ none (any conf)
+    #   one piece: ≤$100 60d · >$100 30d (CL 4+)
+    #   NBA: ≤$1,000 any sale ever · >$1,000 60d (CL 3+)
+    #   MLB: ≤$100 any sale ever · >$100 60d (CL 3+)
+    #   NFL: ≤$100 any sale ever · >$100 60d (CL 3+, GOAT bands included)
     if sport == 'pokemon':
-        max_age = 30 if cv >= POKEMON_FLAG_CL_OVER else 60
+        max_age = float('inf') if pokemon_big else (60 if cv <= 100 else 30)
+    elif sport == 'one piece':
+        max_age = 60 if cv <= 100 else 30
     elif sport == 'basketball':
+        max_age = float('inf') if cv <= 1000 else 60
+    elif sport in ('mlb', 'football'):
         max_age = float('inf') if cv <= 100 else 60
-    elif sport == 'football':
-        if cv <= 100:
-            max_age = float('inf')
-        else:
-            max_age = 90 if is_qb_goat(comp) else 60
-    elif sport == 'mlb':
-        max_age = float('inf') if cv <= 100 else 90
     else:
         max_age = PSA_SPORT_MAX_AGE_DAYS.get(sport, PSA_MAX_AGE_DAYS)
     if (date.today() - last_d).days > max_age:
         return ('rejected', f"last sale {last_sale} (>{max_age:g}d ago)")
 
-    # NBA player/set bans still apply. The flyer's CL 4+/3+ badges are
-    # enforced as sale-age gates above (Kevin's Sep 26 decode) — no
-    # eyeball flags needed.
+    # NBA player/set bans still apply (all values).
     if sport == 'basketball':
         return check_basketball_rejections(comp)
+
+    # Pokémon $3,000+: auto-quoted at 87% per the flyer, but still ⚠️ flag
+    # Kevin — big tickets deserve a look before paying.
+    if pokemon_big:
+        return ('flag', f"${cv:,.0f} big-ticket Pokémon — auto-quoted at 87% "
+                        f"(any grade); double-check before paying")
 
     return ('accepted', None)
 
@@ -1019,6 +1048,14 @@ def fill_buying_sheet(sheet_id, comps, sheet_name="Form. Put Date Here."):
             updates.append({'range': f'G{row}', 'values': [["not found"]]})
         if c.get('lastSaleDate'):
             updates.append({'range': f'J{row}', 'values': [[c['lastSaleDate']]]})
+        # SELECT-list stamp (Oct 2): column L carries "Y" when the card's
+        # player is on the sport's select list (Sluggers / 2000s / QB GOATs).
+        # The H formula's specialty bands require it — this is how the
+        # 1,001-name list reaches the sheet without living in a formula.
+        _sp = normalize_sport((c.get('sport') or '').lower().strip())
+        _sel_list = select_list_for_sport(_sp)
+        if _sel_list and _name_on_list(c, _sel_list):
+            updates.append({'range': f'L{row}', 'values': [["Y"]]})
     if updates:
         sheet.batch_update(updates, value_input_option="USER_ENTERED")
 
@@ -1229,12 +1266,6 @@ async def price_and_send_psa_offer(channel, channel_id, username, certs, comps,
                           for c in comps_in_sport)
             rate = (_payout / sport_total) if sport_total else PSA_POKEMON_PER_CARD_TIERS[0][2]
             is_vip = bool(vip_tiers)
-        elif sp == 'football' and sp not in vip_srates:
-            # Per-card: QB GOATs above $100 get their own rate.
-            _payout = sum(float(c['clValue']) * _football_card_rate(c)
-                          for c in comps_in_sport)
-            rate = (_payout / sport_total) if sport_total else PSA_FOOTBALL_PER_CARD_TIERS[0][2]
-            is_vip = False
         elif sp in vip_srates:
             # Flat VIP rate for this sport (grade/ceiling/age rules stay standard).
             rate = vip_srates[sp]
@@ -1450,8 +1481,8 @@ channel_sheet = {}
 # regardless of count, matching the long-standing One Piece behavior).
 # Slabs and singles can arrive in either order / separate messages, so we keep a
 # running per-ticket total and only let a seller proceed/ship once it qualifies.
-MIN_LOT_VALUE = 0      # Kevin, Sep 26: "no minimums this weekend"
-MIN_SLAB_COUNT = 0     # (standing values were $1,000 / 10 slabs — Aug 28)
+MIN_LOT_VALUE = 1000   # standing values restored after the Sep 26 no-minimums
+MIN_SLAB_COUNT = 10    # weekend (Kevin, Aug 28: $1,000 / 10 slabs)
 
 # Per-ticket running lot.
 #   channel_id -> {"singles": {game: market_value}, "slab_certs": {cert: comp_value}}
@@ -1598,12 +1629,16 @@ _POKEMON_RAW_OFF_LINE = (
 WELCOME_MSG = (
     "👋 Welcome to KTS Collectibles!\n\n"
     "We're currently buying (PSA graded slabs — send your cert numbers):\n"
-    "• **Pokémon** — $1–$100 and $400–$700; **$3,750+** gets a personal offer from Kevin\n"
-    "• **Basketball / NBA** — $1–$250\n"
-    "• **Football / NFL** — $1–$220 (QB GOATs Montana/Elway/Mahomes/Manning/Brady up to $500)\n"
+    "• **Pokémon** — $1–$5,000\n"
+    "• **One Piece** — $1–$900\n"
+    "• **Baseball / MLB** — $1–$600 (⭐ select Sluggers up to $5,000)\n"
+    "• **Basketball / NBA** — $1–$3,500 (⭐ select players up to $3,750)\n"
+    "• **Football / NFL** — $1–$600 (⭐ QB GOATs up to $2,000)\n"
     + _POKEMON_RAW_WELCOME_LINE +
-    "\n⚠️ We are **not** buying raw cards, One Piece, or baseball this weekend — PSA slabs only.\n\n"
-    "📊 **No minimum lot size this weekend** — send what you've got!\n"
+    f"\n⭐ Check if your player is on a select list: {SELECT_CHECK_URL}\n"
+    "⚠️ We are **not** buying raw cards — PSA slabs only.\n\n"
+    "📊 **Minimum lot requirements:**\n"
+    f"• At least **{MIN_SLAB_COUNT} slabs** AND **${MIN_LOT_VALUE:,}+** total value.\n"
     + _POKEMON_RAW_MIN_LINE +
     "\nWhat are you looking to sell?"
 )
@@ -1916,11 +1951,11 @@ def _save_vip():
 # Schema per user: 'pokemon' -> list of band rates (like the store);
 # other keys -> flat VIP rate for that canonical sport.
 VIP_SEED = {
-    'cwilk_sportscards': {'pokemon': [0.92, 0.88, 0.88],
+    'cwilk_sportscards': {'pokemon': [0.92, 0.88],
                           'basketball': 0.95, 'mlb': 0.90, 'one piece': 0.88},
     # Discord usernames can end in '.' — the ticket channel is named
     # 'cwilk_sportscards.', so register both spellings.
-    'cwilk_sportscards.': {'pokemon': [0.92, 0.88, 0.88],
+    'cwilk_sportscards.': {'pokemon': [0.92, 0.88],
                            'basketball': 0.95, 'mlb': 0.90, 'one piece': 0.88},
 }
 
@@ -1952,11 +1987,15 @@ def vip_pokemon_tiers(username):
             for i, (low, high, std) in enumerate(PSA_POKEMON_PER_CARD_TIERS)]
 
 def _pokemon_band_labels():
-    """Human labels for the current Pokémon buy bands, e.g.
-    ['$1-$100', '$450-$600', '$1,201-$1,600'] — from POKEMON_BUY_BANDS (the
-    real flyer bands), NOT the tier table (whose middle tiers span the
-    rejected gaps)."""
-    return [f"${lo:,}-${hi:,}" for lo, hi in POKEMON_BUY_BANDS]
+    """Human labels for the Pokémon RATE tiers — must always return exactly
+    one label per entry of PSA_POKEMON_PER_CARD_TIERS (the !vip summary zips
+    them; a count mismatch is an IndexError that kills every !vip command)."""
+    ceiling = PSA_SPORT_MAX_PRICE.get('pokemon', 0)
+    labels = []
+    for i, (low, high, _r) in enumerate(PSA_POKEMON_PER_CARD_TIERS):
+        top = ceiling if high == float('inf') else round(high - 0.01)
+        labels.append(f"≤${top:,.0f}" if i == 0 else f"${round(low - 0.01):,.0f}-${top:,.0f}")
+    return labels
 
 def _vip_parse_rates(tokens):
     """Parse 1-3 rate tokens -> (rates, err). Accepts 91, 91%, 0.91."""
@@ -2167,68 +2206,86 @@ def handle_vip_command(content, mentions=None, guild=None):
 def build_sheet_h_formula(r, pokemon_tiers=None, sport_rates=None):
     """The per-row payout formula written into buying sheets — generated from the
     bot's CURRENT rate constants so bot and sheet can't disagree. pokemon_tiers
-    overrides only the Pokémon band RATES (VIP sheets); sport_rates overrides the
-    flat rate per canonical sport ({'basketball': 0.95, ...}) — all other gates
-    (grade/ceiling/age/bans) stay standard. NOTE: assumes the current band
-    structure (Sep 26: pokemon $1-100/$400-700 with PSA 7+ AND 7+ digit cert,
-    $3,750+ = 0 here — manual review, Kevin quotes by hand; NBA $1-250; NFL
-    $1-220 three tiers with QB GOATs to $500; one piece + MLB OFF) — if a
-    weekly flyer changes the band COUNT, update this builder with it.
+    overrides only the Pokémon band RATES (VIP sheets); sport_rates replaces
+    EVERY band rate of that sport with one flat VIP rate (gates/bans stay).
+    Oct 2 structure: pokemon continuous $1-$5,000 (90/87, any grade+any cert
+    at $3,000+, cert 7+ only ≤$1,000); one piece $1-$900 (88/83); MLB 100/90/90
+    to $600 + Slugger bands; NBA 95/92 to $3,500 (any grade ≤$1,000) + 2000s
+    band; NFL 90/90/88 to $600 + GOAT bands. SELECT-list cards are stamped
+    "Y" in column L by fill_buying_sheet — the formula trusts that stamp (the
+    1,001-name NBA list can't live in a cell formula); Kevin can hand-type Y
+    to override. If a weekly flyer changes the band COUNT, update this builder.
     Column F holds the HELPER's raw sport string: 'pokemon', 'basketball',
-    'football', 'baseball' (=MLB), and 'other'/'one piece' (=One Piece).
-    Sale-age gate mirrors classify_psa_comp (CL badges = age, Kevin Sep 26):
-    pokemon 30d at $400+ else 60d; NBA any-ever ≤$100 else 60d; NFL any-ever
-    ≤$100, GOATs 90d, others 60d; everything else 30d."""
+    'football'/'nfl', 'baseball'/'mlb', 'other'/'one piece'/aliases."""
     def _n(v):
         return f"{v:g}"   # 1.0 -> "1", 0.85 -> "0.85" (matches the template's style)
     pt = pokemon_tiers or PSA_POKEMON_PER_CARD_TIERS
     sr = sport_rates or {}
-    p1 = _n(pt[0][2])                                     # $1-$100 rate
-    p2 = _n(pt[1][2] if len(pt) > 1 else pt[-1][2])       # $400-$700 rate
-    nba = _n(sr.get('basketball', PSA_BASKETBALL_PER_CARD_TIERS[0][2]))
-    nfl1 = _n(PSA_FOOTBALL_PER_CARD_TIERS[0][2])          # $1-$30
-    nfl2 = _n(PSA_FOOTBALL_PER_CARD_TIERS[1][2])          # $30-$100
-    nfl3 = _n(PSA_FOOTBALL_PER_CARD_TIERS[2][2])          # $101-$220
-    goat = _n(QB_GOAT_OVER_100_RATE)                      # GOATs $101-$500
+    p1 = _n(pt[0][2])                                   # pokemon ≤$100
+    p2 = _n(pt[1][2] if len(pt) > 1 else pt[-1][2])     # pokemon $100-$5,000
+    def _sport(tier_list, key):
+        flat = sr.get(key)
+        if flat is not None:
+            return [_n(flat)] * len(tier_list)
+        return [_n(t[2]) for t in tier_list]
+    o1, o2 = _sport(PSA_ONE_PIECE_PER_CARD_TIERS, 'one piece')
+    b1, b2, b3 = _sport(PSA_BASKETBALL_PER_CARD_TIERS, 'basketball')
+    m1, m2, m3 = _sport(PSA_MLB_PER_CARD_TIERS, 'mlb')
+    f1, f2, f3 = _sport(PSA_FOOTBALL_PER_CARD_TIERS, 'football')
     g = PSA_MIN_GRADE
     cd = POKEMON_MIN_CERT_DIGITS
-    # NBA player + collegiate-set bans, mirrored from the bot's constants (name
-    # match on column D, same lowercase-substring semantics as
-    # check_basketball_rejections — the sheet has no set column, so set-keyword
-    # matches ride on the card name like the bot's `combined` check).
+    is_op = (f'OR(F{r}="other",F{r}="one piece",F{r}="onepiece",'
+             f'F{r}="tcg",F{r}="popculture",F{r}="pop culture")')
+    is_mlb = f'OR(F{r}="baseball",F{r}="mlb")'
+    is_nfl = f'OR(F{r}="football",F{r}="nfl")'
+    sel = f'L{r}="Y"'   # bot-stamped select-list marker
+    # NBA player + collegiate-set bans, mirrored from the bot's constants.
     ban_always = '|'.join(BBALL_PLAYERS_REJECT_ALWAYS + WNBA_PLAYERS
                           + COLLEGIATE_SET_KEYWORDS)
     ban_over = '|'.join(BBALL_PLAYERS_REJECT_OVER_200)
-    nba_ok = (f'IF(OR(REGEXMATCH(LOWER(D{r}&""),"{ban_always}"),'
-              f'AND(G{r}>{BBALL_PLAYER_PRICE_CAP},'
-              f'REGEXMATCH(LOWER(D{r}&""),"{ban_over}"))),0,{nba})')
-    is_goat = f'REGEXMATCH(LOWER(D{r}&""),"{"|".join(QB_GOATS)}")'
-    # 100000 days ≈ no age limit. CL badges enforced as sale-age (Kevin,
-    # Sep 26): pokemon $400+ (CL 4+) 30d else 60d; NBA >$100 (CL 3+) 60d
-    # else any sale ever; NFL >$100: GOATs 90d, others (CL 3+) 60d, ≤$100
-    # any sale ever.
-    maxage = (f'IFS(F{r}="pokemon",IF(N(G{r})>=400,30,60),'
-              f'F{r}="basketball",IF(N(G{r})<=100,100000,60),'
-              f'OR(F{r}="football",F{r}="nfl"),'
-              f'IF(N(G{r})<=100,100000,IF({is_goat},90,60)),'
+    bans = (f'OR(REGEXMATCH(LOWER(D{r}&""),"{ban_always}"),'
+            f'AND(G{r}>{BBALL_PLAYER_PRICE_CAP},'
+            f'REGEXMATCH(LOWER(D{r}&""),"{ban_over}")))')
+    # Sale-age gates (100000 ≈ none): pokemon 60/30/none; OP 60/30;
+    # NBA none ≤$1,000 else 60; MLB+NFL none ≤$100 else 60; default 30.
+    maxage = (f'IFS(F{r}="pokemon",IF(N(G{r})>={POKEMON_BIG_BAND_MIN},100000,'
+              f'IF(N(G{r})<=100,60,30)),'
+              f'{is_op},IF(N(G{r})<=100,60,30),'
+              f'F{r}="basketball",IF(N(G{r})<=1000,100000,60),'
+              f'{is_mlb},IF(N(G{r})<=100,100000,60),'
+              f'{is_nfl},IF(N(G{r})<=100,100000,60),'
               f'TRUE,30)')
-    # Pokémon: PSA 7+ AND a 7+ digit cert number (column B), two auto bands.
-    # $3,750+ = manual review: G is masked ("Kevin will quote") so H is blank;
-    # a hand-entered G lands in the TRUE,0 arm — Kevin sets H himself.
-    pok_band = (f'IF(OR(N(E{r})<{g},LEN(B{r})<{cd}),0,'
-                f'IFS(AND(G{r}>=1,G{r}<=100),{p1},'
-                f'AND(G{r}>=400,G{r}<=700),{p2},'
-                f'TRUE,0))')
-    # NFL: three tiers; QB GOATs override the >$100 tier and ride to $500.
-    nfl_band = (f'IFS(AND(G{r}>=1,G{r}<=30),{nfl1},'
-                f'AND(G{r}>30,G{r}<=100),{nfl2},'
-                f'AND(G{r}>100,G{r}<=220),IF({is_goat},{goat},{nfl3}),'
-                f'AND(G{r}>220,G{r}<=500),IF({is_goat},{goat},0),'
-                f'TRUE,0)')
+    pok = (f'IF(OR(G{r}<1,G{r}>5000),0,'
+           f'IF(G{r}>={POKEMON_BIG_BAND_MIN},{p2},'
+           f'IF(AND(G{r}<={POKEMON_CERT_GATE_MAX},LEN(B{r})<{cd}),0,'
+           f'IF(N(E{r})<{g},0,'
+           f'IF(G{r}<=100,{p1},{p2})))))')
+    op = (f'IF(AND(G{r}>=1,G{r}<=900,N(E{r})>={g}),'
+          f'IF(G{r}<=100,{o1},{o2}),0)')
+    nba = (f'IF({bans},0,'
+           f'IFS(AND(G{r}>=1,G{r}<=1000),{b1},'
+           f'AND(G{r}>1000,G{r}<=3500,N(E{r})>={g}),{b2},'
+           f'AND({sel},G{r}>3500,G{r}<=3750,N(E{r})>={g}),{b3},'
+           f'TRUE,0))')
+    mlb = (f'IF(N(E{r})<{g},0,'
+           f'IFS(AND(G{r}>=1,G{r}<=30),{m1},'
+           f'AND(G{r}>30,G{r}<=600),{m2},'
+           f'AND({sel},G{r}>600,G{r}<=1000),{m2},'
+           f'AND({sel},G{r}>=1400,G{r}<=2000),{m3},'
+           f'AND({sel},G{r}>=3750,G{r}<=5000),{m3},'
+           f'TRUE,0))')
+    nfl = (f'IF(N(E{r})<{g},0,'
+           f'IFS(AND(G{r}>=1,G{r}<=500),{f1},'
+           f'AND(G{r}>500,G{r}<=600),{f2},'
+           f'AND({sel},G{r}>600,G{r}<=1000),{f2},'
+           f'AND({sel},G{r}>=1400,G{r}<=2000),{f3},'
+           f'TRUE,0))')
     rate = (f'IFS('
-            f'F{r}="pokemon",{pok_band},'
-            f'F{r}="basketball",IF(AND(G{r}>=1,G{r}<=250,N(E{r})>={g}),{nba_ok},0),'
-            f'OR(F{r}="football",F{r}="nfl"),IF(N(E{r})>={g},{nfl_band},0),'
+            f'F{r}="pokemon",{pok},'
+            f'{is_op},{op},'
+            f'F{r}="basketball",{nba},'
+            f'{is_mlb},{mlb},'
+            f'{is_nfl},{nfl},'
             f'TRUE,0)')
     too_old = (f'IF(ISNUMBER(J{r}),(TODAY()-J{r})>{maxage},'
                f'IFERROR((TODAY()-DATEVALUE(J{r}))>{maxage},TRUE))')
