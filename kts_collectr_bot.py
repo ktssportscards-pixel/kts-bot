@@ -103,7 +103,7 @@ PSA_MAX_AGE_DAYS = 30
 # players included); non-select caps are enforced in classify via the
 # *_GENERAL_MAX constants + the Triumph select lists (triumph_lists.py).
 PSA_SPORT_MAX_PRICE = {
-    'pokemon': 5000,
+    'pokemon': 1800,
     'one piece': 900,
     'mlb': 5000,          # Sluggers-list ceiling; others cap at MLB_GENERAL_MAX
     'basketball': 3750,   # 2000s-list ceiling; others cap at NBA_GENERAL_MAX
@@ -126,13 +126,22 @@ from triumph_lists import (TRIUMPH_MLB_SLUGGERS, TRIUMPH_NBA_2000S,
                            TRIUMPH_QB_GOATS)
 QB_GOATS = TRIUMPH_QB_GOATS
 SELECT_CHECK_URL = "tinyurl.com/2awv494h"
-# Pokémon buy map (Oct 2 flyer): CONTINUOUS $1-$5,000, all auto-quoted.
-# $1-$100 → 90%; $100-$5,000 → 87%. Gates are value-dependent:
-# grade 7+ below $3,000 (any grade at $3,000+), cert 7+ digits at ≤$1,000
-# only, sale-age 60d ≤$100 / 30d $100-$3,000 (CL 4+) / none $3,000+
-# ("any conf"). $3,000+ still ⚠️ FLAGS Kevin (big ticket) but auto-quotes.
-POKEMON_BUY_BANDS = [(1, 5000)]       # one continuous band
-POKEMON_BIG_BAND_MIN = 3000           # any grade / any conf / flag-for-Kevin
+# Pokémon buy map (Kevin, Sat Oct 3 ~7:30am — allocation reality update):
+# $1-$100 UNLIMITED (focus $1-$60); then SLOT-LIMITED bands: 25x $100-$200,
+# 25x $200-$300, 10x $1,400-$1,800. Everything else Pokémon OFF
+# ($300-$1,400 gap, $1,800+ gone). Slots are counted per ACCEPTED card at
+# quote time in DATA_DIR/pokemon_quota_store.json (!quota to view/adjust;
+# NOTE the store wipes on deploys — avoid mid-weekend deploys or re-set
+# counts after). Gates: PSA 7+ everywhere; cert 7+ digits ≤$1,000;
+# sale ≤60d at ≤$100, ≤30d above (CL 4+).
+POKEMON_QUOTA_BANDS = [
+    (1, 100, None, None),            # unlimited
+    (100.01, 200, '100-200', 25),
+    (200.01, 300, '200-300', 25),
+    (1400, 1800, '1400-1800', 10),
+]
+POKEMON_BUY_BANDS = [(lo, hi) for lo, hi, _k, _c in POKEMON_QUOTA_BANDS]
+POKEMON_BIG_BAND_MIN = 10**9          # dormant — no any-grade big band now
 POKEMON_CERT_GATE_MAX = 1000          # 7+ digit certs required at ≤$1,000
 POKEMON_MIN_CERT_DIGITS = 7
 # (Pikachu lane REMOVED Aug 11 per Kevin — Pikachus follow standard Pokémon
@@ -385,6 +394,74 @@ def _blended_per_card_rate(tiers, card_values):
         else:
             payout += cv * tiers[-1][2]
     return payout / total
+
+
+# ── POKÉMON SLOT QUOTAS (Kevin, Oct 3) ───────────────────────────────────────────
+# Lazy-loaded store (DATA_DIR is defined later in the file; fully resolved
+# before any Discord event runs). Counts accepted cards per quota band.
+_POKEMON_QUOTA = None
+
+def _pokemon_quota_load():
+    global _POKEMON_QUOTA
+    if _POKEMON_QUOTA is None:
+        try:
+            with open(os.path.join(DATA_DIR, "pokemon_quota_store.json")) as f:
+                _POKEMON_QUOTA = {str(k): int(v) for k, v in json.load(f).items()}
+        except Exception:
+            _POKEMON_QUOTA = {}
+    return _POKEMON_QUOTA
+
+def _pokemon_quota_save():
+    try:
+        p = os.path.join(DATA_DIR, "pokemon_quota_store.json")
+        with open(p + ".tmp", "w") as f:
+            json.dump(_pokemon_quota_load(), f)
+        os.replace(p + ".tmp", p)
+    except Exception as e:
+        print(f"quota store save failed (non-critical): {e}")
+
+def pokemon_band_for(cv):
+    """The quota band tuple (lo, hi, key, cap) containing cv, or None."""
+    for band in POKEMON_QUOTA_BANDS:
+        if band[0] <= cv <= band[1]:
+            return band
+    return None
+
+def pokemon_quota_left(key, cap):
+    return max(0, cap - _pokemon_quota_load().get(key, 0))
+
+def pokemon_quota_take(key):
+    """Count one accepted card against a quota band; returns the new count."""
+    q = _pokemon_quota_load()
+    q[key] = q.get(key, 0) + 1
+    _pokemon_quota_save()
+    return q[key]
+
+def handle_quota_command(content):
+    """!quota — show Pokémon slot usage. !quota set <band> <used> adjusts
+    (band keys: 100-200, 200-300, 1400-1800). Kevin-only; sync, testable."""
+    toks = content.strip().split()
+    q = _pokemon_quota_load()
+    keys = [b[2] for b in POKEMON_QUOTA_BANDS if b[2]]
+    if len(toks) >= 4 and toks[1].lower() == 'set':
+        key = toks[2]
+        if key not in keys:
+            return f"Unknown band `{key}` — valid: {', '.join(keys)}"
+        try:
+            q[key] = max(0, int(toks[3]))
+        except ValueError:
+            return "Usage: `!quota set 100-200 <used-count>`"
+        _pokemon_quota_save()
+        return f"🧮 Set **{key}** used-count to **{q[key]}**."
+    lines = ["🧮 **Pokémon slot quotas (used/cap):**"]
+    for lo, hi, key, cap in POKEMON_QUOTA_BANDS:
+        if key:
+            used = q.get(key, 0)
+            lines.append(f"• ${lo:g}–${hi:g}: **{used}/{cap}** ({max(0, cap - used)} left)")
+        else:
+            lines.append(f"• ${lo:g}–${hi:g}: unlimited")
+    lines.append("Adjust with `!quota set <band> <used>` (bands: " + ", ".join(keys) + ")")
+    return "\n".join(lines)
 
 
 def _name_on_list(comp, names):
@@ -938,8 +1015,18 @@ def classify_psa_comp(comp):
                 f"${cv:,.2f} (over our ${NBA_GENERAL_MAX:,} NBA max — 2000s-"
                 f"list players only above that, check {SELECT_CHECK_URL})")
 
-    # Pokémon: one continuous $1-$5,000 band this week; $3,000+ is the
-    # any-grade/any-conf big-ticket zone (auto-quoted, ⚠️ flagged below).
+    # Pokémon (Oct 3 allocation update): unlimited ≤$100, slot-limited
+    # $100-$200 / $200-$300 / $1,400-$1,800, everything else rejected.
+    if sport == 'pokemon':
+        _band = pokemon_band_for(cv)
+        if _band is None:
+            return ('rejected',
+                    f"${cv:,.2f} (outside our Pokémon ranges — $1-$100, "
+                    f"$100-$300 and $1,400-$1,800 only right now)")
+        if _band[2] is not None and pokemon_quota_left(_band[2], _band[3]) <= 0:
+            return ('rejected',
+                    f"${cv:,.2f} (our ${_band[0]:g}-${_band[1]:g} Pokémon "
+                    f"slots are all taken this weekend)")
     pokemon_big = (sport == 'pokemon' and cv >= POKEMON_BIG_BAND_MIN)
     # Cert gate (flyer "Cert 7+"): only on Pokémon ≤ $1,000.
     if (sport == 'pokemon' and cv <= POKEMON_CERT_GATE_MAX
@@ -1215,9 +1302,25 @@ async def price_and_send_psa_offer(channel, channel_id, username, certs, comps,
     review = []    # 'review' status — priced by hand, not auto-quoted
     review_certs = []
     kevin_lines = []
+    quota_filled_notes = []   # Pokémon slot bands that filled during THIS quote
     for cert in certs:
         c = by_cert.get(str(cert).strip())
         status, reason = classify_psa_comp(c)
+        # Pokémon slot quotas: count each accepted card IMMEDIATELY so later
+        # certs in this same lot see the updated count (a 40-card $150 lot
+        # must stop at the 25th slot, not accept all 40). classify rejects
+        # once a band's slots hit 0 left.
+        if status in ('accepted', 'flag') and c and normalize_sport(c.get('sport')) == 'pokemon':
+            try:
+                _qb = pokemon_band_for(float(c['clValue']))
+                if _qb and _qb[2] is not None:
+                    _qn = pokemon_quota_take(_qb[2])
+                    if _qn == _qb[3]:
+                        quota_filled_notes.append(
+                            f"${_qb[0]:g}-${_qb[1]:g} Pokémon slots now FULL "
+                            f"({_qb[3]}/{_qb[3]}) — announce it!")
+            except Exception as _qe:
+                print(f"quota count error (non-critical): {_qe}")
         if status == 'review':
             # Manual-review cards: keep out of the auto-priced lot (0%),
             # highlight orange on the sheet for Kevin to quote by hand.
@@ -1338,6 +1441,8 @@ async def price_and_send_psa_offer(channel, channel_id, username, certs, comps,
     if n_accepted and not lot_qualifies(channel_id):
         _sc, _sv, _si, _cb = lot_summary(channel_id)
         summary = f"⏳ **[BELOW MINIMUM — HOLD]** {_sc} slab(s), combined ${_cb:,.2f}\n" + summary
+    if quota_filled_notes:
+        summary = "🧮 **" + " · ".join(quota_filled_notes) + "**\n" + summary
     await ping_kevin(summary + "\n".join(kevin_lines), channel)
 
     # Customer follow-up
@@ -1629,7 +1734,7 @@ _POKEMON_RAW_OFF_LINE = (
 WELCOME_MSG = (
     "👋 Welcome to KTS Collectibles!\n\n"
     "We're currently buying (PSA graded slabs — send your cert numbers):\n"
-    "• **Pokémon** — $1–$5,000\n"
+    "• **Pokémon** — $1–$100 unlimited (🔥 especially $1–$60!) · limited slots: $100–$300 and $1,400–$1,800\n"
     "• **One Piece** — $1–$900\n"
     "• **Baseball / MLB** — $1–$600 (⭐ select Sluggers up to $5,000)\n"
     "• **Basketball / NBA** — $1–$3,500 (⭐ select players up to $3,750)\n"
@@ -2248,18 +2353,20 @@ def build_sheet_h_formula(r, pokemon_tiers=None, sport_rates=None):
             f'REGEXMATCH(LOWER(D{r}&""),"{ban_over}")))')
     # Sale-age gates (100000 ≈ none): pokemon 60/30/none; OP 60/30;
     # NBA none ≤$1,000 else 60; MLB+NFL none ≤$100 else 60; default 30.
-    maxage = (f'IFS(F{r}="pokemon",IF(N(G{r})>={POKEMON_BIG_BAND_MIN},100000,'
-              f'IF(N(G{r})<=100,60,30)),'
+    maxage = (f'IFS(F{r}="pokemon",IF(N(G{r})<=100,60,30),'
               f'{is_op},IF(N(G{r})<=100,60,30),'
               f'F{r}="basketball",IF(N(G{r})<=1000,100000,60),'
               f'{is_mlb},IF(N(G{r})<=100,100000,60),'
               f'{is_nfl},IF(N(G{r})<=100,100000,60),'
               f'TRUE,30)')
-    pok = (f'IF(OR(G{r}<1,G{r}>5000),0,'
-           f'IF(G{r}>={POKEMON_BIG_BAND_MIN},{p2},'
-           f'IF(AND(G{r}<={POKEMON_CERT_GATE_MAX},LEN(B{r})<{cd}),0,'
+    # Pokémon bands (Oct 3): $1-100, $100-300, $1,400-1,800 — slot quotas are
+    # bot-side only (a formula can't count), so the sheet shows the band rate.
+    pok = (f'IF(AND(G{r}<={POKEMON_CERT_GATE_MAX},LEN(B{r})<{cd}),0,'
            f'IF(N(E{r})<{g},0,'
-           f'IF(G{r}<=100,{p1},{p2})))))')
+           f'IFS(AND(G{r}>=1,G{r}<=100),{p1},'
+           f'AND(G{r}>100,G{r}<=300),{p2},'
+           f'AND(G{r}>=1400,G{r}<=1800),{p2},'
+           f'TRUE,0)))')
     op = (f'IF(AND(G{r}>=1,G{r}<=900,N(E{r})>={g}),'
           f'IF(G{r}<=100,{o1},{o2}),0)')
     nba = (f'IF({bans},0,'
@@ -3198,6 +3305,15 @@ async def on_message(message):
                 await message.channel.send(
                     f"✅ Paid: **{rec.get('discord')}** ${float(rec.get('amount',0)):,.2f} "
                     f"{rec.get('method','')} (logged {rec.get('date','?')}).{left}  Tracker syncs on next open.")
+        return
+
+    # ── !quota command (Kevin only) — Pokémon slot usage ──
+    if message.content.strip().lower().startswith('!quota'):
+        if message.author.id == YOUR_DISCORD_USER_ID:
+            try:
+                await message.channel.send(handle_quota_command(message.content))
+            except Exception as e:
+                await message.channel.send(f"Quota command error: {e}")
         return
 
     # ── !vip command (Kevin only) — per-customer premium Pokémon rates ──
