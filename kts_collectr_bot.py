@@ -135,11 +135,15 @@ SELECT_CHECK_URL = "tinyurl.com/2awv494h"
 # counts after). Gates: PSA 7+ everywhere; cert 7+ digits ≤$1,000;
 # sale ≤60d at ≤$100, ≤30d above (CL 4+).
 POKEMON_QUOTA_BANDS = [
-    (1, 100, None, None),            # unlimited
+    (1, 100, None, None),            # unlimited, untracked
     (100.01, 200, '100-200', 25),
     (200.01, 300, '200-300', 25),
+    (400, 700, '400-700', None),     # Kevin Oct 3 ~8:40am: no cap given — tracked, uncapped
     (1400, 1800, '1400-1800', 10),
 ]
+# Caps are DEFAULTS — override at runtime with "!quota cap <band> <n|off>"
+# (stored as cap:<band> in the quota store), so count changes never need a
+# deploy.
 POKEMON_BUY_BANDS = [(lo, hi) for lo, hi, _k, _c in POKEMON_QUOTA_BANDS]
 POKEMON_BIG_BAND_MIN = 10**9          # dormant — no any-grade big band now
 POKEMON_CERT_GATE_MAX = 1000          # 7+ digit certs required at ≤$1,000
@@ -427,8 +431,17 @@ def pokemon_band_for(cv):
             return band
     return None
 
+def pokemon_quota_cap(key, default_cap):
+    """Effective cap: runtime override (cap:<key> in the store) beats the
+    default from POKEMON_QUOTA_BANDS. None = uncapped."""
+    ov = _pokemon_quota_load().get(f"cap:{key}")
+    return ov if ov is not None else default_cap
+
 def pokemon_quota_left(key, cap):
-    return max(0, cap - _pokemon_quota_load().get(key, 0))
+    eff = pokemon_quota_cap(key, cap)
+    if eff is None:
+        return None   # uncapped
+    return max(0, eff - _pokemon_quota_load().get(key, 0))
 
 def pokemon_quota_take(key):
     """Count one accepted card against a quota band; returns the new count."""
@@ -438,29 +451,47 @@ def pokemon_quota_take(key):
     return q[key]
 
 def handle_quota_command(content):
-    """!quota — show Pokémon slot usage. !quota set <band> <used> adjusts
-    (band keys: 100-200, 200-300, 1400-1800). Kevin-only; sync, testable."""
+    """!quota — show Pokémon slot usage. !quota set <band> <used> adjusts the
+    used-count; !quota cap <band> <n|off> changes a band's cap at runtime
+    (no deploy needed). Band keys: 100-200, 200-300, 400-700, 1400-1800."""
     toks = content.strip().split()
     q = _pokemon_quota_load()
     keys = [b[2] for b in POKEMON_QUOTA_BANDS if b[2]]
-    if len(toks) >= 4 and toks[1].lower() == 'set':
+    if len(toks) >= 4 and toks[1].lower() in ('set', 'cap'):
         key = toks[2]
         if key not in keys:
             return f"Unknown band `{key}` — valid: {', '.join(keys)}"
+        if toks[1].lower() == 'set':
+            try:
+                q[key] = max(0, int(toks[3]))
+            except ValueError:
+                return "Usage: `!quota set 100-200 <used-count>`"
+            _pokemon_quota_save()
+            return f"🧮 Set **{key}** used-count to **{q[key]}**."
+        # cap
+        if toks[3].lower() in ('off', 'none', 'unlimited'):
+            q.pop(f"cap:{key}", None)
+            _pokemon_quota_save()
+            _d = next(b[3] for b in POKEMON_QUOTA_BANDS if b[2] == key)
+            return f"🧮 Cap override removed for **{key}** (back to default: {_d if _d is not None else 'uncapped'})."
         try:
-            q[key] = max(0, int(toks[3]))
+            q[f"cap:{key}"] = max(0, int(toks[3]))
         except ValueError:
-            return "Usage: `!quota set 100-200 <used-count>`"
+            return "Usage: `!quota cap 400-700 <n>` or `!quota cap 400-700 off`"
         _pokemon_quota_save()
-        return f"🧮 Set **{key}** used-count to **{q[key]}**."
+        return f"🧮 Cap for **{key}** set to **{q[f'cap:{key}']}**."
     lines = ["🧮 **Pokémon slot quotas (used/cap):**"]
     for lo, hi, key, cap in POKEMON_QUOTA_BANDS:
         if key:
             used = q.get(key, 0)
-            lines.append(f"• ${lo:g}–${hi:g}: **{used}/{cap}** ({max(0, cap - used)} left)")
+            eff = pokemon_quota_cap(key, cap)
+            if eff is None:
+                lines.append(f"• ${lo:g}–${hi:g}: **{used} used** · no cap")
+            else:
+                lines.append(f"• ${lo:g}–${hi:g}: **{used}/{eff}** ({max(0, eff - used)} left)")
         else:
             lines.append(f"• ${lo:g}–${hi:g}: unlimited")
-    lines.append("Adjust with `!quota set <band> <used>` (bands: " + ", ".join(keys) + ")")
+    lines.append("`!quota set <band> <used>` · `!quota cap <band> <n|off>` (bands: " + ", ".join(keys) + ")")
     return "\n".join(lines)
 
 
@@ -1020,10 +1051,11 @@ def classify_psa_comp(comp):
     if sport == 'pokemon':
         _band = pokemon_band_for(cv)
         if _band is None:
+            _ranges = " / ".join(f"${b[0]:g}-${b[1]:g}" for b in POKEMON_QUOTA_BANDS)
             return ('rejected',
-                    f"${cv:,.2f} (outside our Pokémon ranges — $1-$100, "
-                    f"$100-$300 and $1,400-$1,800 only right now)")
-        if _band[2] is not None and pokemon_quota_left(_band[2], _band[3]) <= 0:
+                    f"${cv:,.2f} (outside our Pokémon ranges — {_ranges} only right now)")
+        _left = pokemon_quota_left(_band[2], _band[3]) if _band[2] is not None else None
+        if _left is not None and _left <= 0:
             return ('rejected',
                     f"${cv:,.2f} (our ${_band[0]:g}-${_band[1]:g} Pokémon "
                     f"slots are all taken this weekend)")
@@ -1315,10 +1347,11 @@ async def price_and_send_psa_offer(channel, channel_id, username, certs, comps,
                 _qb = pokemon_band_for(float(c['clValue']))
                 if _qb and _qb[2] is not None:
                     _qn = pokemon_quota_take(_qb[2])
-                    if _qn == _qb[3]:
+                    _qcap = pokemon_quota_cap(_qb[2], _qb[3])
+                    if _qcap is not None and _qn == _qcap:
                         quota_filled_notes.append(
                             f"${_qb[0]:g}-${_qb[1]:g} Pokémon slots now FULL "
-                            f"({_qb[3]}/{_qb[3]}) — announce it!")
+                            f"({_qcap}/{_qcap}) — announce it!")
             except Exception as _qe:
                 print(f"quota count error (non-critical): {_qe}")
         if status == 'review':
@@ -1734,7 +1767,7 @@ _POKEMON_RAW_OFF_LINE = (
 WELCOME_MSG = (
     "👋 Welcome to KTS Collectibles!\n\n"
     "We're currently buying (PSA graded slabs — send your cert numbers):\n"
-    "• **Pokémon** — $1–$100 unlimited (🔥 especially $1–$60!) · limited slots: $100–$300 and $1,400–$1,800\n"
+    "• **Pokémon** — $1–$100 unlimited (🔥 especially $1–$60!) · limited slots: $100–$300, $400–$700 and $1,400–$1,800\n"
     "• **One Piece** — $1–$900\n"
     "• **Baseball / MLB** — $1–$600 (⭐ select Sluggers up to $5,000)\n"
     "• **Basketball / NBA** — $1–$3,500 (⭐ select players up to $3,750)\n"
@@ -2365,6 +2398,7 @@ def build_sheet_h_formula(r, pokemon_tiers=None, sport_rates=None):
            f'IF(N(E{r})<{g},0,'
            f'IFS(AND(G{r}>=1,G{r}<=100),{p1},'
            f'AND(G{r}>100,G{r}<=300),{p2},'
+           f'AND(G{r}>=400,G{r}<=700),{p2},'
            f'AND(G{r}>=1400,G{r}<=1800),{p2},'
            f'TRUE,0)))')
     op = (f'IF(AND(G{r}>=1,G{r}<=900,N(E{r})>={g}),'
