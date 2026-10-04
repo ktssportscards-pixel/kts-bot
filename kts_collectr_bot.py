@@ -136,7 +136,7 @@ SELECT_CHECK_URL = "tinyurl.com/2awv494h"
 # sale ≤60d at ≤$100, ≤30d above (CL 4+).
 POKEMON_QUOTA_BANDS = [
     (1, 100, None, None),            # unlimited, untracked
-    (100.01, 200, '100-200', 25),
+    (100.01, 200, '100-200', 0),    # CLOSED (Kevin, Oct 3 eve: 'start rejecting 100-200') — reopen with !quota cap 100-200 <n>
     (200.01, 300, '200-300', 25),
     (400, 700, '400-700', None),     # Kevin Oct 3 ~8:40am: no cap given — tracked, uncapped
     (1400, 1800, '1400-1800', 10),
@@ -1619,8 +1619,8 @@ channel_sheet = {}
 # regardless of count, matching the long-standing One Piece behavior).
 # Slabs and singles can arrive in either order / separate messages, so we keep a
 # running per-ticket total and only let a seller proceed/ship once it qualifies.
-MIN_LOT_VALUE = 1000   # standing values restored after the Sep 26 no-minimums
-MIN_SLAB_COUNT = 10    # weekend (Kevin, Aug 28: $1,000 / 10 slabs)
+MIN_LOT_VALUE = 0      # Kevin, Oct 3: "no minimum lots this week"
+MIN_SLAB_COUNT = 0     # (standing values to restore after: $1,000 / 10)
 
 # Per-ticket running lot.
 #   channel_id -> {"singles": {game: market_value}, "slab_certs": {cert: comp_value}}
@@ -1775,8 +1775,7 @@ WELCOME_MSG = (
     + _POKEMON_RAW_WELCOME_LINE +
     f"\n⭐ Check if your player is on a select list: {SELECT_CHECK_URL}\n"
     "⚠️ We are **not** buying raw cards — PSA slabs only.\n\n"
-    "📊 **Minimum lot requirements:**\n"
-    f"• At least **{MIN_SLAB_COUNT} slabs** AND **${MIN_LOT_VALUE:,}+** total value.\n"
+    "📊 **No minimum lot size this week** — send what you've got!\n"
     + _POKEMON_RAW_MIN_LINE +
     "\nWhat are you looking to sell?"
 )
