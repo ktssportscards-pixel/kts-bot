@@ -114,9 +114,18 @@ NBA_GENERAL_MAX = 3500   # non-2000s-list basketball ceiling
 NFL_GENERAL_MAX = 600    # non-GOAT football ceiling
 # Select-player bands ABOVE the general ceilings (inclusive; from the flyer's
 # SPECIALTY rows). Values between bands are rejected even for listed players.
-MLB_SLUGGER_BANDS = [(600.01, 1000), (1400, 2000), (3750, 5000)]
+MLB_SLUGGER_BANDS = [(600.01, 1000), (3750, 5000)]
+# Sluggers $1,400-$2,000 SUSPENDED Oct 4 (~$253 left in the app lane; Kevin:
+# no backlog above $600, so app-full = instant reject).
 NFL_GOAT_BANDS = [(600.01, 1000), (1400, 2000)]
-NBA_2000S_BAND = (3500.01, 3750)
+# NBA general is BANDED (Kevin, Oct 4: backlog covers sports $1-$600 only;
+# above that we take ONLY what the Triumph app can absorb right now —
+# $600-$1,000 is sub-range-full and $2,000-$2,500 is an app gap => reject):
+NBA_GENERAL_BANDS = [(1, 600), (1000.01, 2000), (2500.01, 3500)]
+# 2000s-list players additionally ride the app's 2000s specialty lanes with
+# real room: $0-$1,000 and $3,000-$3,750 (the $1,400-$2,500 lane is ~$850
+# left => nothing fits => not offered).
+NBA_2000S_BANDS = [(1, 1000), (3000, 3750)]
 NFL_MIN_PRICE = 1     # dormant — no NFL floor
 MLB_MIN_PRICE = 1     # dormant — no MLB floor (flyer starts at $1)
 # Select-player name lists captured from the Triumph Partners app (Oct 2) —
@@ -1034,8 +1043,8 @@ def classify_psa_comp(comp):
                     f"Sluggers only above that, check {SELECT_CHECK_URL})")
         if not any(lo <= cv <= hi for lo, hi in MLB_SLUGGER_BANDS):
             return ('rejected',
-                    f"${cv:,.2f} (between Slugger bands — $600-$1,000 / "
-                    f"$1,400-$2,000 / $3,750-$5,000 only)")
+                    f"${cv:,.2f} (outside Slugger bands — $600-$1,000 / "
+                    f"$3,750-$5,000 only right now)")
     if sport == 'football' and cv > NFL_GENERAL_MAX:
         if not is_qb_goat(comp):
             return ('rejected',
@@ -1045,10 +1054,21 @@ def classify_psa_comp(comp):
             return ('rejected',
                     f"${cv:,.2f} (between QB GOAT bands — $600-$1,000 / "
                     f"$1,400-$2,000 only)")
-    if sport == 'basketball' and cv > NBA_GENERAL_MAX and not is_nba_2000s(comp):
-        return ('rejected',
-                f"${cv:,.2f} (over our ${NBA_GENERAL_MAX:,} NBA max — 2000s-"
-                f"list players only above that, check {SELECT_CHECK_URL})")
+    if sport == 'basketball':
+        _in_gen = any(lo <= cv <= hi for lo, hi in NBA_GENERAL_BANDS)
+        _in_2k = is_nba_2000s(comp) and any(lo <= cv <= hi
+                                            for lo, hi in NBA_2000S_BANDS)
+        if not _in_gen and not _in_2k:
+            if cv > NBA_GENERAL_MAX:
+                return ('rejected',
+                        f"${cv:,.2f} (over our ${NBA_GENERAL_MAX:,} NBA max — "
+                        f"2000s-list players only above that, check "
+                        f"{SELECT_CHECK_URL})")
+            return ('rejected',
+                    f"${cv:,.2f} (our NBA $600-$1,000 and $2,000-$2,500 slots "
+                    f"are full right now — taking $1-$600, $1,000-$2,000, "
+                    f"$2,500-$3,500, plus 2000s-list $600-$1,000 and "
+                    f"$3,000-$3,750, check {SELECT_CHECK_URL})")
 
     # Pokémon (Oct 3 allocation update): unlimited ≤$100, slot-limited
     # $100-$200 / $200-$300 / $1,400-$1,800, everything else rejected.
@@ -2409,15 +2429,16 @@ def build_sheet_h_formula(r, pokemon_tiers=None, sport_rates=None):
     op = (f'IF(AND(G{r}>=1,G{r}<=900,N(E{r})>={g}),'
           f'IF(G{r}<=100,{o1},{o2}),0)')
     nba = (f'IF({bans},0,'
-           f'IFS(AND(G{r}>=1,G{r}<=1000),{b1},'
-           f'AND(G{r}>1000,G{r}<=3500,N(E{r})>={g}),{b2},'
+           f'IFS(AND(G{r}>=1,G{r}<=600),{b1},'
+           f'AND({sel},G{r}>600,G{r}<=1000),{b1},'
+           f'AND(G{r}>1000,G{r}<=2000,N(E{r})>={g}),{b2},'
+           f'AND(G{r}>2500,G{r}<=3500,N(E{r})>={g}),{b2},'
            f'AND({sel},G{r}>3500,G{r}<=3750,N(E{r})>={g}),{b3},'
            f'TRUE,0))')
     mlb = (f'IF(N(E{r})<{g},0,'
            f'IFS(AND(G{r}>=1,G{r}<=30),{m1},'
            f'AND(G{r}>30,G{r}<=600),{m2},'
            f'AND({sel},G{r}>600,G{r}<=1000),{m2},'
-           f'AND({sel},G{r}>=1400,G{r}<=2000),{m3},'
            f'AND({sel},G{r}>=3750,G{r}<=5000),{m3},'
            f'TRUE,0))')
     nfl = (f'IF(N(E{r})<{g},0,'
