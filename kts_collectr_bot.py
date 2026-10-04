@@ -132,7 +132,7 @@ SELECT_CHECK_URL = "tinyurl.com/2awv494h"
 # ($300-$1,400 gap, $1,800+ gone). Slots are counted per ACCEPTED card at
 # quote time in DATA_DIR/pokemon_quota_store.json (!quota to view/adjust;
 # NOTE the store wipes on deploys — avoid mid-weekend deploys or re-set
-# counts after). Gates: PSA 7+ everywhere; cert 7+ digits ≤$1,000;
+# counts after). Gates: PSA 7+ everywhere; 7-series certs (# ≥70M) ≤$1,000;
 # sale ≤60d at ≤$100, ≤30d above (CL 4+).
 POKEMON_QUOTA_BANDS = [
     (1, 100, None, None),            # unlimited, untracked
@@ -146,8 +146,12 @@ POKEMON_QUOTA_BANDS = [
 # deploy.
 POKEMON_BUY_BANDS = [(lo, hi) for lo, hi, _k, _c in POKEMON_QUOTA_BANDS]
 POKEMON_BIG_BAND_MIN = 10**9          # dormant — no any-grade big band now
-POKEMON_CERT_GATE_MAX = 1000          # 7+ digit certs required at ≤$1,000
-POKEMON_MIN_CERT_DIGITS = 7
+POKEMON_CERT_GATE_MAX = 1000          # Triumph "7+ CERTS" gate applies at ≤$1,000
+POKEMON_MIN_CERT_SERIES = 70_000_000  # cert NUMBER must be ≥ 70,000,000 — the "7 series"
+                                      # (8-digit certs starting 7-9, plus every 9-digit cert).
+                                      # Kevin Oct 4: Triumph REJECTS Pokémon below a 7 cert;
+                                      # "7+ certs" means the cert series, NOT digit count
+                                      # (the old 7-digit-length reading never fired — bug).
 # (Pikachu lane REMOVED Aug 11 per Kevin — Pikachus follow standard Pokémon
 # rules; $5k-$20k Pikachus land in the big-ticket review band like everything
 # else.)
@@ -1060,13 +1064,15 @@ def classify_psa_comp(comp):
                     f"${cv:,.2f} (our ${_band[0]:g}-${_band[1]:g} Pokémon "
                     f"slots are all taken this weekend)")
     pokemon_big = (sport == 'pokemon' and cv >= POKEMON_BIG_BAND_MIN)
-    # Cert gate (flyer "Cert 7+"): only on Pokémon ≤ $1,000.
-    if (sport == 'pokemon' and cv <= POKEMON_CERT_GATE_MAX
-            and len(str(comp.get('cert', '')).strip()) < POKEMON_MIN_CERT_DIGITS):
-        return ('rejected',
-                f"cert {comp.get('cert')} ({len(str(comp.get('cert', '')).strip())} digits — "
-                f"we need {POKEMON_MIN_CERT_DIGITS}+ digit cert numbers under "
-                f"${POKEMON_CERT_GATE_MAX:,})")
+    # Cert gate (Triumph "7+ CERTS"): Pokémon ≤ $1,000 must be a 7-series cert
+    # or newer — cert number ≥ 70,000,000. Non-numeric certs fail closed.
+    if sport == 'pokemon' and cv <= POKEMON_CERT_GATE_MAX:
+        _cert_s = str(comp.get('cert', '')).strip()
+        if not _cert_s.isdecimal() or int(_cert_s) < POKEMON_MIN_CERT_SERIES:
+            return ('rejected',
+                    f"cert {comp.get('cert')} is below the 7 series — we can only "
+                    f"take 7+ certs (cert # 70,000,000 and up) on Pokémon under "
+                    f"${POKEMON_CERT_GATE_MAX:,}")
     # Grade floor PSA 7+ — EXCEPT Pokémon $3,000+ (flyer: any grade) and
     # NBA ≤ $1,000 (flyer row carries no PSA badge; mirrors Triumph).
     any_grade = pokemon_big or (sport == 'basketball' and cv <= 1000)
@@ -2370,7 +2376,7 @@ def build_sheet_h_formula(r, pokemon_tiers=None, sport_rates=None):
     m1, m2, m3 = _sport(PSA_MLB_PER_CARD_TIERS, 'mlb')
     f1, f2, f3 = _sport(PSA_FOOTBALL_PER_CARD_TIERS, 'football')
     g = PSA_MIN_GRADE
-    cd = POKEMON_MIN_CERT_DIGITS
+    cs = POKEMON_MIN_CERT_SERIES
     is_op = (f'OR(F{r}="other",F{r}="one piece",F{r}="onepiece",'
              f'F{r}="tcg",F{r}="popculture",F{r}="pop culture")')
     is_mlb = f'OR(F{r}="baseball",F{r}="mlb")'
@@ -2393,7 +2399,7 @@ def build_sheet_h_formula(r, pokemon_tiers=None, sport_rates=None):
               f'TRUE,30)')
     # Pokémon bands (Oct 3): $1-100, $100-300, $1,400-1,800 — slot quotas are
     # bot-side only (a formula can't count), so the sheet shows the band rate.
-    pok = (f'IF(AND(G{r}<={POKEMON_CERT_GATE_MAX},LEN(B{r})<{cd}),0,'
+    pok = (f'IF(AND(G{r}<={POKEMON_CERT_GATE_MAX},IFERROR(B{r}*1,0)<{cs}),0,'
            f'IF(N(E{r})<{g},0,'
            f'IFS(AND(G{r}>=1,G{r}<=100),{p1},'
            f'AND(G{r}>100,G{r}<=300),{p2},'
