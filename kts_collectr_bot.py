@@ -2115,12 +2115,10 @@ def _save_vip():
 # Schema per user: 'pokemon' -> list of band rates (like the store);
 # other keys -> flat VIP rate for that canonical sport.
 VIP_SEED = {
-    'cwilk_sportscards': {'pokemon': [0.92, 0.88],
-                          'basketball': 0.95, 'mlb': 0.90, 'one piece': 0.88},
-    # Discord usernames can end in '.' — the ticket channel is named
-    # 'cwilk_sportscards.', so register both spellings.
-    'cwilk_sportscards.': {'pokemon': [0.92, 0.88],
-                           'basketball': 0.95, 'mlb': 0.90, 'one piece': 0.88},
+    # cwilk_sportscards REMOVED Oct 5 (Kevin: "dont give cwilk vip rates") —
+    # he quotes at standard rates now. If he's re-VIP'd, remember the ticket
+    # channel spelling ends in '.': seed BOTH 'cwilk_sportscards' and
+    # 'cwilk_sportscards.'.
 }
 
 def _vip_entry(username):
