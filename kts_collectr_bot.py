@@ -109,19 +109,20 @@ PSA_SPORT_MAX_PRICE = {
     'basketball': 3750,   # 2000s-list ceiling; others cap at NBA_GENERAL_MAX
     'football': 2000,     # QB-GOAT ceiling; others cap at NFL_GENERAL_MAX
 }
-MLB_GENERAL_MAX = 600    # non-Slugger baseball ceiling
+MLB_GENERAL_MAX = 300    # non-Slugger baseball ceiling (Oct 4 12:53 PM: backlog now $1-$300)
 NBA_GENERAL_MAX = 3500   # non-2000s-list basketball ceiling
-NFL_GENERAL_MAX = 600    # non-GOAT football ceiling
+NFL_GENERAL_MAX = 300    # non-GOAT football ceiling (Oct 4 12:53 PM: backlog now $1-$300)
 # Select-player bands ABOVE the general ceilings (inclusive; from the flyer's
 # SPECIALTY rows). Values between bands are rejected even for listed players.
 MLB_SLUGGER_BANDS = [(600.01, 1000), (3750, 5000)]
 # Sluggers $1,400-$2,000 SUSPENDED Oct 4 (~$253 left in the app lane; Kevin:
-# no backlog above $600, so app-full = instant reject).
+# no backlog above $300 (was $600 until Oct 4 12:53 PM), so app-full = instant reject).
 NFL_GOAT_BANDS = [(600.01, 1000), (1400, 2000)]
-# NBA general is BANDED (Kevin, Oct 4: backlog covers sports $1-$600 only;
-# above that we take ONLY what the Triumph app can absorb right now —
-# $600-$1,000 is sub-range-full and $2,000-$2,500 is an app gap => reject):
-NBA_GENERAL_BANDS = [(1, 600), (1000.01, 2000), (2500.01, 3500)]
+# NBA general is BANDED (Kevin, Oct 4 12:53 PM #sports-slabs: backlog covers
+# sports $1-$300 only now; above that we take ONLY what the Triumph app can
+# absorb right now — $300-$1,000 general is app-full and $2,000-$2,500 is an
+# app gap => reject):
+NBA_GENERAL_BANDS = [(1, 300), (1000.01, 2000), (2500.01, 3500)]
 # 2000s-list players additionally ride the app's 2000s specialty lanes with
 # real room: $0-$1,000 and $3,000-$3,750 (the $1,400-$2,500 lane is ~$850
 # left => nothing fits => not offered).
@@ -1065,9 +1066,9 @@ def classify_psa_comp(comp):
                         f"2000s-list players only above that, check "
                         f"{SELECT_CHECK_URL})")
             return ('rejected',
-                    f"${cv:,.2f} (our NBA $600-$1,000 and $2,000-$2,500 slots "
-                    f"are full right now — taking $1-$600, $1,000-$2,000, "
-                    f"$2,500-$3,500, plus 2000s-list $600-$1,000 and "
+                    f"${cv:,.2f} (our NBA $300-$1,000 and $2,000-$2,500 slots "
+                    f"are full right now — taking $1-$300, $1,000-$2,000, "
+                    f"$2,500-$3,500, plus 2000s-list up to $1,000 and "
                     f"$3,000-$3,750, check {SELECT_CHECK_URL})")
 
     # Pokémon (Oct 3 allocation update): unlimited ≤$100, slot-limited
@@ -1795,9 +1796,9 @@ WELCOME_MSG = (
     "We're currently buying (PSA graded slabs — send your cert numbers):\n"
     "• **Pokémon** — $1–$100 unlimited (🔥 especially $1–$60!) · limited slots: $100–$300, $400–$700 and $1,400–$1,800\n"
     "• **One Piece** — $1–$900\n"
-    "• **Baseball / MLB** — $1–$600 (⭐ select Sluggers up to $5,000)\n"
-    "• **Basketball / NBA** — $1–$3,500 (⭐ select players up to $3,750)\n"
-    "• **Football / NFL** — $1–$600 (⭐ QB GOATs up to $2,000)\n"
+    "• **Baseball / MLB** — $1–$300 (⭐ select Sluggers up to $5,000)\n"
+    "• **Basketball / NBA** — $1–$300, $1,000–$3,500 (⭐ select players up to $3,750)\n"
+    "• **Football / NFL** — $1–$300 (⭐ QB GOATs up to $2,000)\n"
     + _POKEMON_RAW_WELCOME_LINE +
     f"\n⭐ Check if your player is on a select list: {SELECT_CHECK_URL}\n"
     "⚠️ We are **not** buying raw cards — PSA slabs only.\n\n"
@@ -2373,8 +2374,8 @@ def build_sheet_h_formula(r, pokemon_tiers=None, sport_rates=None):
     EVERY band rate of that sport with one flat VIP rate (gates/bans stay).
     Oct 2 structure: pokemon continuous $1-$5,000 (90/87, any grade+any cert
     at $3,000+, cert 7+ only ≤$1,000); one piece $1-$900 (88/83); MLB 100/90/90
-    to $600 + Slugger bands; NBA 95/92 to $3,500 (any grade ≤$1,000) + 2000s
-    band; NFL 90/90/88 to $600 + GOAT bands. SELECT-list cards are stamped
+    to $300 + Slugger bands; NBA 95/92 (backlog to $300; app lanes above) +
+    2000s band; NFL 90/90/88 to $300 + GOAT bands. SELECT-list cards are stamped
     "Y" in column L by fill_buying_sheet — the formula trusts that stamp (the
     1,001-name NBA list can't live in a cell formula); Kevin can hand-type Y
     to override. If a weekly flyer changes the band COUNT, update this builder.
@@ -2429,21 +2430,20 @@ def build_sheet_h_formula(r, pokemon_tiers=None, sport_rates=None):
     op = (f'IF(AND(G{r}>=1,G{r}<=900,N(E{r})>={g}),'
           f'IF(G{r}<=100,{o1},{o2}),0)')
     nba = (f'IF({bans},0,'
-           f'IFS(AND(G{r}>=1,G{r}<=600),{b1},'
-           f'AND({sel},G{r}>600,G{r}<=1000),{b1},'
+           f'IFS(AND(G{r}>=1,G{r}<=300),{b1},'
+           f'AND({sel},G{r}>300,G{r}<=1000),{b1},'
            f'AND(G{r}>1000,G{r}<=2000,N(E{r})>={g}),{b2},'
            f'AND(G{r}>2500,G{r}<=3500,N(E{r})>={g}),{b2},'
            f'AND({sel},G{r}>3500,G{r}<=3750,N(E{r})>={g}),{b3},'
            f'TRUE,0))')
     mlb = (f'IF(N(E{r})<{g},0,'
            f'IFS(AND(G{r}>=1,G{r}<=30),{m1},'
-           f'AND(G{r}>30,G{r}<=600),{m2},'
+           f'AND(G{r}>30,G{r}<=300),{m2},'
            f'AND({sel},G{r}>600,G{r}<=1000),{m2},'
            f'AND({sel},G{r}>=3750,G{r}<=5000),{m3},'
            f'TRUE,0))')
     nfl = (f'IF(N(E{r})<{g},0,'
-           f'IFS(AND(G{r}>=1,G{r}<=500),{f1},'
-           f'AND(G{r}>500,G{r}<=600),{f2},'
+           f'IFS(AND(G{r}>=1,G{r}<=300),{f1},'
            f'AND({sel},G{r}>600,G{r}<=1000),{f2},'
            f'AND({sel},G{r}>=1400,G{r}<=2000),{f3},'
            f'TRUE,0))')
