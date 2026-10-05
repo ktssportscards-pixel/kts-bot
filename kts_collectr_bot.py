@@ -263,8 +263,9 @@ PSA_BASKETBALL_PER_CARD_TIERS = [
     (1000.01, 3500.01, 0.92),
     (3500.01, float('inf'), 0.93),
 ]
-# MLB (Oct 2): $1-$30 → 100%, $30-$100 → 90%, $100-$600 → 90%; Sluggers
-# $600-$1,000 → 90%, $1,400-$2,000 → 91%, $3,750-$5,000 → 91%. PSA 7+.
+# MLB rates: $1-$30 → 100%, $30+ → 90% (general reach now $1-$300, Oct 5);
+# Sluggers $600-$1,000 → 90%, $1,400-$2,000 → 91% (lane suspended Oct 4),
+# $3,750-$5,000 → 91%. PSA 7+.
 PSA_MLB_PER_CARD_TIERS = [
     (0, 30.01, 1.00),
     (30.01, 1000.01, 0.90),
@@ -276,7 +277,7 @@ PSA_ONE_PIECE_PER_CARD_TIERS = [
     (0, 100.01, 0.88),
     (100.01, float('inf'), 0.83),
 ]
-# NFL (Oct 2): $1-$100 → 90%, $100-$500 → 90%, $500-$600 → 88%; QB GOATs
+# NFL rates: $1-$300 → 90% (general reach cut from $600, Oct 5); QB GOATs
 # $600-$1,000 → 88%, $1,400-$2,000 → 90%. PSA 7+.
 PSA_FOOTBALL_PER_CARD_TIERS = [
     (0, 500.01, 0.90),
@@ -419,6 +420,15 @@ def _blended_per_card_rate(tiers, card_values):
 # before any Discord event runs). Counts accepted cards per quota band.
 _POKEMON_QUOTA = None
 
+# Deploy-wipe safety (Oct 5): DATA_DIR has NO Railway volume, so every deploy
+# deletes the store and counts restart at 0 — which silently REOPENED full
+# bands and made Kevin re-send `!quota set ...` after every deploy (he did it
+# 3x on Oct 4 alone). A fresh store now seeds the week's capped bands as FULL:
+# wrong only in the safe direction (over-reject), and `!quota set <band>
+# <used>` reopens slots instantly. UPDATE THIS SEED when the weekly flyer
+# resets allocations.
+POKEMON_QUOTA_SEED_USED = {'200-300': 25, '1400-1800': 10}
+
 def _pokemon_quota_load():
     global _POKEMON_QUOTA
     if _POKEMON_QUOTA is None:
@@ -426,7 +436,8 @@ def _pokemon_quota_load():
             with open(os.path.join(DATA_DIR, "pokemon_quota_store.json")) as f:
                 _POKEMON_QUOTA = {str(k): int(v) for k, v in json.load(f).items()}
         except Exception:
-            _POKEMON_QUOTA = {}
+            _POKEMON_QUOTA = dict(POKEMON_QUOTA_SEED_USED)
+            _pokemon_quota_save()   # persist so `!quota` shows the seeded state
     return _POKEMON_QUOTA
 
 def _pokemon_quota_save():
@@ -507,6 +518,90 @@ def handle_quota_command(content):
             lines.append(f"• ${lo:g}–${hi:g}: unlimited")
     lines.append("`!quota set <band> <used>` · `!quota cap <band> <n|off>` (bands: " + ", ".join(keys) + ")")
     return "\n".join(lines)
+
+
+# ── SHOP OPEN/CLOSED SWITCH (Kevin, Oct 5) ───────────────────────────────────────
+# Master off-switch for buying (Oct 3-4 weekend: sheets closed 12 AM Sunday but
+# the bot kept quoting overnight tickets). While CLOSED, cert submissions and
+# Collectr CSVs in ticket channels get SHOP_CLOSED_MSG instead of a
+# sheet/comps/quote. Everything else keeps working: all ! commands, and the
+# proceed/shipping/tracking flow for lots that were quoted before the close.
+# Toggle live with "!shop closed" / "!shop open" (persisted to DATA_DIR like the
+# quota store) — but DATA_DIR has NO volume on Railway, so a deploy wipes the
+# toggle and the bot wakes up on the SEED: the SHOP_CLOSED env var if set
+# (1/true/yes/on/closed = closed), else SHOP_CLOSED_DEFAULT below. For a close
+# that must survive deploys, set SHOP_CLOSED=1 in the Railway env (changing an
+# env var redeploys, so it takes effect on its own) or flip the constant.
+SHOP_CLOSED_DEFAULT = False
+
+def _shop_closed_seed():
+    """What a fresh deploy wakes up as (env var beats the code constant)."""
+    v = os.environ.get("SHOP_CLOSED")
+    if v is None or not v.strip():
+        return SHOP_CLOSED_DEFAULT
+    return v.strip().lower() in ("1", "true", "yes", "on", "closed")
+
+SHOP_CLOSED_MSG = (
+    "🔒 **Buying is closed until next week** — Kevin will announce when sheets "
+    "reopen. Hang onto your list and drop it here then! 🙏"
+)
+
+# Lazy-loaded like the quota store (DATA_DIR is defined later in the file;
+# fully resolved before any Discord event runs).
+_SHOP = None
+
+def _shop_load():
+    global _SHOP
+    if _SHOP is None:
+        try:
+            with open(os.path.join(DATA_DIR, "shop_store.json")) as f:
+                _SHOP = json.load(f)
+        except Exception:
+            _SHOP = {}
+    return _SHOP
+
+def _shop_save():
+    try:
+        p = os.path.join(DATA_DIR, "shop_store.json")
+        with open(p + ".tmp", "w") as f:
+            json.dump(_shop_load(), f)
+        os.replace(p + ".tmp", p)
+    except Exception as e:
+        print(f"shop store save failed (non-critical): {e}")
+
+def shop_is_closed():
+    """A !shop toggle in the store wins; with no store entry (fresh deploy,
+    wiped DATA_DIR) the seed decides."""
+    v = _shop_load().get("closed")
+    return _shop_closed_seed() if v is None else bool(v)
+
+def handle_shop_command(content):
+    """!shop — show buying status. !shop closed / !shop open flips it
+    immediately, no deploy needed. The reply always says what the deploy seed
+    is, because a deploy wipes the toggle back to it (no DATA_DIR volume)."""
+    toks = content.strip().lower().split()
+    sub = toks[1] if len(toks) > 1 else ""
+    seed_label = "CLOSED" if _shop_closed_seed() else "OPEN"
+    if sub in ("closed", "close"):
+        _shop_load()["closed"] = True
+        _shop_save()
+        return ("🔒 **Buying is now CLOSED** — cert/CSV submissions in tickets "
+                "get the closed message instead of a quote. Already-quoted lots "
+                "can still proceed/ship, and all commands keep working.\n"
+                f"⚠️ A deploy resets this to the seed (**{seed_label}**) — for a "
+                "close that survives deploys, set `SHOP_CLOSED=1` in Railway.")
+    if sub == "open":
+        _shop_load()["closed"] = False
+        _shop_save()
+        reply = "✅ **Buying is now OPEN** — submissions quote normally."
+        if _shop_closed_seed():
+            reply += ("\n⚠️ The deploy seed is **CLOSED** (`SHOP_CLOSED` env "
+                      "var / constant) — any deploy re-closes buying until you "
+                      "clear it.")
+        return reply
+    status = "🔒 **CLOSED**" if shop_is_closed() else "✅ **OPEN**"
+    return (f"Buying is {status} (deploy seed: {seed_label}).\n"
+            "`!shop closed` · `!shop open`")
 
 
 def _name_on_list(comp, names):
@@ -1041,7 +1136,7 @@ def classify_psa_comp(comp):
         if not is_mlb_slugger(comp):
             return ('rejected',
                     f"${cv:,.2f} (over our ${MLB_GENERAL_MAX} MLB max — select "
-                    f"Sluggers only above that, check {SELECT_CHECK_URL})")
+                    f"Sluggers only at $600+, check {SELECT_CHECK_URL})")
         if not any(lo <= cv <= hi for lo, hi in MLB_SLUGGER_BANDS):
             return ('rejected',
                     f"${cv:,.2f} (outside Slugger bands — $600-$1,000 / "
@@ -1050,7 +1145,7 @@ def classify_psa_comp(comp):
         if not is_qb_goat(comp):
             return ('rejected',
                     f"${cv:,.2f} (over our ${NFL_GENERAL_MAX} NFL max — QB "
-                    f"GOATs only above that, check {SELECT_CHECK_URL})")
+                    f"GOATs only at $600+, check {SELECT_CHECK_URL})")
         if not any(lo <= cv <= hi for lo, hi in NFL_GOAT_BANDS):
             return ('rejected',
                     f"${cv:,.2f} (between QB GOAT bands — $600-$1,000 / "
@@ -3372,6 +3467,15 @@ async def on_message(message):
                 await message.channel.send(handle_quota_command(message.content))
             except Exception as e:
                 await message.channel.send(f"Quota command error: {e}")
+        return
+
+    # ── !shop command (Kevin only, DM ok) — buying open/closed master switch ──
+    if message.content.strip().lower().startswith('!shop'):
+        if message.author.id == YOUR_DISCORD_USER_ID:
+            try:
+                await message.channel.send(handle_shop_command(message.content))
+            except Exception as e:
+                await message.channel.send(f"Shop command error: {e}")
         return
 
     # ── !vip command (Kevin only) — per-customer premium Pokémon rates ──
