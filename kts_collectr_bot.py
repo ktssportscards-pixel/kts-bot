@@ -3673,6 +3673,24 @@ async def on_message(message):
             if not (certs or csv_attachment):
                 return
 
+    # ── SHOP CLOSED GATE (Kevin, Oct 5) ──────────────────────────────────────────
+    # While buying is closed (!shop closed, or the SHOP_CLOSED deploy seed),
+    # swallow BOTH quote paths — cert numbers and Collectr CSVs — with the
+    # closed notice instead of a sheet/comps/offer. Sits AFTER the welcome
+    # (ticket bookkeeping stays intact) and BEFORE the quote paths; everything
+    # below the quote paths (proceed/shipping/tracking for lots quoted before
+    # the close) is deliberately NOT gated.
+    if (certs or csv_attachment) and shop_is_closed():
+        await message.channel.send(SHOP_CLOSED_MSG)
+        _what = (f"{len(certs)} cert(s)" if certs else "a Collectr CSV") + \
+                (" + a Collectr CSV" if certs and csv_attachment else "")
+        await ping_kevin(
+            f"🔒 Shop closed — **{username}** submitted {_what}; no quote sent. "
+            f"They'll need a fresh submission when you reopen (`!shop open`).",
+            message.channel
+        )
+        return
+
     # ── COLLECTR CSV (ONE PIECE + POKÉMON singles) ───────────────────────────────
     if csv_attachment:
         async with message.channel.typing():
