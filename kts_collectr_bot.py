@@ -136,13 +136,10 @@ from triumph_lists import (TRIUMPH_MLB_SLUGGERS, TRIUMPH_NBA_2000S,
                            TRIUMPH_QB_GOATS)
 QB_GOATS = TRIUMPH_QB_GOATS
 SELECT_CHECK_URL = "tinyurl.com/2awv494h"
-# Pokémon buy map (Kevin, Sat Oct 3 ~7:30am — allocation reality update):
-# $1-$100 UNLIMITED (focus $1-$60); then SLOT-LIMITED bands: 25x $100-$200,
-# 25x $200-$300, 10x $1,400-$1,800. Everything else Pokémon OFF
-# ($300-$1,400 gap, $1,800+ gone). Slots are counted per ACCEPTED card at
-# quote time in DATA_DIR/pokemon_quota_store.json (!quota to view/adjust;
-# NOTE the store wipes on deploys — avoid mid-weekend deploys or re-set
-# counts after). Gates: PSA 7+ everywhere; 7-series certs (# ≥70M) ≤$1,000;
+# Pokémon buy map (Oct 10-11 weekend): $1-$2,400 and $2,500-$5,000,
+# NO personal caps (boss: $1-$100 unlimited for the team, rest straight
+# FCFS against the shared Triumph pools — the app is the oracle).
+# Gates: PSA 7+ everywhere; 7-series certs (# ≥70M) ≤$1,000;
 # sale ≤60d at ≤$100, ≤30d above (CL 4+).
 POKEMON_QUOTA_BANDS = [
     (1, 2400, None, None),      # Oct 10-11: continuous, no personal caps (boss: $1-$100
@@ -1898,7 +1895,7 @@ WELCOME_MSG = (
     "• **Basketball / NBA** — $1–$800 and $900–$1,400\n"
     "• **Football / NFL** — $1–$220\n"
     + _POKEMON_RAW_WELCOME_LINE +
-    f"\n⭐ Check if your player is on a select list: {SELECT_CHECK_URL}\n"
+    "\n"
     "⚠️ We are **not** buying raw cards — PSA slabs only.\n\n"
     "📊 **No minimum lot size this week** — send what you've got!\n"
     + _POKEMON_RAW_MIN_LINE +
