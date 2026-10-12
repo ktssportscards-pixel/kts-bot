@@ -105,13 +105,13 @@ PSA_MAX_AGE_DAYS = 30
 PSA_SPORT_MAX_PRICE = {
     'pokemon': 3750,      # Sat 8 PM retune: general $1-$100; NVD-list to $2,500 + $3,000-$3,750
     'one piece': 100,     # Sat 8 PM retune: OP >$100 pools are 100% used
-    'mlb': 220,           # unchanged — both lanes still open
+    'mlb': 300,           # Oct 12 12:45 AM (Kevin): $1-$300 greenlit outside the app
     'basketball': 1400,   # general to $240 + $900-$1,400; 2000s-list adds $240-$500
-    'football': 220,      # $50-$100 pool dead — gap encoded in classify
+    'football': 300,      # Oct 12 12:45 AM (Kevin): $1-$300 greenlit outside the app
 }
-MLB_GENERAL_MAX = 220    # Oct 10-11: Triumph baseball $25-$220, no slugger lanes
+MLB_GENERAL_MAX = 300    # Oct 12: "1-300 is greenlight for mlb and nfl outside of triumph app"
 NBA_GENERAL_MAX = 1400   # Oct 10-11: Triumph NBA to $1,400 for everyone
-NFL_GENERAL_MAX = 220    # Oct 10-11: Triumph football $1-$220 (QB Sheeps lane sits inside it)
+NFL_GENERAL_MAX = 300    # Oct 12: same greenlight — app-refusals go to the poketrader backlog
 # Select-player bands ABOVE the general ceilings (inclusive; from the flyer's
 # SPECIALTY rows). Values between bands are rejected even for listed players.
 MLB_SLUGGER_BANDS = []   # Oct 10-11: no slugger lanes above the $220 ceiling
@@ -128,7 +128,7 @@ NBA_GENERAL_BANDS = [(1, 240), (900, 1400)]   # Sat 8 PM: $240-$800 pool is dead
 # left => nothing fits => not offered).
 NBA_2000S_BANDS = [(1, 500), (900, 1400)]     # 2000s specialty $0-$500 still has ~$11.5k
 NFL_MIN_PRICE = 1     # dormant — no NFL floor
-MLB_MIN_PRICE = 25    # Oct 10-11: Triumph baseball floor $25 — below that = reject
+MLB_MIN_PRICE = 1     # dormant since Oct 12 ($1-$300 greenlight; was 25 for the Oct 10-11 app floor)
 # Select-player name lists captured from the Triumph Partners app (Oct 2) —
 # the customer-facing checker page mirrors these (tinyurl.com/2awv494h).
 # QB_GOATS now comes from there too (6 names — includes Dan Marino).
@@ -1130,10 +1130,8 @@ def classify_psa_comp(comp):
     if sport == 'mlb' and cv < MLB_MIN_PRICE:
         return ('rejected',
                 f"${cv:,.2f} (under our ${MLB_MIN_PRICE} baseball minimum this weekend)")
-    if sport == 'football' and 50 < cv < 100:
-        return ('rejected',
-                f"${cv:,.2f} ($50-$100 football is sold out this weekend — "
-                f"taking $1-$50 and $100-$220)")
+    # (Oct 12: the $50-$100 football gap is gone — $1-$300 NFL/MLB greenlit
+    # outside the app, so in-range cards always quote.)
 
     # ── SELECT-PLAYER lanes (Oct 2): above each sport's general ceiling,
     # only listed players qualify, and only inside the flyer's specialty
@@ -1902,9 +1900,9 @@ WELCOME_MSG = (
     "We're currently buying (PSA graded slabs — send your cert numbers):\n"
     "• **Pokémon** — $1–$100 (🔥 unlimited!) · ⭐ special-list Pokémon up to $2,500\n"
     "• **One Piece** — $1–$100\n"
-    "• **Baseball / MLB** — $25–$220\n"
+    "• **Baseball / MLB** — $1–$300\n"
     "• **Basketball / NBA** — $1–$240 and $900–$1,400 (⭐ select players to $500)\n"
-    "• **Football / NFL** — $1–$50 and $100–$220\n"
+    "• **Football / NFL** — $1–$300\n"
     + _POKEMON_RAW_WELCOME_LINE +
     "\n"
     "⚠️ We are **not** buying raw cards — PSA slabs only.\n\n"
@@ -2538,12 +2536,11 @@ def build_sheet_h_formula(r, pokemon_tiers=None, sport_rates=None):
            f'AND(G{r}>1000,G{r}<=1400,N(E{r})>={g}),{b2},'
            f'TRUE,0))')
     mlb = (f'IF(N(E{r})<{g},0,'
-           f'IFS(AND(G{r}>=25,G{r}<=30),{m1},'
-           f'AND(G{r}>30,G{r}<=220),{m2},'
+           f'IFS(AND(G{r}>=1,G{r}<=30),{m1},'
+           f'AND(G{r}>30,G{r}<=300),{m2},'
            f'TRUE,0))')
     nfl = (f'IF(N(E{r})<{g},0,'
-           f'IFS(AND(G{r}>=1,G{r}<=50),{f1},'
-           f'AND(G{r}>=100,G{r}<=220),{f1},'
+           f'IFS(AND(G{r}>=1,G{r}<=300),{f1},'
            f'TRUE,0))')
     rate = (f'IFS('
             f'F{r}="pokemon",{pok},'
