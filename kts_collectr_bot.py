@@ -103,15 +103,15 @@ PSA_MAX_AGE_DAYS = 30
 # players included); non-select caps are enforced in classify via the
 # *_GENERAL_MAX constants + the Triumph select lists (triumph_lists.py).
 PSA_SPORT_MAX_PRICE = {
-    'pokemon': 3750,      # Sat 8 PM retune: general $1-$100; NVD-list to $2,500 + $3,000-$3,750
-    'one piece': 100,     # Sat 8 PM retune: OP >$100 pools are 100% used
-    'mlb': 300,           # Oct 12 12:45 AM (Kevin): $1-$300 greenlit outside the app
-    'basketball': 1400,   # general to $240 + $900-$1,400; 2000s-list adds $240-$500
-    'football': 300,      # Oct 12 12:45 AM (Kevin): $1-$300 greenlit outside the app
+    'pokemon': 5000,      # Oct 17-18 weekend: continuous $1-$5,000, fat pools every band
+    'one piece': 1000,    # Oct 17-18: $1-$700 + $900-$1,000 (gap 700-900 in classify)
+    'mlb': 700,           # Oct 17-18: $1-$240 + $250-$700 (gap 240-250 in classify)
+    'basketball': 1400,   # Oct 17-18: $1-$800 + $900-$1,400 (gap 800-900 via bands)
+    'football': 220,      # Oct 17-18: $1-$220 continuous
 }
-MLB_GENERAL_MAX = 300    # Oct 12: "1-300 is greenlight for mlb and nfl outside of triumph app"
-NBA_GENERAL_MAX = 1400   # Oct 10-11: Triumph NBA to $1,400 for everyone
-NFL_GENERAL_MAX = 300    # Oct 12: same greenlight — app-refusals go to the poketrader backlog
+MLB_GENERAL_MAX = 700    # Oct 17-18 weekend ceilings — no select-player lanes this week
+NBA_GENERAL_MAX = 1400
+NFL_GENERAL_MAX = 220
 # Select-player bands ABOVE the general ceilings (inclusive; from the flyer's
 # SPECIALTY rows). Values between bands are rejected even for listed players.
 MLB_SLUGGER_BANDS = []   # Oct 10-11: no slugger lanes above the $220 ceiling
@@ -122,11 +122,11 @@ NFL_GOAT_BANDS = []      # Oct 10-11: QB Sheeps lane is $0-$100, inside the gene
 # sports $1-$300 only now; above that we take ONLY what the Triumph app can
 # absorb right now — $300-$1,000 general is app-full and $2,000-$2,500 is an
 # app gap => reject):
-NBA_GENERAL_BANDS = [(1, 240), (900, 1400)]   # Sat 8 PM: $240-$800 pool is dead
+NBA_GENERAL_BANDS = [(1, 800), (900, 1400)]   # Oct 17-18: $240-$800 pool is back
 # 2000s-list players additionally ride the app's 2000s specialty lanes with
 # real room: $0-$1,000 and $3,000-$3,750 (the $1,400-$2,500 lane is ~$850
 # left => nothing fits => not offered).
-NBA_2000S_BANDS = [(1, 500), (900, 1400)]     # 2000s specialty $0-$500 still has ~$11.5k
+NBA_2000S_BANDS = [(1, 800), (900, 1400)]     # Oct 17-18: NO 2000s specialty — same as general
 NFL_MIN_PRICE = 1     # dormant — no NFL floor
 MLB_MIN_PRICE = 1     # dormant since Oct 12 ($1-$300 greenlight; was 25 for the Oct 10-11 app floor)
 # Select-player name lists captured from the Triumph Partners app (Oct 2) —
@@ -142,17 +142,17 @@ SELECT_CHECK_URL = "tinyurl.com/2awv494h"
 # Gates: PSA 7+ everywhere; 7-series certs (# ≥70M) ≤$1,000;
 # sale ≤60d at ≤$100, ≤30d above (CL 4+).
 POKEMON_QUOTA_BANDS = [
-    (1, 100, None, None),       # Sat 8 PM retune: general pokemon $1-$100 only — every
-]                               # >$100 pool is dead. NVD-list cards get extended reach
-# "Not Valentines Day" list reach (the specialty lanes still have ~$58k):
-POKEMON_NVD_BANDS = [(100.01, 2500), (3000, 3750)]
+    (1, 5000, None, None),      # Oct 17-18: continuous $1-$5,000, no personal caps —
+]                               # straight FCFS against ~$522k of shared team pools
+# Oct 17-18: NO specialty/NVD lanes — everything rides the general bands:
+POKEMON_NVD_BANDS = []
 def is_pokemon_nvd(comp):
     return _name_on_list(comp, TRIUMPH_POKEMON_NVD)
 # Caps are DEFAULTS — override at runtime with "!quota cap <band> <n|off>"
 # (stored as cap:<band> in the quota store), so count changes never need a
 # deploy.
 POKEMON_BUY_BANDS = [(lo, hi) for lo, hi, _k, _c in POKEMON_QUOTA_BANDS]
-POKEMON_BIG_BAND_MIN = 10**9          # dormant — no any-grade big band now
+POKEMON_BIG_BAND_MIN = 3000.01        # $3,000+ = any grade, no sale-age gate, flag for Kevin
 POKEMON_CERT_GATE_MAX = 1000          # Triumph "7+ CERTS" gate applies at ≤$1,000
 POKEMON_MIN_CERT_SERIES = 70_000_000  # cert NUMBER must be ≥ 70,000,000 — the "7 series"
                                       # (8-digit certs starting 7-9, plus every 9-digit cert).
@@ -250,8 +250,9 @@ def apply_avg3_value(comp, threshold=0):
 # All rates are pure value lookups (Oct 2 flyer) — the select-player name
 # lists only gate WHICH values are reachable (classify), never the rate.
 PSA_POKEMON_PER_CARD_TIERS = [
-    (0, 100.01, 0.90),             # $1-$100 → 90%  (.01 so exactly $100 is 90%)
-    (100.01, float('inf'), 0.87),  # $100-$5,000 → 87%
+    (0, 100.01, 0.91),             # $1-$100 → 91%  (.01 so exactly $100 is 91%)
+    (100.01, 3000.01, 0.87),       # $100-$3,000 → 87%
+    (3000.01, float('inf'), 0.89), # $3,000-$5,000 → 89%
 ]
 # NBA (Oct 2): $1-$1,000 → 95% (ANY grade); $1,000-$3,500 → 92% (PSA 7+);
 # 2000s-list $3,500-$3,750 → 93% (PSA 7+).
@@ -271,8 +272,8 @@ PSA_MLB_PER_CARD_TIERS = [
 # One Piece (Oct 2): $1-$100 → 88%; $100-$900 → 83% (CL 4+ = sale ≤30d).
 # PSA 7+.
 PSA_ONE_PIECE_PER_CARD_TIERS = [
-    (0, 100.01, 0.88),
-    (100.01, float('inf'), 0.83),
+    (0, 100.01, 0.89),
+    (100.01, float('inf'), 0.84),
 ]
 # NFL rates: $1-$300 → 90% (general reach cut from $600, Oct 5); QB GOATs
 # $600-$1,000 → 88%, $1,400-$2,000 → 90%. PSA 7+.
@@ -1130,8 +1131,15 @@ def classify_psa_comp(comp):
     if sport == 'mlb' and cv < MLB_MIN_PRICE:
         return ('rejected',
                 f"${cv:,.2f} (under our ${MLB_MIN_PRICE} baseball minimum this weekend)")
-    # (Oct 12: the $50-$100 football gap is gone — $1-$300 NFL/MLB greenlit
-    # outside the app, so in-range cards always quote.)
+    # Oct 17-18 weekend gaps straight from the Triumph allocation page:
+    if sport == 'mlb' and 240 < cv < 250:
+        return ('rejected',
+                f"${cv:,.2f} ($240-$250 is a gap in our MLB ranges this weekend — "
+                f"taking $1-$240 and $250-$700)")
+    if sport == 'one piece' and 700 < cv < 900:
+        return ('rejected',
+                f"${cv:,.2f} (our One Piece ranges are $1-$700 and $900-$1,000 "
+                f"this weekend)")
 
     # ── SELECT-PLAYER lanes (Oct 2): above each sport's general ceiling,
     # only listed players qualify, and only inside the flyer's specialty
@@ -1161,27 +1169,18 @@ def classify_psa_comp(comp):
         if not _in_gen and not _in_2k:
             if cv > NBA_GENERAL_MAX:
                 return ('rejected',
-                        f"${cv:,.2f} (over our ${NBA_GENERAL_MAX:,} NBA max — "
-                        f"2000s-list players only above that, check "
-                        f"{SELECT_CHECK_URL})")
+                        f"${cv:,.2f} (over our ${NBA_GENERAL_MAX:,} NBA max this weekend)")
             return ('rejected',
-                    f"${cv:,.2f} (that NBA range is sold out — taking $1-$240, "
-                    f"$900-$1,400, plus 2000s-list players to $500: {SELECT_CHECK_URL})")
+                    f"${cv:,.2f} (our NBA ranges are $1-$800 and $900-$1,400 "
+                    f"this weekend)")
 
     # Pokémon (Oct 3 allocation update): unlimited ≤$100, slot-limited
     # $100-$200 / $200-$300 / $1,400-$1,800, everything else rejected.
     if sport == 'pokemon':
         _band = pokemon_band_for(cv)
         if _band is None:
-            _nvd_ok = is_pokemon_nvd(comp) and any(lo <= cv <= hi
-                                                   for lo, hi in POKEMON_NVD_BANDS)
-            if not _nvd_ok:
-                if is_pokemon_nvd(comp):
-                    return ('rejected',
-                            f"${cv:,.2f} (list Pokémon are $100-$2,500 / $3,000-$3,750 only right now)")
-                return ('rejected',
-                        f"${cv:,.2f} (Pokémon over $100 is sold out this weekend — "
-                        f"$1-$100 only, except the special list: {SELECT_CHECK_URL})")
+            return ('rejected',
+                    f"${cv:,.2f} (outside our $1-$5,000 Pokémon range this weekend)")
         _left = (pokemon_quota_left(_band[2], _band[3])
                  if (_band is not None and _band[2] is not None) else None)
         if _left is not None and _left <= 0:
@@ -1242,7 +1241,7 @@ def classify_psa_comp(comp):
     # Pokémon $3,000+: auto-quoted at 87% per the flyer, but still ⚠️ flag
     # Kevin — big tickets deserve a look before paying.
     if pokemon_big:
-        return ('flag', f"${cv:,.0f} big-ticket Pokémon — auto-quoted at 87% "
+        return ('flag', f"${cv:,.0f} big-ticket Pokémon — auto-quoted at 89% "
                         f"(any grade); double-check before paying")
 
     return ('accepted', None)
@@ -1898,11 +1897,11 @@ _POKEMON_RAW_OFF_LINE = (
 WELCOME_MSG = (
     "👋 Welcome to KTS Collectibles!\n\n"
     "We're currently buying (PSA graded slabs — send your cert numbers):\n"
-    "• **Pokémon** — $1–$100 (🔥 unlimited!) · ⭐ special-list Pokémon up to $2,500\n"
-    "• **One Piece** — $1–$100\n"
-    "• **Baseball / MLB** — $1–$300\n"
-    "• **Basketball / NBA** — $1–$240 and $900–$1,400 (⭐ select players to $500)\n"
-    "• **Football / NFL** — $1–$300\n"
+    "• **Pokémon** — $1–$5,000 🔥 (7-series certs under $1,000)\n"
+    "• **One Piece** — $1–$700 and $900–$1,000\n"
+    "• **Baseball / MLB** — $1–$240 and $250–$700\n"
+    "• **Basketball / NBA** — $1–$800 and $900–$1,400\n"
+    "• **Football / NFL** — $1–$220\n"
     + _POKEMON_RAW_WELCOME_LINE +
     "\n"
     "⚠️ We are **not** buying raw cards — PSA slabs only.\n\n"
@@ -2488,7 +2487,8 @@ def build_sheet_h_formula(r, pokemon_tiers=None, sport_rates=None):
     pt = pokemon_tiers or PSA_POKEMON_PER_CARD_TIERS
     sr = sport_rates or {}
     p1 = _n(pt[0][2])                                   # pokemon ≤$100
-    p2 = _n(pt[1][2] if len(pt) > 1 else pt[-1][2])     # pokemon $100-$5,000
+    p2 = _n(pt[1][2] if len(pt) > 1 else pt[-1][2])     # pokemon $100-$3,000
+    p3 = _n(pt[2][2] if len(pt) > 2 else (pt[1][2] if len(pt) > 1 else pt[-1][2]))  # $3,000-$5,000
     def _sport(tier_list, key):
         flat = sr.get(key)
         if flat is not None:
@@ -2523,24 +2523,28 @@ def build_sheet_h_formula(r, pokemon_tiers=None, sport_rates=None):
     # Pokémon bands (Oct 3): $1-100, $100-300, $1,400-1,800 — slot quotas are
     # bot-side only (a formula can't count), so the sheet shows the band rate.
     pok = (f'IF(AND(G{r}<={POKEMON_CERT_GATE_MAX},IFERROR(B{r}*1,0)<{cs}),0,'
-           f'IF(N(E{r})<{g},0,'
-           f'IFS(AND(G{r}>=1,G{r}<=100),{p1},'
-           f'AND({sel},G{r}>100,G{r}<=2500),{p2},'
-           f'AND({sel},G{r}>=3000,G{r}<=3750),{p2},'
-           f'TRUE,0)))')
-    op = (f'IF(AND(N(E{r})>={g},G{r}>=1,G{r}<=100),{o1},0)')
+           f'IFS(AND(G{r}>=3000.01,G{r}<=5000),{p3},'
+           f'N(E{r})<{g},0,'
+           f'AND(G{r}>=1,G{r}<=100),{p1},'
+           f'AND(G{r}>100,G{r}<=3000),{p2},'
+           f'TRUE,0))')
+    op = (f'IF(N(E{r})<{g},0,'
+          f'IFS(AND(G{r}>=1,G{r}<=100),{o1},'
+          f'AND(G{r}>100,G{r}<=700),{o2},'
+          f'AND(G{r}>=900,G{r}<=1000),{o2},'
+          f'TRUE,0))')
     nba = (f'IF({bans},0,'
-           f'IFS(AND(G{r}>=1,G{r}<=240),{b1},'
-           f'AND({sel},G{r}>240,G{r}<=500),{b1},'
+           f'IFS(AND(G{r}>=1,G{r}<=800),{b1},'
            f'AND(G{r}>=900,G{r}<=1000),{b1},'
            f'AND(G{r}>1000,G{r}<=1400,N(E{r})>={g}),{b2},'
            f'TRUE,0))')
     mlb = (f'IF(N(E{r})<{g},0,'
            f'IFS(AND(G{r}>=1,G{r}<=30),{m1},'
-           f'AND(G{r}>30,G{r}<=300),{m2},'
+           f'AND(G{r}>30,G{r}<=240),{m2},'
+           f'AND(G{r}>=250,G{r}<=700),{m2},'
            f'TRUE,0))')
     nfl = (f'IF(N(E{r})<{g},0,'
-           f'IFS(AND(G{r}>=1,G{r}<=300),{f1},'
+           f'IFS(AND(G{r}>=1,G{r}<=220),{f1},'
            f'TRUE,0))')
     rate = (f'IFS('
             f'F{r}="pokemon",{pok},'
