@@ -278,9 +278,9 @@ PSA_ONE_PIECE_PER_CARD_TIERS = [
 # NFL rates: $1-$300 → 90% (general reach cut from $600, Oct 5); QB GOATs
 # $600-$1,000 → 88%, $1,400-$2,000 → 90%. PSA 7+.
 PSA_FOOTBALL_PER_CARD_TIERS = [
-    (0, 500.01, 0.90),
-    (500.01, 1000.01, 0.88),
-    (1000.01, float('inf'), 0.90),
+    (0, 30.01, 1.00),              # $1-$30 → 100% (Kevin, Oct 15)
+    (30.01, 220.01, 0.90),         # $30-$220 → 90%
+    (220.01, float('inf'), 0.90),  # unreachable (ceiling $220)
 ]
 
 # ── BASKETBALL-SPECIFIC REJECTION RULES ──────────────────────────────────────────
@@ -2544,7 +2544,8 @@ def build_sheet_h_formula(r, pokemon_tiers=None, sport_rates=None):
            f'AND(G{r}>=250,G{r}<=700),{m2},'
            f'TRUE,0))')
     nfl = (f'IF(N(E{r})<{g},0,'
-           f'IFS(AND(G{r}>=1,G{r}<=220),{f1},'
+           f'IFS(AND(G{r}>=1,G{r}<=30),{f1},'
+           f'AND(G{r}>30,G{r}<=220),{f2},'
            f'TRUE,0))')
     rate = (f'IFS('
             f'F{r}="pokemon",{pok},'
