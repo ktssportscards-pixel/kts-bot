@@ -157,10 +157,11 @@ POKEMON_CERT_GATE_MAX = 100           # Triumph "7+ CERTS" gate — now only the
 # PIXEL LANE (Oct 16, Kevin): pokemon $100.01-$1,999.99 sells to Pixel's Cards
 # (pixelscardsllc) instead of Triumph — UNLIMITED depth, ANY grade, ANY cert
 # EXCEPT certs starting with 0, sale ≤60d (CL 3+), Kevin gets flat 90% of CLV.
-PIXEL_LANE_LO, PIXEL_LANE_HI = 100.01, 1999.99   # conf 3+ tier (accepted)
+PIXEL_LANE_LO, PIXEL_LANE_HI = 17, 1999.99       # conf 3+ tier (accepted) — ALL pokemon $17+ is Pixel now
 # Pixel also takes $2,000-$5,000 at conf 5 FIRM — handled as the big-band flag
 # (POKEMON_BIG_BAND_MIN) so Kevin eyeballs the 5/5 bars before locking.
-PIXEL_WHOLE_LO, PIXEL_WHOLE_HI = 100.01, 5000     # full Pixel range ($100-$5,000): any grade, any cert except leading-0
+PIXEL_WHOLE_LO, PIXEL_WHOLE_HI = 17, 5000         # full Pixel range ($17-$5,000): any grade, any cert except leading-0
+POKEMON_MIN_PRICE = 17            # Pixel floor — Pokémon under $17 declined (Option A, Oct 16)
 POKEMON_MIN_CERT_SERIES = 70_000_000  # cert NUMBER must be ≥ 70,000,000 — the "7 series"
                                       # (8-digit certs starting 7-9, plus every 9-digit cert).
                                       # Kevin Oct 4: Triumph REJECTS Pokémon below a 7 cert;
@@ -257,7 +258,7 @@ def apply_avg3_value(comp, threshold=0):
 # All rates are pure value lookups (Oct 2 flyer) — the select-player name
 # lists only gate WHICH values are reachable (classify), never the rate.
 PSA_POKEMON_PER_CARD_TIERS = [
-    (0, 100.01, 0.91),             # $1-$100 → 91% (Triumph)
+    (0, 100.01, 0.90),             # $17-$100 → 90% (Pixel, break-even — volume bait)
     (100.01, float('inf'), 0.87),  # $100-$5,000 → 87% (Pixel, flat 90% CLV - 3pt)
 ]
 # NBA (Oct 2): $1-$1,000 → 95% (ANY grade); $1,000-$3,500 → 92% (PSA 7+);
@@ -1183,29 +1184,17 @@ def classify_psa_comp(comp):
     # Pokémon (Oct 3 allocation update): unlimited ≤$100, slot-limited
     # $100-$200 / $200-$300 / $1,400-$1,800, everything else rejected.
     if sport == 'pokemon':
-        _band = pokemon_band_for(cv)
-        if _band is None:
+        if cv < POKEMON_MIN_PRICE:
             return ('rejected',
-                    f"${cv:,.2f} (outside our $1-$5,000 Pokémon range this weekend)")
-        _left = (pokemon_quota_left(_band[2], _band[3])
-                 if (_band is not None and _band[2] is not None) else None)
-        if _left is not None and _left <= 0:
+                    f"${cv:,.2f} (under our ${POKEMON_MIN_PRICE} Pokémon minimum)")
+        if cv > PIXEL_WHOLE_HI:
             return ('rejected',
-                    f"${cv:,.2f} (our ${_band[0]:g}-${_band[1]:g} Pokémon "
-                    f"slots are all taken this weekend)")
+                    f"${cv:,.2f} (over our ${PIXEL_WHOLE_HI:,} Pokémon max this weekend)")
     pokemon_big = (sport == 'pokemon' and cv >= POKEMON_BIG_BAND_MIN)
     pokemon_pixel = (sport == 'pokemon' and PIXEL_LANE_LO <= cv <= PIXEL_LANE_HI)
-    # Cert gate (Triumph "7+ CERTS"): Pokémon ≤ $100 must be a 7-series cert
-    # or newer — cert number ≥ 70,000,000. Non-numeric certs fail closed.
-    if sport == 'pokemon' and cv <= POKEMON_CERT_GATE_MAX:
-        _cert_s = str(comp.get('cert', '')).strip()
-        if not _cert_s.isdecimal() or int(_cert_s) < POKEMON_MIN_CERT_SERIES:
-            return ('rejected',
-                    f"cert {comp.get('cert')} is below the 7 series — we can only "
-                    f"take 7+ certs (cert # 70,000,000 and up) on Pokémon under "
-                    f"${POKEMON_CERT_GATE_MAX:,}")
-    # Pixel: any cert EXCEPT ones starting with 0 (fail closed on blanks),
-    # across the whole $100-$5,000 Pixel range (both conf-3 and conf-5 tiers).
+    # Pixel: ALL Pokémon $17-$5,000 — any cert EXCEPT ones starting with 0
+    # (fail closed on blanks). No 7-series gate (that was Triumph; Pokémon is
+    # all-Pixel now, Option A Oct 16).
     if sport == 'pokemon' and PIXEL_WHOLE_LO <= cv <= PIXEL_WHOLE_HI:
         _cert_s = str(comp.get('cert', '')).strip()
         if not _cert_s or _cert_s.startswith('0'):
@@ -1913,7 +1902,7 @@ _POKEMON_RAW_OFF_LINE = (
 WELCOME_MSG = (
     "👋 Welcome to KTS Collectibles!\n\n"
     "We're currently buying (PSA graded slabs — send your cert numbers):\n"
-    "• **Pokémon** — $1–$5,000 🔥 (ANY grade + ANY cert $100–$5,000!)\n"
+    "• **Pokémon** — $17–$5,000 🔥 ANY grade · ANY cert — 90% up to $100, 87% above\n"
     "• **One Piece** — $1–$700 and $900–$1,000\n"
     "• **Baseball / MLB** — $1–$240 and $250–$700\n"
     "• **Basketball / NBA** — $1–$800 and $900–$1,400\n"
@@ -2538,11 +2527,10 @@ def build_sheet_h_formula(r, pokemon_tiers=None, sport_rates=None):
               f'TRUE,30)')
     # Pokémon bands (Oct 3): $1-100, $100-300, $1,400-1,800 — slot quotas are
     # bot-side only (a formula can't count), so the sheet shows the band rate.
-    pok = (f'IF(AND(G{r}<={POKEMON_CERT_GATE_MAX},IFERROR(B{r}*1,0)<{cs}),0,'
-           f'IF(AND(G{r}>100,G{r}<=5000,LEFT(B{r}&"",1)="0"),0,'
-           f'IFS(AND(G{r}>100,G{r}<=5000),{p2},'
-           f'N(E{r})<{g},0,'
-           f'AND(G{r}>=1,G{r}<=100),{p1},'
+    pok = (f'IF(G{r}<17,0,'
+           f'IF(AND(G{r}>=17,G{r}<=5000,LEFT(B{r}&"",1)="0"),0,'
+           f'IFS(AND(G{r}>=17,G{r}<=100),{p1},'
+           f'AND(G{r}>100,G{r}<=5000),{p2},'
            f'TRUE,0)))')
     op = (f'IF(N(E{r})<{g},0,'
           f'IFS(AND(G{r}>=1,G{r}<=100),{o1},'
