@@ -153,7 +153,11 @@ def is_pokemon_nvd(comp):
 # deploy.
 POKEMON_BUY_BANDS = [(lo, hi) for lo, hi, _k, _c in POKEMON_QUOTA_BANDS]
 POKEMON_BIG_BAND_MIN = 3000.01        # $3,000+ = any grade, no sale-age gate, flag for Kevin
-POKEMON_CERT_GATE_MAX = 1000          # Triumph "7+ CERTS" gate applies at ≤$1,000
+POKEMON_CERT_GATE_MAX = 100           # Triumph "7+ CERTS" gate — now only the ≤$100 lane
+# PIXEL LANE (Oct 16, Kevin): pokemon $100.01-$1,999.99 sells to Pixel's Cards
+# (pixelscardsllc) instead of Triumph — UNLIMITED depth, ANY grade, ANY cert
+# EXCEPT certs starting with 0, sale ≤60d (CL 3+), Kevin gets flat 90% of CLV.
+PIXEL_LANE_LO, PIXEL_LANE_HI = 100.01, 1999.99
 POKEMON_MIN_CERT_SERIES = 70_000_000  # cert NUMBER must be ≥ 70,000,000 — the "7 series"
                                       # (8-digit certs starting 7-9, plus every 9-digit cert).
                                       # Kevin Oct 4: Triumph REJECTS Pokémon below a 7 cert;
@@ -1188,7 +1192,8 @@ def classify_psa_comp(comp):
                     f"${cv:,.2f} (our ${_band[0]:g}-${_band[1]:g} Pokémon "
                     f"slots are all taken this weekend)")
     pokemon_big = (sport == 'pokemon' and cv >= POKEMON_BIG_BAND_MIN)
-    # Cert gate (Triumph "7+ CERTS"): Pokémon ≤ $1,000 must be a 7-series cert
+    pokemon_pixel = (sport == 'pokemon' and PIXEL_LANE_LO <= cv <= PIXEL_LANE_HI)
+    # Cert gate (Triumph "7+ CERTS"): Pokémon ≤ $100 must be a 7-series cert
     # or newer — cert number ≥ 70,000,000. Non-numeric certs fail closed.
     if sport == 'pokemon' and cv <= POKEMON_CERT_GATE_MAX:
         _cert_s = str(comp.get('cert', '')).strip()
@@ -1197,9 +1202,16 @@ def classify_psa_comp(comp):
                     f"cert {comp.get('cert')} is below the 7 series — we can only "
                     f"take 7+ certs (cert # 70,000,000 and up) on Pokémon under "
                     f"${POKEMON_CERT_GATE_MAX:,}")
+    # Pixel lane: any cert EXCEPT ones starting with 0 (fail closed on blanks).
+    if pokemon_pixel:
+        _cert_s = str(comp.get('cert', '')).strip()
+        if not _cert_s or _cert_s.startswith('0'):
+            return ('rejected',
+                    f"cert {comp.get('cert')} — we can't take certs starting "
+                    f"with 0 on Pokémon ${PIXEL_LANE_LO:,.0f}-${PIXEL_LANE_HI:,.0f}")
     # Grade floor PSA 7+ — EXCEPT Pokémon $3,000+ (flyer: any grade) and
     # NBA ≤ $1,000 (flyer row carries no PSA badge; mirrors Triumph).
-    any_grade = pokemon_big or (sport == 'basketball' and cv <= 1000)
+    any_grade = pokemon_big or pokemon_pixel or (sport == 'basketball' and cv <= 1000)
     if not any_grade:
         grade_raw = str(comp.get('grade') or '').replace('PSA', '').strip()
         try:
@@ -1222,7 +1234,7 @@ def classify_psa_comp(comp):
     #   MLB: ≤$100 any sale ever · >$100 60d (CL 3+)
     #   NFL: ≤$100 any sale ever · >$100 60d (CL 3+, GOAT bands included)
     if sport == 'pokemon':
-        max_age = float('inf') if pokemon_big else (60 if cv <= 100 else 30)
+        max_age = float('inf') if pokemon_big else (60 if (cv <= 100 or pokemon_pixel) else 30)
     elif sport == 'one piece':
         max_age = 60 if cv <= 100 else 30
     elif sport == 'basketball':
@@ -1897,7 +1909,7 @@ _POKEMON_RAW_OFF_LINE = (
 WELCOME_MSG = (
     "👋 Welcome to KTS Collectibles!\n\n"
     "We're currently buying (PSA graded slabs — send your cert numbers):\n"
-    "• **Pokémon** — $1–$5,000 🔥 (7-series certs under $1,000)\n"
+    "• **Pokémon** — $1–$5,000 🔥 (ANY grade + ANY cert $100–$2,000!)\n"
     "• **One Piece** — $1–$700 and $900–$1,000\n"
     "• **Baseball / MLB** — $1–$240 and $250–$700\n"
     "• **Basketball / NBA** — $1–$800 and $900–$1,400\n"
@@ -2523,11 +2535,13 @@ def build_sheet_h_formula(r, pokemon_tiers=None, sport_rates=None):
     # Pokémon bands (Oct 3): $1-100, $100-300, $1,400-1,800 — slot quotas are
     # bot-side only (a formula can't count), so the sheet shows the band rate.
     pok = (f'IF(AND(G{r}<={POKEMON_CERT_GATE_MAX},IFERROR(B{r}*1,0)<{cs}),0,'
+           f'IF(AND(G{r}>100,G{r}<2000,LEFT(B{r}&"",1)="0"),0,'
            f'IFS(AND(G{r}>=3000.01,G{r}<=5000),{p3},'
+           f'AND(G{r}>100,G{r}<2000),{p2},'
            f'N(E{r})<{g},0,'
            f'AND(G{r}>=1,G{r}<=100),{p1},'
-           f'AND(G{r}>100,G{r}<=3000),{p2},'
-           f'TRUE,0))')
+           f'AND(G{r}>=2000,G{r}<=3000),{p2},'
+           f'TRUE,0)))')
     op = (f'IF(N(E{r})<{g},0,'
           f'IFS(AND(G{r}>=1,G{r}<=100),{o1},'
           f'AND(G{r}>100,G{r}<=700),{o2},'
