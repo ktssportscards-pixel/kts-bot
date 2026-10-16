@@ -102,6 +102,13 @@ PSA_MAX_AGE_DAYS = 30
 # Oct 2 weekend flyer. Ceilings here are the MAX-POSSIBLE per sport (select
 # players included); non-select caps are enforced in classify via the
 # *_GENERAL_MAX constants + the Triumph select lists (triumph_lists.py).
+# Oct 16: Pokémon (Pixel) is live nightly now; Sports + One Piece (Triumph)
+# don't open until Sat 3 AM ET — hold them with a friendly message until then
+# (flip True + wire poketrader address/min-lot before Saturday).
+SPORTS_OP_LIVE = False
+SPORTS_OP_HOLD_MSG = ("🗓️ Sports & One Piece open **Saturday 3 AM ET** — Pokémon "
+                      "is live right now, so send those through, and resubmit "
+                      "your sports/One Piece Saturday!")
 PSA_SPORT_MAX_PRICE = {
     'pokemon': 5000,      # Oct 17-18 weekend: continuous $1-$5,000, fat pools every band
     'one piece': 1000,    # Oct 17-18: $1-$700 + $900-$1,000 (gap 700-900 in classify)
@@ -1125,6 +1132,8 @@ def classify_psa_comp(comp):
     if cv is None:
         return ('rejected', 'no CL value')
     sport = normalize_sport(comp.get('sport'))
+    if not SPORTS_OP_LIVE and sport in ('one piece', 'basketball', 'mlb', 'football'):
+        return ('rejected', SPORTS_OP_HOLD_MSG)
     max_price = PSA_SPORT_MAX_PRICE.get(sport)
     if max_price is None:
         sport_label = sport or 'unknown sport'
