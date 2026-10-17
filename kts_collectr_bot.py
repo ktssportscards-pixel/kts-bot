@@ -39,7 +39,7 @@ import os
 import json
 import pandas as pd
 import pokemon_species
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 
@@ -105,10 +105,21 @@ PSA_MAX_AGE_DAYS = 30
 # Oct 16: Pokémon (Pixel) is live nightly now; Sports + One Piece (Triumph)
 # don't open until Sat 3 AM ET — hold them with a friendly message until then
 # (flip True + wire poketrader address/min-lot before Saturday).
-SPORTS_OP_LIVE = False
+# Oct 16: Sports + One Piece (Triumph/Doral) auto-open Sat Oct 17, 3 AM ET.
+# Time-gated so the go-live needs NO second deploy — before this instant the
+# hold message fires exactly as before; at/after it, sports/OP classify
+# normally. 3 AM EDT (UTC-4, DST still on through Nov 1 2026) = 07:00 UTC.
+SPORTS_OP_GO_LIVE_UTC = datetime(2026, 10, 17, 7, 0, tzinfo=timezone.utc)
+def sports_op_live():
+    return datetime.now(timezone.utc) >= SPORTS_OP_GO_LIVE_UTC
 SPORTS_OP_HOLD_MSG = ("🗓️ Sports & One Piece open **Saturday 3 AM ET** — Pokémon "
                       "is live right now, so send those through, and resubmit "
                       "your sports/One Piece Saturday!")
+# Sports + One Piece (slabs) ship to the Doral address and require the sports/OP
+# slab portion to total $1,500+ (combined across MLB/NBA/NFL/One Piece) — that's
+# what justifies the separate address. Pokémon has NO minimum and ships to VA.
+SPORTS_OP_MIN_LOT = 1500
+SPORTSOP_SPORTS = ('one piece', 'basketball', 'mlb', 'football')
 PSA_SPORT_MAX_PRICE = {
     'pokemon': 5000,      # Oct 17-18 weekend: continuous $1-$5,000, fat pools every band
     'one piece': 1000,    # Oct 17-18: $1-$700 + $900-$1,000 (gap 700-900 in classify)
@@ -1132,7 +1143,7 @@ def classify_psa_comp(comp):
     if cv is None:
         return ('rejected', 'no CL value')
     sport = normalize_sport(comp.get('sport'))
-    if not SPORTS_OP_LIVE and sport in ('one piece', 'basketball', 'mlb', 'football'):
+    if not sports_op_live() and sport in SPORTSOP_SPORTS:
         return ('rejected', SPORTS_OP_HOLD_MSG)
     max_price = PSA_SPORT_MAX_PRICE.get(sport)
     if max_price is None:
@@ -1578,7 +1589,11 @@ async def price_and_send_psa_offer(channel, channel_id, username, certs, comps,
         str(c.get('cert', '')).strip(): float(c['clValue'])
         for c in accepted if c.get('clValue') is not None
     }
-    add_slab_values(channel_id, slab_value_map)
+    slab_sport_map = {
+        str(c.get('cert', '')).strip(): normalize_sport(c.get('sport'))
+        for c in accepted if c.get('clValue') is not None
+    }
+    add_slab_values(channel_id, slab_value_map, slab_sport_map)
 
     breakdown_lines = [
         f"• {_sport_label(s['sport'])}: {s['count']} card{'s' if s['count'] != 1 else ''}, "
@@ -1774,7 +1789,7 @@ MIN_SLAB_COUNT = 0     # (standing values to restore after: $1,000 / 10)
 lot_state = {}
 
 def _lot_entry(channel_id):
-    return lot_state.setdefault(channel_id, {"singles": {}, "slab_certs": {}})
+    return lot_state.setdefault(channel_id, {"singles": {}, "slab_certs": {}, "slab_sport": {}})
 
 def set_singles_value(channel_id, totals_by_game):
     """Latest Collectr CSV is the current truth for singles — replace, don't add.
@@ -1792,11 +1807,31 @@ def singles_by_game(channel_id):
         "pokemon": float(singles.get("pokemon", 0)),
     }
 
-def add_slab_values(channel_id, cert_value_map):
-    """Accumulate accepted slab certs (deduped by cert so re-sends don't double-count)."""
+def add_slab_values(channel_id, cert_value_map, cert_sport_map=None):
+    """Accumulate accepted slab certs (deduped by cert so re-sends don't double-count).
+    cert_sport_map (cert -> normalized sport) feeds the per-lane split that routes
+    Pokémon → VA and Sports/One Piece → Doral and enforces the sports/OP minimum."""
     entry = _lot_entry(channel_id)
+    entry.setdefault("slab_sport", {})
     for cert, val in cert_value_map.items():
         entry["slab_certs"][str(cert)] = float(val or 0)
+    for cert, sp in (cert_sport_map or {}).items():
+        entry["slab_sport"][str(cert)] = sp
+
+def lot_value_by_lane(channel_id):
+    """(pokemon_slab_value, sportsop_slab_value) for the running lot.
+    Unknown/missing sport falls into the Pokémon (VA, no-minimum) lane — the
+    least-disruptive default that never misroutes to Doral or wrongly holds."""
+    entry = lot_state.get(channel_id) or {}
+    certs = entry.get("slab_certs", {}) or {}
+    sports = entry.get("slab_sport", {}) or {}
+    pk = so = 0.0
+    for cert, val in certs.items():
+        if sports.get(str(cert)) in SPORTSOP_SPORTS:
+            so += float(val or 0)
+        else:
+            pk += float(val or 0)
+    return pk, so
 
 def lot_summary(channel_id):
     """Return (slab_count, slab_value, singles_value, combined_value).
@@ -1837,6 +1872,19 @@ def proceed_or_hold_tail(channel_id):
     Otherwise return a customer-facing message listing exactly what's missing,
     to use INSTEAD of the proceed prompt.
     """
+    # Sports/One Piece lane: needs $1,500+ (ships to the separate FL address).
+    # Pokémon has no minimum, so a mixed lot can still proceed with its Pokémon.
+    pk_lane, so_lane = lot_value_by_lane(channel_id)
+    if 0 < so_lane < SPORTS_OP_MIN_LOT:
+        short = SPORTS_OP_MIN_LOT - so_lane
+        if pk_lane > 0:
+            return (f"Let me know if you'd like to proceed with your **Pokémon**! "
+                    f"⏳ Your **Sports/One Piece** (**${so_lane:,.2f}**) is held — that lane needs "
+                    f"**${SPORTS_OP_MIN_LOT:,}+** (it ships to a separate address). "
+                    f"You're **${short:,.2f}** short, so add more to include it.")
+        return (f"📊 Your **Sports & One Piece** slabs total **${so_lane:,.2f}** — the minimum for "
+                f"that lane is **${SPORTS_OP_MIN_LOT:,}** (it ships to a separate address, so we batch it). "
+                f"You're **${short:,.2f}** short. Add more and resubmit, or send **Pokémon** (no minimum)!")
     if lot_qualifies(channel_id):
         return None
     slab_count, slab_value, singles, combined = lot_summary(channel_id)
@@ -1919,7 +1967,9 @@ WELCOME_MSG = (
     + _POKEMON_RAW_WELCOME_LINE +
     "\n"
     "⚠️ We are **not** buying raw cards — PSA slabs only.\n\n"
-    "📊 **No minimum lot size this week** — send what you've got!\n"
+    "📊 **Pokémon:** no minimum — send what you've got!\n"
+    "🗓️ **Sports & One Piece** open **Saturday 3 AM ET** — those need **$1,500+** "
+    "(combined) and ship to a **separate address** from your Pokémon.\n"
     + _POKEMON_RAW_MIN_LINE +
     "\nWhat are you looking to sell?"
 )
@@ -1943,6 +1993,94 @@ SHIPPING_MSG = (
     "👉 Best move: **overnight it Monday so it lands Tuesday morning** to make that week's payout. Payment via wire or ACH ⚡\n\n"
     "Once you've shipped, **drop your tracking number here** so Kevin can keep an eye out!"
 )
+
+# ── DUAL-ADDRESS SHIPPING (Oct 17) ────────────────────────────────────────────
+# Pokémon → Virginia Beach (Pixel), NO minimum. Sports + One Piece → Doral
+# (Triumph), only if that portion totals $1,500+. A mixed lot ships as TWO
+# packages. SHIPPING_MSG above stays the fail-open default (VA) for the
+# redeploy-lost-state path.
+_VA_BLOCK = (
+    "Kevin Smith\n"
+    "3630 S Plaza Trail\n"
+    "Suite 150-E\n"
+    "Virginia Beach, VA 23452"
+)
+_DORAL_BLOCK = (
+    "Kevin Smith\n"
+    "8266 NW 14th St\n"
+    "Doral, FL 33126-1703"
+)
+_SHIP_METHOD_TAIL = (
+    "🚚 **Shipping method — required:** **UPS Next Day Air A.M.** (overnight, morning delivery) — "
+    "nothing slower (no standard overnight, 2-Day, or ground). Packages **must be in hand by "
+    "Tuesday 9 AM**, so ship **Monday at the latest**.\n\n"
+    "📥 **Packaging:**\n"
+    "• **Slabs:** ship as-is — no sleeves or stickers.\n"
+    "• **Raw cards:** penny sleeve only — no top loaders.\n\n"
+    "🗓️ **Payouts run Fridays.** First come, first serve — you join the queue the moment your package is scanned in on arrival.\n"
+    "• In hand **Tuesday** → usually paid that **Friday**\n"
+    "• Arrives later in the week → rolls into the **next** Friday payout.\n\n"
+    "👉 Best move: **overnight it Monday so it lands Tuesday morning** to make that week's payout. Payment via wire or ACH ⚡\n\n"
+    "Once you've shipped, **drop your tracking number here** so Kevin can keep an eye out!"
+)
+
+def compose_shipping(channel_id):
+    """Return (message, gave_address, kevin_note) for a lot that has cleared the
+    ship gate. Routes Pokémon → VA and qualifying Sports/OP → Doral; a mixed lot
+    gets both as two packages. Sports/OP under $1,500 is held (no FL address)
+    while any Pokémon still ships to VA."""
+    pk, so = lot_value_by_lane(channel_id)
+    so_ok = so >= SPORTS_OP_MIN_LOT
+    has_pk, has_so = pk > 0, so > 0
+    # Fail open (redeploy lost state): no recorded lanes -> default VA message.
+    if not has_pk and not has_so:
+        return SHIPPING_MSG, True, "VA (default/no lot on record)"
+    # Sports/OP present but short AND no Pokémon -> pure hold, no address.
+    if has_so and not so_ok and not has_pk:
+        short = SPORTS_OP_MIN_LOT - so
+        msg = (
+            f"📊 **Almost there!** Your Sports & One Piece slabs total **${so:,.2f}** — "
+            f"our minimum for that lane is **${SPORTS_OP_MIN_LOT:,}** (Sports/One Piece ship to a "
+            f"separate address, so we batch them). You're **${short:,.2f}** short.\n\n"
+            f"Add more Sports/One Piece slabs to hit **${SPORTS_OP_MIN_LOT:,}+** and resubmit — "
+            f"or send any **Pokémon** (no minimum) and I'll get you shipping right away! 🙌"
+        )
+        return msg, False, f"HELD — sports/OP ${so:,.2f} < ${SPORTS_OP_MIN_LOT:,}, no pokemon"
+    lanes = []
+    kparts = []
+    if has_pk:
+        lanes.append(("🟡 **Pokémon → ship to:**", _VA_BLOCK))
+        kparts.append(f"pokemon ${pk:,.2f} → VA")
+    if has_so and so_ok:
+        lanes.append(("🔵 **Sports & One Piece → ship to:**", _DORAL_BLOCK))
+        kparts.append(f"sports/OP ${so:,.2f} → Doral")
+    if len(lanes) == 2:
+        head = ("📦 **Awesome, let's do it!** Your lot splits across two lanes — please ship as "
+                "**two separate packages** to the addresses below (you're paid once each arrives and is processed).\n\n")
+        body = "\n\n".join(f"{label}\n{block}" for label, block in lanes)
+    else:
+        label, block = lanes[0]
+        head = ("📦 **Awesome, let's do it!** Ship your cards to the address below — "
+                "you'll be paid out once your package arrives and is processed.\n\n")
+        body = f"{label}\n{block}"
+    tail_note = ""
+    if has_so and not so_ok:  # pokemon ships, sports/OP held
+        short = SPORTS_OP_MIN_LOT - so
+        tail_note = (
+            f"\n\n⏳ **Heads up:** your Sports/One Piece (**${so:,.2f}**) is under the "
+            f"**${SPORTS_OP_MIN_LOT:,}** minimum for that lane (it ships separately to our FL address). "
+            f"You're **${short:,.2f}** short — add more and I'll send that address too. "
+            f"Your Pokémon above is good to ship now!"
+        )
+        kparts.append(f"sports/OP ${so:,.2f} HELD (<${SPORTS_OP_MIN_LOT:,})")
+    msg = head + body + tail_note + "\n\n" + _SHIP_METHOD_TAIL
+    return msg, True, " · ".join(kparts)
+
+def ship_blocked_sportsop_only(channel_id):
+    """True when the ONLY thing on the lot is sports/OP under the $1,500 minimum
+    (nothing can ship yet). Pokémon on the lot always clears this."""
+    pk, so = lot_value_by_lane(channel_id)
+    return (so > 0 and so < SPORTS_OP_MIN_LOT and pk <= 0)
 
 AGREE_KEYWORDS = ["ship", "proceed"]
 
@@ -4001,8 +4139,8 @@ async def on_message(message):
 
     # ── AGREED / SHIPPING ─────────────────────────────────────────────────────────
     if is_agreeing(text):
-        # Block shipping unless the recorded lot meets the buying minimums.
-        # Fail OPEN when we have no recorded lot (e.g. bot was redeployed and lost
+        # Legacy combined-lot minimum (currently MIN_LOT_VALUE=0, so inert) — still
+        # honored if ever re-enabled. Fail OPEN with no recorded lot (redeploy wiped
         # in-memory state) so we never stonewall a seller who already got an offer.
         if channel_id in lot_state and not lot_qualifies(channel_id):
             _sc, _sv, _si, _cb = lot_summary(channel_id)
@@ -4013,7 +4151,16 @@ async def on_message(message):
                 message.channel
             )
             return
-        await message.channel.send(SHIPPING_MSG)
+        # Lane-aware: Pokémon → VA (no min); Sports/One Piece → Doral ($1,500+).
+        ship_msg, gave_addr, knote = compose_shipping(channel_id)
+        await message.channel.send(ship_msg)
+        if not gave_addr:
+            # Sports/OP-only under the $1,500 minimum — held, no address sent.
+            await ping_kevin(
+                f"⏳ **{username} typed 'ship' — {knote}.** Address NOT sent.",
+                message.channel
+            )
+            return
         # Snapshot the accepted ship-list for the local ticket tracker (GET /tickets).
         try:
             _rec = record_accepted_ship_list(channel_id, username)
@@ -4022,7 +4169,7 @@ async def on_message(message):
             print(f"ship-list record failed (non-critical): {e}")
         _rec_note = (f" 📦 Ship-list recorded ({len(_rec['certs'])} certs) — tracker → Sync from bot."
                      if _rec else " ⚠️ No lot on record to snapshot (redeploy?) — add this one to the tracker manually.")
-        await ping_kevin(f"✅ **{username} agreed** — shipping address sent.{_rec_note}", message.channel)
+        await ping_kevin(f"✅ **{username} agreed** — shipping sent ({knote}).{_rec_note}", message.channel)
         # Resolve the sheet through the cache + Drive fallback (channel_sheet used
         # to be memory-only, so a redeploy between quote and "ship" silently
         # skipped the tracking row).
