@@ -1053,6 +1053,44 @@ def _comp_is_bad(c):
     under load, or of a poisoned cache entry)."""
     return (not c) or (not c.get('found')) or (c.get('clValue') is None)
 
+# The helper answers found=false for TWO very different things: CardLadder truly
+# has no such card, or the scrape itself broke (CardLadder page.goto timeout, the
+# page never opened, vision JSON unparseable). Only the first is a real "no comp".
+# Oct 18: a lone cert hit a CardLadder timeout and jon.mobile was told "no comp on
+# CardLadder" for a $44k Skyridge Houndoom that loaded fine a minute later.
+_HELPER_INFRA_NOTE_PREFIXES = ("lookup error", "page open failed", "parse error")
+
+def _comp_is_infra_error(c):
+    """True when we have no real answer for a cert: no entry at all (its chunk
+    failed) or a found=false whose note is one of the helper's infrastructure
+    errors. A genuine found=false (no such note) is a real answer — False."""
+    if not c:
+        return True
+    if c.get('found'):
+        return False
+    note = str(c.get('note') or '').strip().lower()
+    return note.startswith(_HELPER_INFRA_NOTE_PREFIXES)
+
+def _uncovered_certs(certs, comps):
+    """Certs with no usable helper answer yet (missing or infra error). Genuine
+    not-founds count as covered — the card really isn't on CardLadder."""
+    by_cert = {str(c.get('cert', '')).strip(): c for c in comps or []}
+    return [str(c).strip() for c in certs if _comp_is_infra_error(by_cert.get(str(c).strip()))]
+
+# When EVERY cert came back bad, the inline re-check only runs for a ticket that
+# fits in ONE helper chunk (a lone timed-out cert like jon.mobile's): exactly one
+# extra chunk (~90s max) under _HELPER_LOCK. Bigger all-bad tickets go to the
+# background retry instead — re-scraping 20 timing-out certs inline held the lock
+# ~16 extra min while every other ticket queued behind it.
+HELPER_ALL_BAD_RETRY_CAP = HELPER_CHUNK_SIZE
+
+# Customer-facing reason for a cert whose comp didn't load (customers read it).
+COMP_NOT_LOADED_MSG = "CardLadder didn't load this one — resend it in a few minutes and I'll re-check"
+# Column G marker on the (customer-visible) buying sheet for the same case. Text,
+# not blank: rebuild_lot_from_sheets reads a blank G as $0 and would drop a cert
+# accepted on an earlier sheet; text is skipped. !requoteall treats it as unfilled.
+SHEET_NOT_LOADED_MARK = "didn't load — resend"
+
 def _purge_helper_cache(certs):
     """Best-effort DELETE /cache/<cert> on the helper so a retry re-scrapes fresh
     instead of being served the same poisoned cache entry."""
@@ -1096,15 +1134,20 @@ def _lookup_comps_once(cert_list):
         raise last_error
     return all_results
 
-def lookup_comps(certs):
+def lookup_comps(certs, recheck_all_bad=True):
     """
     Call helper.ktscollectibles.com/comp/batch and return the merged results list.
     Each result: {cert, found, clValue, cardName, grade, recentSales, avg3Sales, salesCount, note}
     Returns [] if the helper key isn't set; raises only if every chunk fails.
     Serialized across tickets via _HELPER_LOCK. Bad results (missing / found=false /
-    no value) from a PARTIALLY successful pass get one purge-cache-and-retry pass —
-    if everything came back bad the helper itself is down or rate-limited, and a
-    second hammering would only make that worse.
+    no value) from a PARTIALLY successful pass get one purge-cache-and-retry pass.
+    When EVERYTHING came back bad, a re-check runs only if recheck_all_bad, the
+    ticket fits in HELPER_ALL_BAD_RETRY_CAP certs (one chunk), and the bad results
+    could plausibly recover (helper infra error / found-but-no-value — a genuine
+    found=false would just be re-scraped to the same answer). That re-checks a
+    1-cert ticket that hit a CardLadder timeout (Oct 18) without hammering a
+    down / rate-limited helper; bigger all-bad tickets go to the background retry,
+    which is itself the retry loop and passes recheck_all_bad=False.
     """
     if not HELPER_API_KEY or not certs:
         return []
@@ -1114,14 +1157,24 @@ def lookup_comps(certs):
         results = _lookup_comps_once(cert_list)
         by_cert = {str(c.get('cert', '')).strip(): c for c in results}
         bad = [c for c in cert_list if _comp_is_bad(by_cert.get(c))]
-        if bad and len(bad) < len(cert_list):
+        if bad and results and len(bad) == len(cert_list):
+            if recheck_all_bad and len(cert_list) <= HELPER_ALL_BAD_RETRY_CAP:
+                bad = [c for c in bad if _comp_is_infra_error(by_cert.get(c))
+                       or (by_cert.get(c) or {}).get('found')]
+            else:
+                bad = []
+        if bad and results:
             print(f"Comp second pass: {len(bad)}/{len(cert_list)} bad results — purging cache, retrying")
             _purge_helper_cache(bad)
             _time.sleep(5)
             try:
                 for c in _lookup_comps_once(bad[:100]):
                     k = str(c.get('cert', '')).strip()
-                    if k and (k not in by_cert or not _comp_is_bad(c)):
+                    # Take a good answer; also let a REAL answer (genuine
+                    # not-found / no value) replace a first-pass timeout.
+                    if k and (k not in by_cert or not _comp_is_bad(c)
+                              or (_comp_is_infra_error(by_cert[k])
+                                  and not _comp_is_infra_error(c))):
                         by_cert[k] = c
             except Exception as e:
                 print(f"Comp second pass failed (keeping first-pass results): {e}")
@@ -1133,7 +1186,11 @@ def classify_psa_comp(comp):
     Decide whether a helper comp result fits KTS PSA buying criteria.
     Returns (status, reason): 'accepted'/None or 'rejected'/<short reason>.
     """
-    if not comp or not comp.get('found'):
+    # Helper timeout / missing entry is NOT "no comp" — never tell a customer a
+    # card isn't on CardLadder when the page simply didn't load (customer-visible).
+    if _comp_is_infra_error(comp):
+        return ('rejected', COMP_NOT_LOADED_MSG)
+    if not comp.get('found'):
         return ('rejected', 'no comp on CardLadder')
     cv = comp.get('clValue')
     try:
@@ -1318,6 +1375,9 @@ def fill_buying_sheet(sheet_id, comps, sheet_name="Form. Put Date Here."):
                 updates.append({'range': f'G{row}', 'values': [["Kevin will quote"]]})
             else:
                 updates.append({'range': f'G{row}', 'values': [[c['clValue']]]})
+        elif _comp_is_infra_error(c):
+            # Page timed out / never opened — NOT "not found" (customer-visible).
+            updates.append({'range': f'G{row}', 'values': [[SHEET_NOT_LOADED_MARK]]})
         else:
             updates.append({'range': f'G{row}', 'values': [["not found"]]})
         if c.get('lastSaleDate'):
@@ -1488,6 +1548,7 @@ async def price_and_send_psa_offer(channel, channel_id, username, certs, comps,
     flagged = []   # accepted cards that need Kevin's manual review
     review = []    # 'review' status — priced by hand, not auto-quoted
     review_certs = []
+    unloaded = []  # helper timeout / missing — NOT a reject; resend to re-check
     kevin_lines = []
     quota_filled_notes = []   # Pokémon slot bands that filled during THIS quote
     for cert in certs:
@@ -1532,6 +1593,9 @@ async def price_and_send_psa_offer(channel, channel_id, username, certs, comps,
             name = (c.get('cardName') or '')[:50]
             grade = str(c.get('grade') or '').replace('PSA ', '').strip()
             kevin_lines.append(f"• `{cert}` — ⚠️ **${cv:.2f}** — {name} (PSA {grade}) — {reason}")
+        elif _comp_is_infra_error(c):
+            unloaded.append((cert, reason))
+            kevin_lines.append(f"• `{cert}` — ⚠️ comp didn't load (helper timeout) — re-check")
         else:
             rejected.append((cert, reason))
             kevin_lines.append(f"• `{cert}` — ❌ {reason}")
@@ -1619,14 +1683,26 @@ async def price_and_send_psa_offer(channel, channel_id, username, certs, comps,
             + "\n".join([f"   - `{cert}`: {reason}" for cert, reason in review])
             + "\n"
         )
+    n_unloaded = len(unloaded)
+    unloaded_warning = ""
+    if n_unloaded:
+        unloaded_warning = (
+            f"\n⚠️ **{n_unloaded} comp{'s' if n_unloaded != 1 else ''} didn't load (helper timeout)** — "
+            f"NOT rejected — the customer was asked to re-send it in the ticket "
+            f"(if you type the cert yourself, the new sheet/rates use YOUR username):\n"
+            + "\n".join([f"   - `{cert}`" for cert, _ in unloaded])
+            + "\n"
+        )
     summary = (
         f"📋 **PSA sheet — {username}**\n"
         f"{len(certs)} certs | Accepted **{n_accepted}** | Comp **${total_comp:,.2f}** | Payout **${total_payout:,.2f}**"
         f"{f' | {n_rejected} rejected' if n_rejected else ''}"
+        f"{f' | {n_unloaded} ⚠️ not loaded' if n_unloaded else ''}"
         f"{f' | {n_flagged} ⚠️ flagged' if n_flagged else ''}"
         f"{f' | {n_review} 🟠 manual' if n_review else ''}\n"
         f"{sheet_url}\n"
         + ("\n".join(breakdown_lines) + "\n\n" if breakdown_lines else "\n")
+        + unloaded_warning
         + flag_warning
         + review_warning
     )
@@ -1638,6 +1714,8 @@ async def price_and_send_psa_offer(channel, channel_id, username, certs, comps,
     await ping_kevin(summary + "\n".join(kevin_lines), channel)
 
     # Customer follow-up
+    if n_unloaded and not delayed:
+        _loaded_head = "✅ Comps loaded!"   # not "All" — some need a re-check
     customer_parts = [_loaded_head, ""]
     if n_accepted > 0:
         customer_parts += [
@@ -1654,11 +1732,22 @@ async def price_and_send_psa_offer(channel, channel_id, username, certs, comps,
             customer_parts.append(
                 f"⚠️ {n_rejected} card{'s' if n_rejected != 1 else ''} don't fit our current buying criteria:"
             )
+        elif len(certs) - n_unloaded == 1:
+            customer_parts.append(
+                "⚠️ Unfortunately, this card doesn't fit our current buying criteria:"
+            )
         else:
             customer_parts.append(
-                f"⚠️ Unfortunately, none of these {len(certs)} cards fit our current buying criteria:"
+                f"⚠️ Unfortunately, none of these {len(certs) - n_unloaded} cards fit our current buying criteria:"
             )
         customer_parts += [f"• `{cert}` — {reason}" for cert, reason in rejected]
+    if n_unloaded:
+        # Kept apart from the rejects: these were never judged, just not loaded.
+        customer_parts += [
+            "",
+            f"🔄 {n_unloaded} card{'s' if n_unloaded != 1 else ''} need{'' if n_unloaded != 1 else 's'} a re-check:",
+            *[f"• `{cert}` — {reason}" for cert, reason in unloaded],
+        ]
     if n_review:
         customer_parts += [
             "",
@@ -1670,11 +1759,15 @@ async def price_and_send_psa_offer(channel, channel_id, username, certs, comps,
         if hold_tail:
             customer_parts += ["", hold_tail]
         else:
-            customer_parts += [
-                "",
-                "Let me know if you'd like to proceed!" if not rejected
-                else f"Let me know if you want to proceed with the {n_accepted} we can take.",
-            ]
+            if unloaded:
+                _proceed = (f"Resend the re-check card{'s' if n_unloaded != 1 else ''} first "
+                            f"if you'd like {'them' if n_unloaded != 1 else 'it'} included — otherwise "
+                            f"let me know if you want to proceed with the {n_accepted} we can take.")
+            elif rejected:
+                _proceed = f"Let me know if you want to proceed with the {n_accepted} we can take."
+            else:
+                _proceed = "Let me know if you'd like to proceed!"
+            customer_parts += ["", _proceed]
     customer_parts += [
         "",
         "If you want to see where I'm at on each individual card, click the sheet link above and request access.",
@@ -1697,65 +1790,169 @@ async def price_and_send_psa_offer(channel, channel_id, username, certs, comps,
 async def retry_psa_offer_when_helper_back(channel, channel_id, username, certs,
                                            sheet_id, sheet_url,
                                            max_attempts=15, interval_s=180):
-    """The comp helper was down when these certs arrived. Keep retrying in the
-    background (every 3 min, ~45 min total — the VM watchdog usually revives the
-    helper within one cycle); when it answers, post the quote automatically so the
-    customer never has to re-send anything. Managed exclusively through
-    start_comp_retry / cancel_comp_retry; the identity checks below make a
-    superseded or cancelled task a no-op even mid-lookup."""
+    """The comp helper was down (or every CardLadder page timed out) when these
+    certs arrived. Keep retrying in the background (every 3 min, 15 tries — the VM
+    watchdog usually revives the helper within one cycle); when the comps load,
+    post the quote automatically so the customer never has to re-send anything.
+    Managed exclusively through start_comp_retry / cancel_comp_retry; the identity
+    checks below make a superseded or cancelled task a no-op even mid-lookup.
+
+    Lock-friendly (Oct 18): real answers (good comps AND genuine not-founds) are
+    kept across attempts, so each attempt only looks up certs that still haven't
+    loaded; a probe chunk goes first and the rest is skipped while it still times
+    out; and lookup_comps runs without its inline all-bad re-check (this loop IS
+    the retry). One cert that never loads doesn't hold the whole lot hostage:
+    from the 2nd attempt a lot missing only a few certs is quoted (the stragglers
+    show as "need a re-check"), and at give-up whatever loaded is quoted."""
     def _mine():
         e = pending_comp_retries.get(channel_id)
         return e is not None and e.get("task") is asyncio.current_task()
+    cert_keys = list(dict.fromkeys(str(c).strip() for c in certs))
+    answers = {}   # cert -> latest helper entry (real answers are final)
+    t0 = time.monotonic()
+
+    def _merge(got):
+        for c in got or []:
+            k = str(c.get('cert', '')).strip()
+            if k in cert_keys and _comp_is_infra_error(answers.get(k)):
+                answers[k] = c
+
+    def _uncovered():
+        return _uncovered_certs(cert_keys, list(answers.values()))
+
+    async def _quote():
+        comps = [answers[k] for k in cert_keys if k in answers]
+        try:
+            await price_and_send_psa_offer(channel, channel_id, username, certs,
+                                           comps, sheet_id, sheet_url, delayed=True)
+        except (discord.NotFound, discord.Forbidden):
+            print(f"Comp retry: ticket for {username} closed before comps returned — dropping")
+        except Exception as e:
+            print(f"Delayed quote failed — {username}: {e}")
+            await ping_kevin(
+                f"⚠️ Auto-quote after helper recovery FAILED for **{username}** "
+                f"({len(certs)} certs) — the customer may not have seen a quote. "
+                f"Quote manually: {sheet_url}\nError: {e}",
+                channel
+            )
+
+    def _cert_list(cs):
+        return ", ".join(f"`{c}`" for c in cs[:20]) + (" …" if len(cs) > 20 else "")
+
     try:
-        for _ in range(max_attempts):
+        for attempt in range(1, max_attempts + 1):
             await asyncio.sleep(interval_s)
             if not _mine():
                 return   # superseded or cancelled
+            todo = _uncovered()
+            probe, rest = todo[:HELPER_CHUNK_SIZE], todo[HELPER_CHUNK_SIZE:]
             try:
-                comps = await asyncio.to_thread(lookup_comps, certs)
+                got = await asyncio.to_thread(lookup_comps, probe, recheck_all_bad=False)
             except Exception:
                 continue
-            if not comps:
-                continue
-            # Require FULL coverage before quoting. lookup_comps returns partial
-            # results when only some chunks succeed — exactly what a mid-recovery
-            # helper produces — and quoting then would falsely reject every cert
-            # in the failed chunks ("no comp on CardLadder"). Genuine no-comp
-            # answers still come back as found=False ENTRIES, so a missing cert
-            # means infrastructure failure, not a missing card.
-            returned = {str(c.get('cert', '')).strip() for c in comps}
-            if any(str(c).strip() not in returned for c in certs):
-                print(f"Comp retry: {len(returned)}/{len(certs)} certs returned — "
-                      f"helper still recovering, waiting for full coverage")
-                continue
+            _merge(got)
+            # Probe still all timeouts / missing → CardLadder is still broken;
+            # don't scrape the rest of the lot under the global lock this round.
+            if rest and len(_uncovered_certs(probe, got or [])) < len(probe):
+                try:
+                    _merge(await asyncio.to_thread(lookup_comps, rest, recheck_all_bad=False))
+                except Exception as e:
+                    print(f"Comp retry: rest-of-lot lookup failed ({e}) — next attempt")
+            # Genuine no-comp answers come back as found=False ENTRIES; a missing
+            # cert, or a found=False whose note is a helper error ("lookup error:
+            # page.goto: Timeout…", Oct 18), is infrastructure, not a missing card.
+            uncovered = _uncovered()
+            n_loaded = len(cert_keys) - len(uncovered)
+            if uncovered:
+                few = len(uncovered) <= max(2, len(cert_keys) // 10)
+                if not (n_loaded and attempt >= 2 and few):
+                    print(f"Comp retry {attempt}/{max_attempts}: {n_loaded}/{len(cert_keys)} "
+                          f"certs loaded — waiting")
+                    continue
+                print(f"Comp retry {attempt}/{max_attempts}: {n_loaded}/{len(cert_keys)} loaded — "
+                      f"quoting now, {len(uncovered)} shown as re-check")
             if not _mine():
                 return   # cancelled while the lookup was in flight
-            try:
-                await price_and_send_psa_offer(channel, channel_id, username, certs,
-                                               comps, sheet_id, sheet_url, delayed=True)
-            except (discord.NotFound, discord.Forbidden):
-                print(f"Comp retry: ticket for {username} closed before comps returned — dropping")
-            except Exception as e:
-                print(f"Delayed quote failed — {username}: {e}")
-                await ping_kevin(
-                    f"⚠️ Auto-quote after helper recovery FAILED for **{username}** "
-                    f"({len(certs)} certs) — the customer may not have seen a quote. "
-                    f"Quote manually: {sheet_url}\nError: {e}",
-                    channel
-                )
+            await _quote()
             return
-        print(f"Comp retry gave up after {max_attempts} attempts — {username}, {len(certs)} certs")
-        await ping_kevin(
-            f"🚨 Helper stayed down ~{max_attempts * interval_s // 60} min — "
-            f"**{username}**'s {len(certs)} certs never got comps. Quote manually: {sheet_url}",
-            channel
-        )
+        if not _mine():
+            return
+        uncovered = _uncovered()
+        n_loaded = len(cert_keys) - len(uncovered)
+        elapsed = int((time.monotonic() - t0) // 60)
+        print(f"Comp retry gave up after {max_attempts} attempts (~{elapsed} min) — "
+              f"{username}, {n_loaded}/{len(cert_keys)} loaded")
+        if n_loaded:
+            # Close the "I'll post your quote" promise with what DID load; the
+            # stragglers show in the quote as "need a re-check".
+            await _quote()
+            await ping_kevin(
+                f"🚨 Comp auto-retry gave up after ~{elapsed} min — posted **{username}**'s "
+                f"quote for the {n_loaded}/{len(cert_keys)} that loaded. Still not loading "
+                f"(customer asked to re-send): {_cert_list(uncovered)}\n{sheet_url}",
+                channel
+            )
+        else:
+            await ping_kevin(
+                f"🚨 Comp auto-retry gave up after ~{elapsed} min ({max_attempts} tries) — "
+                f"**{username}**'s {len(cert_keys)} certs never got comps. Quote manually: {sheet_url}"
+                + (f"\n(Still not loading: {_cert_list(uncovered)})" if uncovered else ""),
+                channel
+            )
     finally:
         # Only clean up our own entry — a superseding task has already replaced it.
         e = pending_comp_retries.get(channel_id)
         if e is not None and e.get("task") is asyncio.current_task():
             pending_comp_retries.pop(channel_id, None)
             _save_pending_retries()
+
+async def comps_pending_auto_retry(channel, channel_id, username, certs, sheet_id,
+                                   sheet_url, err_note=""):
+    """No usable comps for this submission (helper down, or every CardLadder page
+    timed out) — tell the customer, gate "proceed" (_lot_entry), ping Kevin, and
+    keep retrying in the background: when the helper comes back (the VM watchdog
+    usually revives it within ~3 min) the quote posts itself."""
+    await channel.send(
+        "⚠️ Comps are taking a little longer than usual — I'll "
+        "keep trying and post your quote here as soon as they're in!"
+    )
+    _lot_entry(channel_id)
+    cert_list = "\n".join([f"• `{c}`" for c in certs])
+    await ping_kevin(
+        f"📋 **PSA sheet — {username}** (comps pending, auto-retrying — "
+        f"type `!cancelretry` in the ticket to take over manually)\n"
+        f"{len(certs)} certs | {sheet_url}{err_note}\n\n"
+        f"{cert_list}",
+        channel
+    )
+    # Always (re)spawn: a second helper-down submission supersedes the old
+    # retry and MERGES its outstanding certs, so no batch is silently dropped.
+    start_comp_retry(channel, channel_id, username, certs, sheet_id, sheet_url)
+
+
+async def quote_or_pend_live(channel, channel_id, username, certs, comps, comp_error,
+                             sheet_id, sheet_url):
+    """Live cert path, after the lookup: post the quote, or — when the helper is
+    down or answered but EVERY cert is a timeout / missing entry (Oct 18) — hand
+    off to the background retry instead of a quote that rejects them all."""
+    all_timeouts = bool(comps) and len(_uncovered_certs(certs, comps)) == len(certs)
+    if comps and not all_timeouts:
+        # Re-check for a pending retry NOW, not just at submission: one spawned
+        # by a concurrent submission while our lookup was queued on the helper
+        # lock would otherwise post a second quote for these same certs. A retry
+        # for a DIFFERENT batch (not covered by ours) keeps running.
+        _pending = pending_comp_retries.get(channel_id)
+        if _pending and set(_pending.get("certs", [])) <= set(certs):
+            cancel_comp_retry(channel_id, "covered by a live quote")
+        await price_and_send_psa_offer(channel, channel_id, username, certs, comps,
+                                       sheet_id, sheet_url)
+        return
+    if all_timeouts:
+        err_note = "\n\n⚠️ Helper is up but every CardLadder page timed out"
+    else:
+        err_note = f"\n\n⚠️ Helper offline ({comp_error})" if comp_error else ""
+    await comps_pending_auto_retry(channel, channel_id, username, certs, sheet_id,
+                                   sheet_url, err_note)
 
 
 # ── DISCORD BOT ──────────────────────────────────────────────────────────────────
@@ -3355,7 +3552,8 @@ async def requote_stalled_tickets(days=7):
         def _read(fid=f['id']):
             ws = get_gspread_client().open_by_key(fid).get_worksheet(0)
             certs = [c for c in ws.col_values(2)[1:] if str(c).strip().isdigit()]
-            filled = [v for v in ws.col_values(7)[1:] if str(v).strip() not in ('', 'not found')]
+            filled = [v for v in ws.col_values(7)[1:]
+                      if str(v).strip() not in ('', 'not found', SHEET_NOT_LOADED_MARK)]
             return certs, filled
         try:
             certs, filled = await asyncio.to_thread(_read)
@@ -3377,16 +3575,30 @@ async def requote_stalled_tickets(days=7):
             await ping_kevin(f"🔁 **{f['name']}**: second stalled sheet for #{channel.name} — "
                              f"skipped (already requoted the first; handle by hand if both were real).")
             continue
+        if channel.id in pending_comp_retries:
+            # The background comp retry still owes this ticket its quote (its
+            # sheet's G column stays empty until then, so it LOOKS stalled).
+            # Quoting here too would post a duplicate when the retry lands.
+            skipped += 1
+            await ping_kevin(f"🔁 **{f['name']}**: auto-retry still pending for #{channel.name} — "
+                             f"skipped (type `!cancelretry` in the ticket first if you want "
+                             f"!requoteall to take it).")
+            continue
         remember_ticket_channel(channel.id)
         remember_channel_sheet(channel.id, f['id'])
         sheet_url = f"https://docs.google.com/spreadsheets/d/{f['id']}/edit"
         try:
-            comps = await asyncio.to_thread(lookup_comps, certs)
+            # No inline all-bad re-check: a sweep runs many tickets back to back
+            # under the helper lock; a no-load ticket is just reported for later.
+            comps = await asyncio.to_thread(lookup_comps, certs, recheck_all_bad=False)
             returned = {str(c.get('cert', '')).strip() for c in comps or []}
-            if not comps or any(str(c).strip() not in returned for c in certs):
+            n_loaded = len(certs) - len(_uncovered_certs(certs, comps))
+            # Missing certs, or EVERY cert a CardLadder timeout (Oct 18) — same
+            # as helper-down: don't post a quote that rejects them all.
+            if not comps or any(str(c).strip() not in returned for c in certs) or not n_loaded:
                 failed += 1
                 await ping_kevin(f"🔁 **{username}**: partial comp coverage "
-                                 f"({len(returned)}/{len(certs)}) — not quoting, run !requoteall again later.")
+                                 f"({n_loaded}/{len(certs)} loaded) — not quoting, run !requoteall again later.")
                 continue
             await price_and_send_psa_offer(channel, channel.id, username, certs,
                                            comps, f['id'], sheet_url, delayed=True)
@@ -4146,37 +4358,8 @@ async def on_message(message):
                     comp_error = str(e)
                     print(f"Helper comp lookup error: {e}")
 
-                if comps:
-                    # (Any retry this submission covers was already cancelled at
-                    # submission time, before our lookup — a still-pending retry
-                    # here is for a DIFFERENT batch and keeps running.)
-                    await price_and_send_psa_offer(
-                        message.channel, channel_id, username, certs, comps,
-                        sheet_id, sheet_url)
-                else:
-                    # Helper unavailable — tell the customer, gate "proceed"
-                    # (_lot_entry), ping Kevin, and keep retrying in the
-                    # background: when the helper comes back (the VM watchdog
-                    # usually revives it within ~3 min) the quote posts itself.
-                    await message.channel.send(
-                        "⚠️ Comps are taking a little longer than usual — I'll "
-                        "keep trying and post your quote here as soon as they're in!"
-                    )
-                    _lot_entry(channel_id)
-                    cert_list = "\n".join([f"• `{c}`" for c in certs])
-                    err_note = f"\n\n⚠️ Helper offline ({comp_error})" if comp_error else ""
-                    await ping_kevin(
-                        f"📋 **PSA sheet — {username}** (comps pending, auto-retrying — "
-                        f"type `!cancelretry` in the ticket to take over manually)\n"
-                        f"{len(certs)} certs | {sheet_url}{err_note}\n\n"
-                        f"{cert_list}",
-                        message.channel
-                    )
-                    # Always (re)spawn: a second helper-down submission supersedes
-                    # the old retry and MERGES its outstanding certs, so no batch
-                    # is silently dropped.
-                    start_comp_retry(message.channel, channel_id, username, certs,
-                                     sheet_id, sheet_url)
+                await quote_or_pend_live(message.channel, channel_id, username, certs,
+                                         comps, comp_error, sheet_id, sheet_url)
             except Exception as e:
                 print(f"Sheet error: {e}")
                 await message.channel.send("Small hiccup — Kevin will set this up manually and be right with you!")
