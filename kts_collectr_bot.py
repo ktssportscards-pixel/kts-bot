@@ -1818,6 +1818,50 @@ def add_slab_values(channel_id, cert_value_map, cert_sport_map=None):
     for cert, sp in (cert_sport_map or {}).items():
         entry["slab_sport"][str(cert)] = sp
 
+def rebuild_lot_from_sheets(channel_id, username, days=4):
+    """A restart/redeploy wipes lot_state, and compose_shipping would then fail open
+    to the VA (Pokémon) address — wrong for Sports/One Piece. Rebuild this ticket's
+    lot from the customer's buying sheets instead: every row with a payout > 0
+    (so Kevin's hand edits — e.g. zeroing what Triumph won't take — count), with
+    its sport. Later sheets win per cert. Returns True if anything was rebuilt."""
+    from datetime import timedelta as _td
+    since = (datetime.utcnow() - _td(days=days)).strftime('%Y-%m-%dT%H:%M:%S')
+    safe = username.replace("'", "\\'")
+    files = get_drive_service().files().list(
+        q=(f"name contains '{safe} discord' and '{PSA_FOLDER_ID}' in parents "
+           f"and trashed=false and createdTime > '{since}'"),
+        orderBy='createdTime asc', pageSize=50, fields='files(id,name)').execute().get('files', [])
+    vals, sports = {}, {}
+    gc = get_gspread_client()
+    for f in files:
+        if f['name'].split(' discord')[0].strip() != username:
+            continue
+        rows = gc.open_by_key(f['id']).get_worksheet(0).get_all_values(
+            value_render_option='UNFORMATTED_VALUE')
+        for r in rows[1:]:
+            r = list(r) + [''] * 10
+            cert = str(r[1]).strip()
+            if cert.endswith('.0'):
+                cert = cert[:-2]
+            if not cert.isdigit():
+                continue
+            try:
+                cv, pay = float(r[6] or 0), float(r[8] or 0)
+            except (TypeError, ValueError):
+                continue
+            if cv > 0 and pay > 0:
+                sp = normalize_sport(str(r[5]))
+                vals[cert], sports[cert] = cv, ('basketball' if sp == 'nba' else sp)
+            else:
+                vals.pop(cert, None); sports.pop(cert, None)
+    if not vals:
+        return False
+    entry = _lot_entry(channel_id)
+    entry["slab_certs"].update(vals)
+    entry.setdefault("slab_sport", {}).update(sports)
+    entry["rebuilt"] = True
+    return True
+
 def lot_value_by_lane(channel_id):
     """(pokemon_slab_value, sportsop_slab_value) for the running lot.
     Unknown/missing sport falls into the Pokémon (VA, no-minimum) lane — the
@@ -2030,7 +2074,10 @@ def compose_shipping(channel_id):
     gets both as two packages. Sports/OP under $1,500 is held (no FL address)
     while any Pokémon still ships to VA."""
     pk, so = lot_value_by_lane(channel_id)
-    so_ok = so >= SPORTS_OP_MIN_LOT
+    # A lot rebuilt from the sheets after a restart reflects what Kevin already
+    # agreed to take (he zeroes what he won't), so the $1,500 gate isn't re-applied.
+    rebuilt = bool((lot_state.get(channel_id) or {}).get("rebuilt"))
+    so_ok = so >= SPORTS_OP_MIN_LOT or (rebuilt and so > 0)
     has_pk, has_so = pk > 0, so > 0
     # Fail open (redeploy lost state): no recorded lanes -> default VA message.
     if not has_pk and not has_so:
@@ -2074,6 +2121,8 @@ def compose_shipping(channel_id):
         )
         kparts.append(f"sports/OP ${so:,.2f} HELD (<${SPORTS_OP_MIN_LOT:,})")
     msg = head + body + tail_note + "\n\n" + _SHIP_METHOD_TAIL
+    if rebuilt:
+        kparts.append("lot rebuilt from their sheets after a restart — $1,500 min not re-checked")
     return msg, True, " · ".join(kparts)
 
 def ship_blocked_sportsop_only(channel_id):
@@ -4139,6 +4188,13 @@ async def on_message(message):
 
     # ── AGREED / SHIPPING ─────────────────────────────────────────────────────────
     if is_agreeing(text):
+        # A restart wiped this ticket's lot: rebuild it from the customer's sheets so
+        # Sports/One Piece still route to Doral (skip if Kevin himself typed it).
+        if channel_id not in lot_state and message.author.id != YOUR_DISCORD_USER_ID:
+            try:
+                await asyncio.to_thread(rebuild_lot_from_sheets, channel_id, username)
+            except Exception as e:
+                print(f"lot rebuild from sheets failed for {username}: {e}")
         # Legacy combined-lot minimum (currently MIN_LOT_VALUE=0, so inert) — still
         # honored if ever re-enabled. Fail OPEN with no recorded lot (redeploy wiped
         # in-memory state) so we never stonewall a seller who already got an offer.
