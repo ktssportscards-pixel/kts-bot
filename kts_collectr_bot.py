@@ -94,6 +94,18 @@ POKEMON_SINGLES_MIN_LOT = 1500
 PSA_MIN_PRICE = 1
 PSA_MIN_GRADE = 7
 PSA_MAX_AGE_DAYS = 30
+# CGC slab buying criteria (Kevin, Oct 18 — Pixel takes CGC): Pokémon only,
+# CardLadder value $1-$100 at a flat 83%; over $100 or any non-Pokémon CGC is
+# rejected. No other CGC lanes, no grade / sale-age gates, VIP rates don't
+# apply. CGC cards do NOT count against the PSA Pokémon quota bands (separate
+# buyer lane). Inside the bot a CGC cert is the token "cgc:<digits>" (exactly
+# what the comp helper takes and echoes back), so a CGC and a PSA cert with the
+# same digits can never collide in lots, retries or by-cert maps; sheets carry
+# the bare digits in column B with "CGC" in column A.
+CGC_PREFIX = "cgc:"
+CGC_MIN_PRICE = 1
+CGC_MAX_PRICE = 100
+CGC_POKEMON_RATE = 0.83
 # Per-sport price ceilings — sports not listed here are rejected outright, and any
 # slab priced ABOVE its ceiling is rejected (Sep 26 weekend flyer):
 # Pokémon $1-100 / $400-700 / $3,750+ (big band, NO ceiling), NBA $1-$250,
@@ -416,8 +428,10 @@ def _fmt_pct(rate):
 
 
 def _sport_label(sport):
-    """Display name for a canonical sport key (e.g. 'mlb' -> 'MLB')."""
-    return {'mlb': 'MLB', 'one piece': 'One Piece'}.get(sport, (sport or '').title())
+    """Display name for a canonical sport key (e.g. 'mlb' -> 'MLB'). 'cgc' is
+    the quote breakdown's CGC Pokémon group (price_and_send_psa_offer)."""
+    return {'mlb': 'MLB', 'one piece': 'One Piece',
+            'cgc': 'CGC Pokemon'}.get(sport, (sport or '').title())
 
 
 def _blended_per_card_rate(tiers, card_values):
@@ -964,29 +978,37 @@ def get_gspread_client():
 def get_drive_service():
     return build("drive", "v3", credentials=get_credentials())
 
-def _find_fresh_psa_sheet(username, since_dt):
+def _find_fresh_psa_sheet(username, since_dt, folder_id=None):
     """Drive fallback for create_psa_sheet: the Apps Script usually FINISHES
     creating the sheet server-side even when our HTTP call to it dies (Aug 2
     morning: a transient Google 404 and a client timeout — both sheets existed
     in Drive anyway). Find a '<username> discord ...' sheet created after we
-    started calling, so a retry doesn't make a duplicate."""
+    started calling, so a retry doesn't make a duplicate. The name must be
+    EXACTLY '<username> discord …' — a bare startswith(username) let 'mark'
+    adopt markandjheyson's fresh sheet (and 'tr' trrev's)."""
     try:
         drive = get_drive_service()
         safe = username.replace("\\", "\\\\").replace("'", "\\'")
         since_iso = since_dt.strftime("%Y-%m-%dT%H:%M:%S")
-        q = (f"name contains '{safe} discord' and '{PSA_FOLDER_ID}' in parents "
+        q = (f"name contains '{safe} discord' and '{folder_id or PSA_FOLDER_ID}' in parents "
              f"and trashed=false and createdTime > '{since_iso}'")
         files = drive.files().list(q=q, orderBy="createdTime desc", pageSize=5,
                                    fields="files(id,name,createdTime)").execute().get("files", [])
+        want = username.lower() + " discord"
         for f in files:
-            if f["name"].lower().startswith(username.lower()):
+            fname = f["name"].lower()
+            if (fname == want or fname.startswith(want + " ")) \
+                    and not f["name"].endswith(SUMMARY_NAME_SUFFIX):
                 return f
     except Exception as e:
         print(f"Drive fallback search failed: {e}")
     return None
 
-def create_psa_sheet(username, cert_numbers):
+def create_psa_sheet(username, cert_numbers, folder_id=None):
     """Create a buying sheet by calling the Google Apps Script web app.
+    folder_id: Drive folder for the new file (default: the PSA Slabs folder);
+    the !summary sheets pass their own folder so they never sit among the
+    buying sheets that Kevin's nightly reconcile sweeps.
     Google gets slow/flaky under weekend-morning load: a 103-cert sheet took
     54s on a HEALTHY run (the old 30s timeout could never survive it), and
     failed calls usually still created their sheet server-side. So: generous
@@ -996,8 +1018,11 @@ def create_psa_sheet(username, cert_numbers):
     import urllib.parse
     import time as _time
     from datetime import timedelta as _td
-    certs_str = ",".join([str(c).strip() for c in cert_numbers])
-    params = urllib.parse.urlencode({"username": username, "certs": certs_str, "folder_id": PSA_FOLDER_ID})
+    # Column B carries bare numbers — a CGC token 'cgc:<digits>' goes in as its
+    # digits (fill_buying_sheet then stamps "CGC" in column A).
+    certs_str = ",".join([cert_digits(c) for c in cert_numbers])
+    folder_id = folder_id or PSA_FOLDER_ID
+    params = urllib.parse.urlencode({"username": username, "certs": certs_str, "folder_id": folder_id})
     url = f"{APPS_SCRIPT_URL}?{params}"
     started = datetime.utcnow() - _td(seconds=30)   # slack for clock skew vs Drive
     last_err = None
@@ -1015,7 +1040,7 @@ def create_psa_sheet(username, cert_numbers):
             # Server-side run may still be finishing — poll Drive up to ~60s.
             for _ in range(6):
                 _time.sleep(10)
-                f = _find_fresh_psa_sheet(username, started)
+                f = _find_fresh_psa_sheet(username, started, folder_id)
                 if f:
                     sheet_url = f"https://docs.google.com/spreadsheets/d/{f['id']}/edit"
                     print(f"Apps Script call failed but the sheet WAS created — recovered '{f['name']}' from Drive")
@@ -1029,6 +1054,59 @@ def extract_sheet_id(url):
     """Pull the sheet ID out of a Google Sheets URL."""
     m = re.search(r'/d/([a-zA-Z0-9_-]+)', url or "")
     return m.group(1) if m else None
+
+
+# ── CGC CERT TOKENS (Oct 18) ─────────────────────────────────────────────────────
+# A PSA cert travels through the bot as its bare digits ("12345678"); a CGC cert
+# as "cgc:<digits>" — the exact string the comp helper takes (CardLadder lookup
+# with grader=cgc) and echoes back in each result's "cert" field. Sheets get the
+# bare digits (column B) plus "CGC" in column A; Discord shows "CGC <digits>".
+def is_cgc_cert(cert):
+    """True for a CGC cert token ('cgc:6193949247')."""
+    return str(cert if cert is not None else '').strip().lower().startswith(CGC_PREFIX)
+
+def cert_digits(cert):
+    """The bare cert number (sheet column B / CardLadder link) of a PSA or CGC token."""
+    s = str(cert if cert is not None else '').strip()
+    return s[len(CGC_PREFIX):].strip() if is_cgc_cert(s) else s
+
+def cgc_cert(digits):
+    return CGC_PREFIX + str(digits).strip()
+
+def cert_label(cert):
+    """How a cert reads in Discord: '12345678' (PSA, unchanged) or 'CGC 6193949247'."""
+    return (f"CGC {cert_digits(cert)}" if is_cgc_cert(cert)
+            else str(cert if cert is not None else '').strip())
+
+def _comp_is_cgc(c):
+    return bool(c) and is_cgc_cert(c.get('cert'))
+
+def _cgc_is_pokemon(c):
+    """CardLadder files CGC Pokémon under sport 'pokemon'; a blank sport counts
+    when the card name says Pokémon."""
+    sp = normalize_sport((c or {}).get('sport'))
+    if sp:
+        return sp == 'pokemon'
+    return 'pokemon' in str((c or {}).get('cardName') or '').lower().replace('é', 'e')
+
+def _slab_grade_label(c):
+    """'PSA 10' (exactly the old Kevin-line text) or 'CGC 9.5'."""
+    if _comp_is_cgc(c):
+        g = re.sub(r'(?i)^\s*(cgc|psa)\s*', '', str(c.get('grade') or '')).strip()
+        return f"CGC {g}".strip()
+    return f"PSA {str((c or {}).get('grade') or '').replace('PSA ', '').strip()}"
+
+def _sheet_cert_token(a_val, digits, e_val=''):
+    """A buying-sheet row's cert as the bot's token: CGC when column A says CGC,
+    the grade (E) reads 'CGC …', or the number is CGC-length (10+ digits — PSA
+    certs are 7-9; a CGC row whose comps never loaded still shows the template's
+    default 'PSA' in A)."""
+    d = str(digits if digits is not None else '').strip()
+    a = str(a_val if a_val is not None else '').strip().upper()
+    e = str(e_val if e_val is not None else '').strip().upper()
+    if a == 'CGC' or e.startswith('CGC') or len(d) >= 10:
+        return cgc_cert(d)
+    return d
 
 
 # Cloudflare tunnels cut HTTP responses at ~100s. A COLD chunk of 4 sales-heavy
@@ -1104,9 +1182,42 @@ def _purge_helper_cache(certs):
         except Exception:
             pass
 
+def _match_helper_results(chunk, results):
+    """Point every helper result's 'cert' at the token we sent, so CGC answers
+    land on their 'cgc:<digits>' cert. The CGC-aware helper echoes the prefixed
+    string verbatim; a differently-cased prefix, or a bare-digits echo that
+    matches exactly one sent cert, is mapped back too — except a bare echo whose
+    CardLadder url says grader=psa (a PSA lookup must never answer for a CGC
+    slab). Mutates and returns results."""
+    sent = [str(c).strip() for c in chunk]
+    exact = set(sent)
+    by_lower = {s.lower(): s for s in sent}
+    by_digits = {}
+    for s in sent:
+        by_digits.setdefault(cert_digits(s), []).append(s)
+    for r in results or []:
+        if not isinstance(r, dict):
+            continue
+        e = str(r.get('cert', '')).strip()
+        if e in exact:
+            continue
+        tok = by_lower.get(e.lower())
+        if tok is None:
+            cands = by_digits.get(cert_digits(e)) or []
+            if len(cands) == 1:
+                tok = cands[0]
+                if (is_cgc_cert(tok) and not is_cgc_cert(e)
+                        and 'grader=psa' in str(r.get('url') or '').lower()):
+                    tok = None
+        if tok is not None:
+            r['cert'] = tok
+    return results
+
 def _lookup_comps_once(cert_list):
     """Single pass over the helper in chunks; merged results list. Per-chunk
-    failures are logged; if EVERY chunk fails the last error is raised."""
+    failures are logged; if EVERY chunk fails the last error is raised.
+    CGC certs are already 'cgc:<digits>' tokens — sent as-is; results are
+    mapped back onto the sent tokens (_match_helper_results)."""
     import urllib.request as urlreq
     import time as _time
     chunks = [cert_list[i:i + HELPER_CHUNK_SIZE] for i in range(0, len(cert_list), HELPER_CHUNK_SIZE)]
@@ -1125,7 +1236,7 @@ def _lookup_comps_once(cert_list):
         try:
             with urlreq.urlopen(req, timeout=180) as resp:
                 data = json.loads(resp.read().decode())
-            all_results.extend(data.get("results", []))
+            all_results.extend(_match_helper_results(chunk, data.get("results", [])))
             print(f"Helper chunk {idx}/{len(chunks)} ok ({len(chunk)} certs)")
         except Exception as e:
             last_error = e
@@ -1181,15 +1292,45 @@ def lookup_comps(certs, recheck_all_bad=True):
         return [by_cert[k] for k in cert_list if k in by_cert]
 
 
+def classify_cgc_comp(comp):
+    """Kevin's CGC rules (Oct 18): Pokémon with a CardLadder value of $1-$100 is
+    bought at CGC_POKEMON_RATE; over $100 and every non-Pokémon CGC slab are
+    rejected; not-found / timeouts read exactly like PSA. Reasons are
+    customer-visible. Returns ('accepted', None) or ('rejected', reason)."""
+    if _comp_is_infra_error(comp):
+        return ('rejected', COMP_NOT_LOADED_MSG)
+    if not comp.get('found'):
+        return ('rejected', 'no comp on CardLadder')
+    cv = comp.get('clValue')
+    try:
+        cv = float(cv) if cv is not None else None
+    except (TypeError, ValueError):
+        cv = None
+    if cv is None:
+        return ('rejected', 'no CL value')
+    if not _cgc_is_pokemon(comp):
+        sp = str(comp.get('sport') or '').lower().strip() or 'not Pokémon'
+        return ('rejected', f"{sp} (we only take Pokémon in CGC)")
+    if cv > CGC_MAX_PRICE:
+        return ('rejected', f"${cv:,.2f} (over our ${CGC_MAX_PRICE:,} max for CGC slabs)")
+    if cv < CGC_MIN_PRICE:
+        return ('rejected', f"${cv:,.2f} (under our ${CGC_MIN_PRICE} minimum for CGC slabs)")
+    return ('accepted', None)
+
+
 def classify_psa_comp(comp):
     """
     Decide whether a helper comp result fits KTS PSA buying criteria.
     Returns (status, reason): 'accepted'/None or 'rejected'/<short reason>.
+    CGC comps (cert 'cgc:<digits>') are routed to classify_cgc_comp.
     """
     # Helper timeout / missing entry is NOT "no comp" — never tell a customer a
     # card isn't on CardLadder when the page simply didn't load (customer-visible).
     if _comp_is_infra_error(comp):
         return ('rejected', COMP_NOT_LOADED_MSG)
+    # CGC slabs have their own (short) rulebook — none of the PSA lanes apply.
+    if _comp_is_cgc(comp):
+        return classify_cgc_comp(comp)
     if not comp.get('found'):
         return ('rejected', 'no comp on CardLadder')
     cv = comp.get('clValue')
@@ -1336,9 +1477,20 @@ def fill_buying_sheet(sheet_id, comps, sheet_name="Form. Put Date Here."):
       D = card name, E = grade, F = sport, G = CL Value, J = last sale date.
     Replicates the existing onEdit + cardladder-comp behavior since simple onEdit
     doesn't fire on programmatic writes (so the sheet copy lands empty otherwise).
+    CGC rows (cert token 'cgc:<digits>', bare digits in B): A = "CGC", the
+    CardLadder link uses grader=cgc, E = "CGC <grade>" (so the downstream buyer
+    list can't mistake it for PSA), F = 'pokemon' for a Pokémon card, and H gets
+    the bot's standard H formula (build_sheet_h_formula — its CGC arm pays
+    CGC_POKEMON_RATE on Pokémon $1-$100, else 0) instead of the template's
+    70% non-PSA branch; a formula, not a number, so a hand-corrected G
+    re-prices the row. Column I (the template's ARRAYFORMULA G*H) is never
+    written, so it keeps computing.
+    Returns the cert tokens that have NO row in column B (nothing was written
+    for them) — the caller alerts Kevin about quoted CGC certs that didn't
+    make it onto the sheet.
     """
     if not comps:
-        return
+        return []
     gc = get_gspread_client()
     ss = gc.open_by_key(sheet_id)
     try:
@@ -1349,23 +1501,43 @@ def fill_buying_sheet(sheet_id, comps, sheet_name="Form. Put Date Here."):
     cert_to_row = {}
     for i, val in enumerate(cert_col):
         v = str(val).strip()
-        if v.isdigit() and 6 <= len(v) <= 12:
+        if v.isdigit() and 6 <= len(v) <= 13:   # 13: the longest CGC certs
             cert_to_row[v] = i + 1
+    # A 10-13 digit CGC number could DISPLAY as 6.19395E+09 in an Automatic-
+    # format cell; re-read column B unformatted for any CGC cert not matched.
+    _cgc_missing = {cert_digits(c.get('cert')) for c in comps
+                    if _comp_is_cgc(c) and cert_digits(c.get('cert')) not in cert_to_row}
+    if _cgc_missing:
+        try:
+            for i, val in enumerate(sheet.col_values(2, value_render_option='UNFORMATTED_VALUE')):
+                v = _summary_cert(val)
+                if v in _cgc_missing and v not in cert_to_row:
+                    cert_to_row[v] = i + 1
+        except Exception as e:
+            print(f"fill_buying_sheet: unformatted cert re-read failed ({e})")
     updates = []
+    missing = []
     for c in comps:
         cert = str(c.get('cert', '')).strip()
-        row = cert_to_row.get(cert)
+        cgc = _comp_is_cgc(c)
+        digits = cert_digits(cert)
+        row = cert_to_row.get(digits)
         if not row:
+            missing.append(cert)
             continue
-        link_url = f"https://app.cardladder.com/search?cert={cert}&grader=psa"
-        updates.append({'range': f'A{row}', 'values': [["PSA"]]})
+        link_url = f"https://app.cardladder.com/search?cert={digits}&grader={'cgc' if cgc else 'psa'}"
+        updates.append({'range': f'A{row}', 'values': [["CGC" if cgc else "PSA"]]})
         updates.append({'range': f'C{row}', 'values': [[f'=HYPERLINK("{link_url}","🔗 CardLadder")']]})
         if c.get('cardName'):
             updates.append({'range': f'D{row}', 'values': [[c['cardName']]]})
-        if c.get('grade'):
+        if cgc:
+            updates.append({'range': f'E{row}', 'values': [[_slab_grade_label(c)]]})
+        elif c.get('grade'):
             grade_clean = str(c['grade']).replace('PSA ', '').replace('PSA', '').strip()
             updates.append({'range': f'E{row}', 'values': [[grade_clean]]})
-        if c.get('sport'):
+        if cgc and c.get('found') and _cgc_is_pokemon(c):
+            updates.append({'range': f'F{row}', 'values': [["pokemon"]]})
+        elif c.get('sport'):
             updates.append({'range': f'F{row}', 'values': [[str(c['sport']).lower().strip()]]})
         if c.get('found') and c.get('clValue') is not None:
             # Manual-review cards (Pokémon $3,750+): do NOT show the comp on
@@ -1380,18 +1552,22 @@ def fill_buying_sheet(sheet_id, comps, sheet_name="Form. Put Date Here."):
             updates.append({'range': f'G{row}', 'values': [[SHEET_NOT_LOADED_MARK]]})
         else:
             updates.append({'range': f'G{row}', 'values': [["not found"]]})
+        if cgc:
+            updates.append({'range': f'H{row}', 'values': [[build_sheet_h_formula(row)]]})
         if c.get('lastSaleDate'):
             updates.append({'range': f'J{row}', 'values': [[c['lastSaleDate']]]})
         # SELECT-list stamp (Oct 2): column L carries "Y" when the card's
         # player is on the sport's select list (Sluggers / 2000s / QB GOATs).
         # The H formula's specialty bands require it — this is how the
         # 1,001-name list reaches the sheet without living in a formula.
+        # (PSA only — CGC has no select lanes.)
         _sp = normalize_sport((c.get('sport') or '').lower().strip())
-        _sel_list = select_list_for_sport(_sp)
+        _sel_list = None if cgc else select_list_for_sport(_sp)
         if _sel_list and _name_on_list(c, _sel_list):
             updates.append({'range': f'L{row}', 'values': [["Y"]]})
     if updates:
         sheet.batch_update(updates, value_input_option="USER_ENTERED")
+    return missing
 
 
 def highlight_certs_review(sheet_id, certs, sheet_name="Form. Put Date Here."):
@@ -1406,7 +1582,7 @@ def highlight_certs_review(sheet_id, certs, sheet_name="Form. Put Date Here."):
         sheet = ss.worksheet(sheet_name)
     except Exception:
         sheet = ss.sheet1
-    cert_set = {str(c).strip() for c in certs}
+    cert_set = {cert_digits(c) for c in certs}   # column B holds bare digits (CGC too)
     orange = {"backgroundColor": {"red": 1.0, "green": 0.6, "blue": 0.0}}
     for i, val in enumerate(sheet.col_values(2)):  # column B = cert
         if str(val).strip() in cert_set:
@@ -1414,28 +1590,120 @@ def highlight_certs_review(sheet_id, certs, sheet_name="Form. Put Date Here."):
 
 
 # ── CERT EXTRACTION ──────────────────────────────────────────────────────────────
-def extract_certs(text):
-    if not text:
-        return []
+# One pass finds every 7-13 digit number, remembering which grader label (if any)
+# sits right in front of it ON THE SAME LINE ("CGC 6193949247", "cgc:6193949247",
+# "CGC #…", "BGS 0012345678"). The label may not reach across a line break: in
+# "PSA + CGC\n12345678\n6193949247" the CGC label must not claim the PSA cert.
+_CERT_NUMBER_RE = re.compile(
+    r'(?:\b(cgc|psa|bgs|sgc|tag|beckett)[ \t]*[:#\-]?[ \t]*|\b)(\d{7,13})\b', re.I)
+# Discord timestamps (<t:1729300000:R>) carry 10-digit numbers — never certs.
+_DISCORD_TS_RE = re.compile(r'<t:\d+(?::[a-zA-Z])?>')
+# Context that means a bare 10-13 digit number is NOT a CGC cert: tracking
+# numbers, phone numbers, payment / bank details. Only gates BARE (unlabelled)
+# 10-13 digit numbers — PSA's 7-9 digit certs are never affected, and in a
+# message that says "CGC" a CGC-shaped number (see _cgc_shaped) still counts.
+# ("number", "order", "pay" and "app" are deliberately NOT here: "cert number
+# 6193949247", "in order", "what do you pay" are how sellers write certs. A lone
+# bare number is confirmed on CardLadder before any sheet is made —
+# cgc_needs_confirm — which is what stops a bare phone / payment number.)
+_NOT_A_CERT_WORDS = {
+    'tracking', 'track', 'tracker', 'fedex', 'ups', 'usps', 'dhl', 'shipped',
+    'shipping', 'label', 'phone', 'cell', 'mobile', 'call', 'text', 'tel',
+    'whatsapp', 'zelle', 'venmo', 'paypal', 'cashapp', 'cash', 'apple',
+    'payment', 'invoice', 'acct', 'account', 'routing', 'wire', 'ach', 'bank',
+}
+
+def _cgc_shaped(digits):
+    """The shape of every real CGC card cert seen so far (94 of 94 on Oct 18):
+    10 digits starting 6 (60…/61…), or 13 digits starting 14 (1401…)."""
+    d = str(digits)
+    return (len(d) == 10 and d.startswith('6')) or (len(d) == 13 and d.startswith('14'))
+
+def _strip_links(text):
     # Strip out any URLs FIRST. GIF links (Tenor, Giphy, etc.) end in long numeric
     # IDs (e.g. tenor.com/view/funny-cat-gif-25649837) that otherwise get mistaken
     # for cert numbers. A real cert is always sent as a plain number, never in a link.
     text = re.sub(r'https?://\S+', ' ', text)
-    text = re.sub(r'www\.\S+', ' ', text)
-    numbers = re.findall(r'\b\d{7,9}\b', text)
-    if not numbers:
+    return re.sub(r'www\.\S+', ' ', text)
+
+def _strip_cert_noise(text):
+    """Links and Discord timestamps out — what's left is where certs can be."""
+    return _DISCORD_TS_RE.sub(' ', _strip_links(text))
+
+def extract_certs(text):
+    """Cert tokens in a message, in order, deduped. PSA certs are bare 7-9 digit
+    strings, taken exactly as before CGC support (whatever label precedes them).
+    CGC certs come back as 'cgc:<digits>' tokens:
+      - a 10-13 digit number with "CGC" right in front of it on the same line;
+      - a bare CGC-shaped number (6 + 9 digits, or 14 + 11 digits), unless the
+        message has tracking / phone / payment words and doesn't say CGC;
+      - any other bare 10 or 13 digit number only when the message says CGC
+        and has no such words.
+    Never a CGC cert: a 10-13 digit number labelled PSA/BGS/SGC/TAG/Beckett, or
+    a bare 11-12 digit number (a 12-digit number is a FedEx tracking number and
+    still falls through to the tracking handler). A lone bare 10-digit number is
+    only a candidate — see cgc_needs_confirm."""
+    if not text:
         return []
+    text = _strip_links(text)
+    scan = _DISCORD_TS_RE.sub(lambda m: ' ' * len(m.group(0)), text)   # same offsets
+    found = [(m.group(2), (m.group(1) or '').lower(), m.start(2))
+             for m in _CERT_NUMBER_RE.finditer(scan)]
+    if not found:
+        return []
+    # The chatter guard counts words on the link-stripped text exactly as the
+    # pre-CGC bot did (timestamps included), so PSA messages extract unchanged.
     stripped = re.sub(r'\d', '', text).strip()
     words = [w for w in stripped.split() if re.search(r'[a-zA-Z]', w)]
-    if len(words) > 3:
+    plain = [re.sub(r'[^a-z]', '', w.lower()) for w in words]
+    # "CGC" labelling a cert isn't chatter — "CGC 1… CGC 2… CGC 3… CGC 4…" is
+    # four certs, not four words.
+    if sum(1 for p in plain if p != 'cgc') > 3:
         return []
+    not_cert_ctx = any(p in _NOT_A_CERT_WORDS for p in plain)
+    says_cgc = bool(re.search(r'cgc', text, re.I))
     seen = set()
     unique = []
-    for n in numbers:
-        if n not in seen:
-            seen.add(n)
-            unique.append(n)
+    for digits, label, pos in found:
+        n = len(digits)
+        if n <= 9:
+            # PSA — the pre-CGC rule exactly: a standalone 7-9 digit number. A
+            # label glued on ("psa12345678") was never a match before; keep it so.
+            if pos > 0 and (scan[pos - 1].isalnum() or scan[pos - 1] == '_'):
+                continue
+            tok = digits
+        elif label == 'cgc':
+            tok = cgc_cert(digits)
+        elif label:
+            continue          # another grader's serial (BGS 0012345678, …)
+        elif n in (11, 12):
+            continue          # never a bare CGC cert (12 = FedEx tracking)
+        elif _cgc_shaped(digits) and (says_cgc or not not_cert_ctx):
+            tok = cgc_cert(digits)
+        elif says_cgc and not not_cert_ctx:
+            tok = cgc_cert(digits)
+        else:
+            continue
+        if tok not in seen:
+            seen.add(tok)
+            unique.append(tok)
     return unique
+
+def cgc_needs_confirm(text, certs):
+    """True when a message's ONLY cert is one bare 10-digit number and nothing
+    in it says CGC — as likely a phone number ("6195551234" answering "what's
+    your Zelle?") as a slab. on_message looks it up on CardLadder first and
+    makes a sheet / quote only when CardLadder knows it as a CGC slab."""
+    if len(certs or []) != 1 or not is_cgc_cert(certs[0]):
+        return False
+    if len(cert_digits(certs[0])) != 10:
+        return False
+    return not re.search(r'cgc', _strip_cert_noise(text or ''), re.I)
+
+# A 13-digit number shaped like a CGC cert (14…) is never a tracking number (no
+# carrier uses 13-digit numeric tracking) — the tracking handler skips it.
+def _looks_like_cgc_13(num):
+    return len(num) == 13 and num.startswith('14')
 
 
 # ── PSA OFFER (shared by the live path and the background comp retry) ─────────────
@@ -1504,7 +1772,7 @@ async def price_and_send_psa_offer(channel, channel_id, username, certs, comps,
     # removed Jul 26 per Kevin — it was underpricing MLB slabs).
     for _c in comps:
         _sp = normalize_sport(_c.get('sport'))
-        if _sp == 'basketball':
+        if _sp == 'basketball' and not _comp_is_cgc(_c):   # CGC: straight CL value
             # Over-ceiling NBA cards get the avg-3 discount so a
             # stale-high CL value doesn't auto-reject a card whose
             # actual recent sales sit inside the buy band.
@@ -1517,10 +1785,23 @@ async def price_and_send_psa_offer(channel, channel_id, username, certs, comps,
             # (classify rejects it right after anyway).
             apply_avg3_value(_c, threshold=PSA_SPORT_MAX_PRICE.get('basketball', float('inf')))
     if sheet_id and comps:
+        _not_on_sheet = []
         try:
-            await asyncio.to_thread(fill_buying_sheet, sheet_id, comps)
+            _not_on_sheet = await asyncio.to_thread(fill_buying_sheet, sheet_id, comps) or []
         except Exception as e:
             print(f"Sheet fill error (offer continues): {e}")
+        # A quoted CGC cert with no row in column B (the Apps Script that builds
+        # the sheet dropped / rewrote a 10-13 digit number) would be quoted here
+        # but never paid off the sheet, rebuilt on 'ship', or put on the buyer
+        # list — say so loudly instead of skipping it silently.
+        _cgc_off = [c for c in _not_on_sheet if is_cgc_cert(c)]
+        if _cgc_off:
+            await ping_kevin(
+                f"⚠️ **{len(_cgc_off)} quoted CGC cert(s) aren't on {username}'s buying "
+                f"sheet** — the quote includes them but the sheet has no row for "
+                f"them, so it won't pay them. Add the rows by hand: "
+                + ", ".join(f"`{cert_label(c)}`" for c in _cgc_off) + f"\n{sheet_url}",
+                channel)
     # VIP customers get their negotiated rates baked into THEIR sheet's
     # payout formulas (the template copy carries standard rates). A silent failure
     # here would make the sheet compute LESS than the quoted number and Kevin pays
@@ -1557,8 +1838,10 @@ async def price_and_send_psa_offer(channel, channel_id, username, certs, comps,
         # Pokémon slot quotas: count each accepted card IMMEDIATELY so later
         # certs in this same lot see the updated count (a 40-card $150 lot
         # must stop at the 25th slot, not accept all 40). classify rejects
-        # once a band's slots hit 0 left.
-        if status in ('accepted', 'flag') and c and normalize_sport(c.get('sport')) == 'pokemon':
+        # once a band's slots hit 0 left. CGC cards are a separate buyer lane
+        # and never count against (or get blocked by) the PSA Pokémon bands.
+        if (status in ('accepted', 'flag') and c and not _comp_is_cgc(c)
+                and normalize_sport(c.get('sport')) == 'pokemon'):
             try:
                 _qb = pokemon_band_for(float(c['clValue']))
                 if _qb and _qb[2] is not None:
@@ -1570,6 +1853,9 @@ async def price_and_send_psa_offer(channel, channel_id, username, certs, comps,
                             f"({_qcap}/{_qcap}) — announce it!")
             except Exception as _qe:
                 print(f"quota count error (non-critical): {_qe}")
+        # Kevin's lines show 'CGC 6193949247' / '(CGC 10)' for CGC slabs; PSA
+        # lines read exactly as before ('12345678', '(PSA 10)').
+        _lbl = cert_label(cert)
         if status == 'review':
             # Manual-review cards: keep out of the auto-priced lot (0%),
             # highlight orange on the sheet for Kevin to quote by hand.
@@ -1577,28 +1863,26 @@ async def price_and_send_psa_offer(channel, channel_id, username, certs, comps,
             review_certs.append(cert)
             cv = float(c['clValue'])
             name = (c.get('cardName') or '')[:50]
-            grade = str(c.get('grade') or '').replace('PSA ', '').strip()
-            kevin_lines.append(f"• `{cert}` — 🟠 **${cv:.2f}** — {name} (PSA {grade}) — {reason}")
+            kevin_lines.append(f"• `{_lbl}` — 🟠 **${cv:.2f}** — {name} ({_slab_grade_label(c)}) — {reason}")
         elif status == 'accepted':
             accepted.append(c)
             cv = float(c['clValue'])
             name = (c.get('cardName') or '')[:50]
-            grade = str(c.get('grade') or '').replace('PSA ', '').strip()
-            kevin_lines.append(f"• `{cert}` — **${cv:.2f}** — {name} (PSA {grade})")
+            _cgc_tag = f" — CGC {_fmt_pct(CGC_POKEMON_RATE)}" if _comp_is_cgc(c) else ""
+            kevin_lines.append(f"• `{_lbl}` — **${cv:.2f}** — {name} ({_slab_grade_label(c)}){_cgc_tag}")
         elif status == 'flag':
             # Still accept the card so the lot is priced, but warn Kevin.
             accepted.append(c)
             flagged.append((cert, c, reason))
             cv = float(c['clValue'])
             name = (c.get('cardName') or '')[:50]
-            grade = str(c.get('grade') or '').replace('PSA ', '').strip()
-            kevin_lines.append(f"• `{cert}` — ⚠️ **${cv:.2f}** — {name} (PSA {grade}) — {reason}")
+            kevin_lines.append(f"• `{_lbl}` — ⚠️ **${cv:.2f}** — {name} ({_slab_grade_label(c)}) — {reason}")
         elif _comp_is_infra_error(c):
             unloaded.append((cert, reason))
-            kevin_lines.append(f"• `{cert}` — ⚠️ comp didn't load (helper timeout) — re-check")
+            kevin_lines.append(f"• `{_lbl}` — ⚠️ comp didn't load (helper timeout) — re-check")
         else:
             rejected.append((cert, reason))
-            kevin_lines.append(f"• `{cert}` — ❌ {reason}")
+            kevin_lines.append(f"• `{_lbl}` — ❌ {reason}")
 
     # Shade manual-review cards orange so Kevin knows to price them by hand.
     if review_certs and sheet_id:
@@ -1609,13 +1893,18 @@ async def price_and_send_psa_offer(channel, channel_id, username, certs, comps,
 
     sport_groups = {}
     for c in accepted:
-        sp = normalize_sport(c.get('sport'))
+        # CGC slabs are their own group ('cgc' → "CGC Pokemon" at a flat
+        # CGC_POKEMON_RATE) — never blended into the PSA Pokémon bands or VIP.
+        sp = 'cgc' if _comp_is_cgc(c) else normalize_sport(c.get('sport'))
         sport_groups.setdefault(sp, []).append(c)
     sport_breakdown = []
     for sp, comps_in_sport in sport_groups.items():
         card_values = [float(c['clValue']) for c in comps_in_sport]
         sport_total = sum(card_values)
-        if sp == 'pokemon':
+        if sp == 'cgc':
+            rate = CGC_POKEMON_RATE
+            is_vip = False
+        elif sp == 'pokemon':
             # Per-card: band rate (standard or VIP) vs Pikachu lane — better wins.
             _payout = sum(float(c['clValue']) * _pokemon_card_rate(c, vip_tiers)
                           for c in comps_in_sport)
@@ -1653,8 +1942,10 @@ async def price_and_send_psa_offer(channel, channel_id, username, certs, comps,
         str(c.get('cert', '')).strip(): float(c['clValue'])
         for c in accepted if c.get('clValue') is not None
     }
+    # CGC slabs ride the Pokémon (VA) lane — only CGC Pokémon is ever accepted.
     slab_sport_map = {
-        str(c.get('cert', '')).strip(): normalize_sport(c.get('sport'))
+        str(c.get('cert', '')).strip(): ('pokemon' if _comp_is_cgc(c)
+                                         else normalize_sport(c.get('sport')))
         for c in accepted if c.get('clValue') is not None
     }
     add_slab_values(channel_id, slab_value_map, slab_sport_map)
@@ -1673,14 +1964,14 @@ async def price_and_send_psa_offer(channel, channel_id, username, certs, comps,
     if n_flagged:
         flag_warning = (
             f"\n⚠️ **{n_flagged} card{'s' if n_flagged != 1 else ''} flagged for manual review** — check each reason before paying!\n"
-            + "\n".join([f"   - `{cert}`: {reason}" for cert, _, reason in flagged])
+            + "\n".join([f"   - `{cert_label(cert)}`: {reason}" for cert, _, reason in flagged])
             + "\n"
         )
     review_warning = ""
     if n_review:
         review_warning = (
             f"\n🟠 **{n_review} card{'s' if n_review != 1 else ''} to price by hand** (highlighted orange on the sheet, not in the auto-quote):\n"
-            + "\n".join([f"   - `{cert}`: {reason}" for cert, reason in review])
+            + "\n".join([f"   - `{cert_label(cert)}`: {reason}" for cert, reason in review])
             + "\n"
         )
     n_unloaded = len(unloaded)
@@ -1690,12 +1981,13 @@ async def price_and_send_psa_offer(channel, channel_id, username, certs, comps,
             f"\n⚠️ **{n_unloaded} comp{'s' if n_unloaded != 1 else ''} didn't load (helper timeout)** — "
             f"NOT rejected — the customer was asked to re-send it in the ticket "
             f"(if you type the cert yourself, the new sheet/rates use YOUR username):\n"
-            + "\n".join([f"   - `{cert}`" for cert, _ in unloaded])
+            + "\n".join([f"   - `{cert_label(cert)}`" for cert, _ in unloaded])
             + "\n"
         )
+    n_cgc = sum(1 for _ct in certs if is_cgc_cert(_ct))
     summary = (
         f"📋 **PSA sheet — {username}**\n"
-        f"{len(certs)} certs | Accepted **{n_accepted}** | Comp **${total_comp:,.2f}** | Payout **${total_payout:,.2f}**"
+        f"{len(certs)} certs{f' ({n_cgc} CGC)' if n_cgc else ''} | Accepted **{n_accepted}** | Comp **${total_comp:,.2f}** | Payout **${total_payout:,.2f}**"
         f"{f' | {n_rejected} rejected' if n_rejected else ''}"
         f"{f' | {n_unloaded} ⚠️ not loaded' if n_unloaded else ''}"
         f"{f' | {n_flagged} ⚠️ flagged' if n_flagged else ''}"
@@ -1740,19 +2032,19 @@ async def price_and_send_psa_offer(channel, channel_id, username, certs, comps,
             customer_parts.append(
                 f"⚠️ Unfortunately, none of these {len(certs) - n_unloaded} cards fit our current buying criteria:"
             )
-        customer_parts += [f"• `{cert}` — {reason}" for cert, reason in rejected]
+        customer_parts += [f"• `{cert_label(cert)}` — {reason}" for cert, reason in rejected]
     if n_unloaded:
         # Kept apart from the rejects: these were never judged, just not loaded.
         customer_parts += [
             "",
             f"🔄 {n_unloaded} card{'s' if n_unloaded != 1 else ''} need{'' if n_unloaded != 1 else 's'} a re-check:",
-            *[f"• `{cert}` — {reason}" for cert, reason in unloaded],
+            *[f"• `{cert_label(cert)}` — {reason}" for cert, reason in unloaded],
         ]
     if n_review:
         customer_parts += [
             "",
             f"💎 {n_review} card{'s' if n_review != 1 else ''} we'll quote by hand and get right back to you:",
-            *[f"• `{cert}`" for cert, _ in review],
+            *[f"• `{cert_label(cert)}`" for cert, _ in review],
         ]
     if n_accepted > 0:
         hold_tail = proceed_or_hold_tail(channel_id)
@@ -1786,6 +2078,9 @@ async def price_and_send_psa_offer(channel, channel_id, username, certs, comps,
             )
         except Exception as e:
             print(f"Review tag failed (DM already sent): {e}")
+    # Ticket has a customer summary sheet (!summary)? Refresh it in the background
+    # with this quote's sheet. Fire-and-forget: never delays or breaks the quote.
+    schedule_summary_refresh(channel, channel_id)
 
 async def retry_psa_offer_when_helper_back(channel, channel_id, username, certs,
                                            sheet_id, sheet_url,
@@ -1837,7 +2132,7 @@ async def retry_psa_offer_when_helper_back(channel, channel_id, username, certs,
             )
 
     def _cert_list(cs):
-        return ", ".join(f"`{c}`" for c in cs[:20]) + (" …" if len(cs) > 20 else "")
+        return ", ".join(f"`{cert_label(c)}`" for c in cs[:20]) + (" …" if len(cs) > 20 else "")
 
     try:
         for attempt in range(1, max_attempts + 1):
@@ -1917,7 +2212,7 @@ async def comps_pending_auto_retry(channel, channel_id, username, certs, sheet_i
         "keep trying and post your quote here as soon as they're in!"
     )
     _lot_entry(channel_id)
-    cert_list = "\n".join([f"• `{c}`" for c in certs])
+    cert_list = "\n".join([f"• `{cert_label(c)}`" for c in certs])
     await ping_kevin(
         f"📋 **PSA sheet — {username}** (comps pending, auto-retrying — "
         f"type `!cancelretry` in the ticket to take over manually)\n"
@@ -2015,24 +2310,55 @@ def add_slab_values(channel_id, cert_value_map, cert_sport_map=None):
     for cert, sp in (cert_sport_map or {}).items():
         entry["slab_sport"][str(cert)] = sp
 
-def rebuild_lot_from_sheets(channel_id, username, days=4):
+def rebuild_lot_from_sheets(channel_id, username, days=4, created_after=None, extra_sheet_id=None):
     """A restart/redeploy wipes lot_state, and compose_shipping would then fail open
     to the VA (Pokémon) address — wrong for Sports/One Piece. Rebuild this ticket's
     lot from the customer's buying sheets instead: every row with a payout > 0
     (so Kevin's hand edits — e.g. zeroing what Triumph won't take — count), with
-    its sport. Later sheets win per cert. Returns True if anything was rebuilt."""
+    its sport. Later sheets win per cert. Returns True if anything was rebuilt.
+    created_after (tz-aware datetime — the ticket channel's created_at): ignore
+    sheets from before this ticket opened. A repeat seller's PREVIOUS deal (often
+    already shipped) is still inside the `days` window and must not be merged in —
+    same guard as _drive_find_sheet. A few minutes of slack absorbs clock skew.
+    extra_sheet_id: this ticket's cached channel_sheet (or a list: the cache plus
+    every sheet Kevin's own cert pastes created in this ticket — see
+    record_ticket_sheet). Counted even when it isn't named after the customer —
+    certs KEVIN pasted in the ticket land on a sheet named after him, and
+    they're still part of this lot."""
     from datetime import timedelta as _td
-    since = (datetime.utcnow() - _td(days=days)).strftime('%Y-%m-%dT%H:%M:%S')
+    since_dt = datetime.utcnow() - _td(days=days)
+    if created_after is not None:
+        ca = (created_after.astimezone(timezone.utc).replace(tzinfo=None)
+              if created_after.tzinfo else created_after)
+        since_dt = max(since_dt, ca - _td(minutes=10))
+    since = since_dt.strftime('%Y-%m-%dT%H:%M:%S')
     safe = username.replace("'", "\\'")
-    files = get_drive_service().files().list(
+    drive = get_drive_service()
+    files = drive.files().list(
         q=(f"name contains '{safe} discord' and '{PSA_FOLDER_ID}' in parents "
            f"and trashed=false and createdTime > '{since}'"),
-        orderBy='createdTime asc', pageSize=50, fields='files(id,name)').execute().get('files', [])
+        orderBy='createdTime asc', pageSize=50,
+        fields='files(id,name,createdTime)').execute().get('files', [])
+    files = [f for f in files if f['name'].split(' discord')[0].strip() == username]
+    extra_ids = ([extra_sheet_id] if isinstance(extra_sheet_id, str)
+                 else list(extra_sheet_id or []))
+    for xid in dict.fromkeys(x for x in extra_ids if x):
+        if any(f['id'] == xid for f in files):
+            continue
+        try:
+            meta = drive.files().get(fileId=xid,
+                                     fields='id,name,createdTime,trashed').execute()
+            ct = meta.get('createdTime') or ''
+            # No timestamp: still this ticket's sheet (it's the cache) — keep it, last.
+            if not meta.get('trashed') and (not ct or ct[:19] > since):
+                files.append({'id': xid, 'name': meta.get('name', ''),
+                              'createdTime': ct or '~'})
+                files.sort(key=lambda f: f.get('createdTime') or '')   # later sheets win
+        except Exception as e:
+            print(f"lot rebuild: cached sheet {xid} unreadable ({e}) — skipped")
     vals, sports = {}, {}
     gc = get_gspread_client()
     for f in files:
-        if f['name'].split(' discord')[0].strip() != username:
-            continue
         rows = gc.open_by_key(f['id']).get_worksheet(0).get_all_values(
             value_render_option='UNFORMATTED_VALUE')
         for r in rows[1:]:
@@ -2042,12 +2368,17 @@ def rebuild_lot_from_sheets(channel_id, username, days=4):
                 cert = cert[:-2]
             if not cert.isdigit():
                 continue
+            # CGC rows (A="CGC" / grade "CGC 10" / 10+ digit cert) key as the
+            # same 'cgc:<digits>' token the live quote used.
+            cert = _sheet_cert_token(r[0], cert, r[4])
             try:
                 cv, pay = float(r[6] or 0), float(r[8] or 0)
             except (TypeError, ValueError):
                 continue
             if cv > 0 and pay > 0:
                 sp = normalize_sport(str(r[5]))
+                if is_cgc_cert(cert) and not sp:
+                    sp = 'pokemon'   # CGC = Pokémon-only lane (VA)
                 vals[cert], sports[cert] = cv, ('basketball' if sp == 'nba' else sp)
             else:
                 vals.pop(cert, None); sports.pop(cert, None)
@@ -2207,7 +2538,9 @@ WELCOME_MSG = (
     "• **Football / NFL** — $1–$220\n"
     + _POKEMON_RAW_WELCOME_LINE +
     "\n"
-    "⚠️ We are **not** buying raw cards — PSA slabs only.\n\n"
+    f"**CGC slabs — Pokémon only:** ${CGC_MIN_PRICE}–${CGC_MAX_PRICE} at "
+    f"{int(round(CGC_POKEMON_RATE * 100))}% (send the cert numbers with \"CGC\" in front)\n\n"
+    "⚠️ We are **not** buying raw cards — PSA slabs (plus CGC Pokémon) only.\n\n"
     "📊 **Pokémon:** no minimum — send what you've got!\n"
     "🗓️ **Sports & One Piece** open **Saturday 3 AM ET** — those need **$1,500+** "
     "(combined) and ship to a **separate address** from your Pokémon.\n"
@@ -2502,6 +2835,37 @@ def _save_welcomed():
 def remember_channel_sheet(channel_id, sheet_id):
     channel_sheet[channel_id] = sheet_id
     _save_channel_sheet()
+
+# Every buying sheet a cert submission CREATED in a ticket, in order. channel_sheet
+# keeps only the latest one (each new submission overwrites it), so a sheet of
+# certs KEVIN pasted in the ticket (named after him, not the customer) used to drop
+# out of everything keyed on the cache as soon as the customer sent more. Only the
+# cert path writes here — never a Drive lookup — so an entry is proof the sheet
+# was made in THIS ticket. {channel_id: [{"sid", "owner", "kevin", "ts"}]}
+TICKET_SHEETS_FILE = os.path.join(DATA_DIR, "ticket_sheets_store.json")
+ticket_sheets = {}
+try:
+    with open(TICKET_SHEETS_FILE) as _f:
+        ticket_sheets.update({int(k): v for k, v in json.load(_f).items()})
+except Exception:
+    pass
+
+def record_ticket_sheet(channel_id, sheet_id, owner, by_kevin=False):
+    """Cert path only: remember that this ticket's submission created sheet_id."""
+    try:
+        hist = ticket_sheets.setdefault(channel_id, [])
+        if not any(h.get("sid") == sheet_id for h in hist):
+            hist.append({"sid": sheet_id, "owner": owner or "", "kevin": bool(by_kevin),
+                         "ts": datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S')})
+            del hist[:-200]
+        with open(TICKET_SHEETS_FILE, "w") as _f:
+            json.dump({str(k): v for k, v in ticket_sheets.items()}, _f)
+    except Exception as e:
+        print(f"ticket sheet history save failed (non-critical): {e}")
+
+def kevin_pasted_sheet_ids(channel_id):
+    """Sheets Kevin's own cert pastes created in this ticket (oldest first)."""
+    return [h["sid"] for h in ticket_sheets.get(channel_id, []) if h.get("kevin") and h.get("sid")]
 
 # Pending comp retries survive redeploys: the JSON store holds everything except
 # the task handle; on_ready re-spawns young entries (see _resume_pending_retries).
@@ -2947,7 +3311,13 @@ def build_sheet_h_formula(r, pokemon_tiers=None, sport_rates=None):
             f'TRUE,0)')
     too_old = (f'IF(ISNUMBER(J{r}),(TODAY()-J{r})>{maxage},'
                f'IFERROR((TODAY()-DATEVALUE(J{r}))>{maxage},TRUE))')
-    return f'=IF(OR(NOT(ISNUMBER(G{r})),G{r}=0),"",IF(A{r}<>"PSA",0.7,IF({too_old},0,{rate})))'
+    # CGC rows (Oct 18): flat CGC rate on Pokémon $1-$100, else 0 — never the
+    # template's 70% non-PSA branch, and never a VIP rate. fill_buying_sheet
+    # writes this formula into each CGC row's H; a VIP H-column rewrite keeps it.
+    cgc = (f'IF(AND(F{r}="pokemon",G{r}>={CGC_MIN_PRICE},G{r}<={CGC_MAX_PRICE}),'
+           f'{_n(CGC_POKEMON_RATE)},0)')
+    return (f'=IF(OR(NOT(ISNUMBER(G{r})),G{r}=0),"",IF(A{r}="CGC",{cgc},'
+            f'IF(A{r}<>"PSA",0.7,IF({too_old},0,{rate}))))')
 
 def write_custom_sheet_formulas(sheet_id, pokemon_tiers, sport_rates=None,
                                 sheet_name="Form. Put Date Here."):
@@ -3157,6 +3527,8 @@ def _drive_find_sheet(lookup_names, created_after=None):
             fname = (f.get("name") or "").lower()
             if not (fname == lookup or fname.startswith(lookup + " ")):
                 continue
+            if _is_summary_sheet_name(f.get("name")):
+                continue   # '<user> — summary (KTS Collectibles)' is not a buying sheet
             if created_after is not None:
                 try:
                     ct = datetime.fromisoformat(
@@ -3186,6 +3558,1295 @@ async def find_sheet_for_channel(channel_id, channel_name, username, channel_cre
         remember_channel_sheet(channel_id, sheet_id)
         print(f"Found sheet for #{channel_name} via Drive lookup: {sheet_id}")
     return sheet_id
+
+def ticket_customer_from_overwrites(channel):
+    """The ticket opener's RAW username from the channel's member permission
+    overwrites — Discord's own record, no network call. on_guild_channel_create
+    names the channel _sanitize_channel_name(opener.name) off this same overwrite,
+    and sheets are named from message.author.name, the same raw string
+    ('.yungturtle' -> #yungturtle). A legacy 'ticket-<name>' channel also matches
+    on the bare name; an un-renamed 'ticket-0712' falls back to its sole non-bot,
+    non-Kevin member overwrite (how on_guild_channel_create picks the opener).
+    Anything else — no match, or two members sanitizing alike — returns None."""
+    try:
+        members = [t for t in channel.overwrites
+                   if isinstance(t, discord.Member) and not t.bot
+                   and t.id != YOUR_DISCORD_USER_ID and t.name]
+    except Exception:
+        return None
+    cname = (getattr(channel, 'name', '') or '').lower()
+    names = {cname}
+    if cname.startswith('ticket-'):
+        names.add(cname[len('ticket-'):])
+    hits = {t.name for t in members if _sanitize_channel_name(t.name) in names}
+    if len(hits) == 1:
+        return hits.pop()
+    if not hits and cname.startswith('ticket-') and len({t.name for t in members}) == 1:
+        return members[0].name
+    return None
+
+def _drive_customer_username(channel_id, channel_name, days=4, created_after=None):
+    """Sync helper (run via asyncio.to_thread): FALLBACK for when the channel's
+    overwrites can't name the customer (ticket_customer_from_overwrites). The RAW
+    Discord username read off their buying-sheet names ('<username> discord <date>').
+      1. The channel_sheet cache (a sheet created in this ticket), if its name
+         maps back to this channel — a sheet from certs KEVIN pasted is named
+         after him and is skipped.
+      2. Otherwise every PSA-folder sheet from the last `days` days — and not
+         from before this ticket opened (created_after) — whose name prefix
+         sanitizes to the channel name.
+    Two different raw usernames that sanitize alike ('cwilk.' vs 'cwilk'), or no
+    match at all, return None."""
+    cname = (channel_name or '').lower()
+    targets = {_sanitize_channel_name(cname)}
+    if cname.startswith('ticket-'):   # legacy prefix only — not 'ticketmaster99'
+        targets.add(_sanitize_channel_name(cname[len('ticket-'):]))
+    targets -= {''}
+
+    def _owner(fname):
+        fname = fname or ''
+        if ' discord' not in fname or _is_summary_sheet_name(fname):
+            return None
+        raw = fname.split(' discord')[0].strip()
+        return raw if raw and _sanitize_channel_name(raw) in targets else None
+
+    drive = get_drive_service()
+    sid = channel_sheet.get(channel_id)
+    if sid:
+        try:
+            raw = _owner(drive.files().get(fileId=sid, fields='name').execute().get('name'))
+            if raw:
+                return raw
+        except Exception as e:
+            print(f"customer lookup: cached sheet {sid} unreadable ({e}) — scanning Drive")
+    from datetime import timedelta as _td
+    since_dt = datetime.utcnow() - _td(days=days)
+    if created_after is not None:
+        ca = (created_after.astimezone(timezone.utc).replace(tzinfo=None)
+              if created_after.tzinfo else created_after)
+        since_dt = max(since_dt, ca - _td(minutes=10))
+    since = since_dt.strftime('%Y-%m-%dT%H:%M:%S')
+    found, token = set(), None
+    for _ in range(10):   # paginate; Drive caps pageSize at 1000
+        kw = {'pageToken': token} if token else {}
+        resp = drive.files().list(
+            q=f"'{PSA_FOLDER_ID}' in parents and trashed=false and createdTime > '{since}'",
+            pageSize=1000, fields='nextPageToken,files(id,name)', **kw).execute()
+        found.update(o for o in (_owner(f.get('name')) for f in resp.get('files', [])) if o)
+        token = resp.get('nextPageToken')
+        if not token:
+            break
+    if len(found) == 1:
+        return found.pop()
+    if found:
+        print(f"customer lookup: #{channel_name} matches {sorted(found)} — ambiguous, not guessing")
+    return None
+
+async def customer_username_for_channel(channel, days=4, errors=None):
+    """Drive fallback for the ticket's customer (raw username, e.g. '.yungturtle'),
+    or None if it can't be pinned to exactly one. Bounded by the channel's
+    created_at so a sheet from before this ticket never counts. Never raises; a
+    Drive failure is appended to `errors` (if given) so the caller can say so."""
+    try:
+        return await asyncio.to_thread(_drive_customer_username, channel.id, channel.name,
+                                       days, getattr(channel, 'created_at', None))
+    except Exception as e:
+        print(f"customer lookup failed for #{getattr(channel, 'name', '?')}: {e}")
+        if errors is not None:
+            errors.append(f"{type(e).__name__}: {str(e)[:80]}")
+        return None
+
+# ── CUSTOMER SUMMARY SHEET (!summary — Kevin only, inside the ticket) ─────────────
+# Oct 18: caspar asked for ONE organized sheet of everything he sent. Every cert
+# submission makes a NEW buying sheet and customers re-send certs across sheets,
+# so a weekend ends as a pile of overlapping sheets. !summary merges this deal's
+# buying sheets (the customer's since the ticket opened, at most SUMMARY_MAX_DAYS
+# back, plus the sheets Kevin's own cert pastes made in this ticket) into one
+# spreadsheet, posts its link in the ticket, and keeps it fresh: after every
+# later quote in the ticket and every SUMMARY_TICK_S while it's active.
+# CUSTOMER-VISIBLE: it only ever carries the customer's own card data plus fixed
+# customer-safe strings — never the resale buyers, allocations, margins or resale.
+SUMMARY_NAME_SUFFIX = " — summary (KTS Collectibles)"
+# The Apps Script creator always names its sheet "<seed> discord <M-DD>". The
+# seed has spaces, which a Discord username can't, so nothing keyed on
+# '<customer> discord' (lot rebuild, ship lookup, customer scan) can take the
+# not-yet-renamed file for a buying sheet; the sweeps skip both name shapes.
+SUMMARY_SEED_PREFIX = "KTS summary "
+# FOLDER — summaries never sit among the buying sheets: Kevin's nightly
+# paying-vs-sending reconcile (and other sweeps) read EVERY spreadsheet directly
+# in the PSA folder, keep each cert's latest occurrence and read column F as the
+# sport — on a summary F is the rate, so every summarized cert would show as
+# "on Pixel but not being paid for". Summaries go in SUMMARY_FOLDER_ID (env) if
+# set, else in a 'KTS customer summaries' folder INSIDE the PSA folder (found by
+# name; made once if missing). Sweeps of the PSA folder's direct children never
+# see it.
+SUMMARY_FOLDER_ID = (os.environ.get("SUMMARY_FOLDER_ID") or "").strip()
+SUMMARY_FOLDER_NAME = "KTS customer summaries"
+# LINK SHARING — Kevin's call (asked Oct 18). True: whenever the link is POSTED
+# in the ticket (never before the sheet is fully written), that one Drive file
+# is checked and, if needed, given "anyone with the link can VIEW" (permission
+# type 'anyone', role 'reader') so the customer opens it without an access
+# request. False: the bot never adds sharing (the customer clicks "request
+# access" like on buying sheets) — but it also never REMOVES an 'anyone'
+# permission a summary already has. Never touches the sharing of any other file.
+SUMMARY_LINK_SHARING = True
+SUMMARY_MAX_DAYS = 4               # same window as rebuild_lot_from_sheets: this deal, not last weekend's
+SUMMARY_SKEW_MIN = 10              # slack before the ticket's created_at (clock skew)
+SUMMARY_STALE_SALE_DAYS = 60       # last sale older than this -> "no sales" reason
+SUMMARY_AUTO_REFRESH_DELAY_S = 90  # coalesce a burst of quotes into one refresh
+SUMMARY_READ_PAUSE_S = 2.0         # between real sheet reads (shared 60 reads/min quota)
+SUMMARY_BACKOFF_S = (15, 30, 45, 60, 60)   # 429/5xx back-off (Sheets quota resets per minute)
+SUMMARY_HTTP_TIMEOUT_S = 60        # a stalled socket raises instead of holding the ticket's lock
+SUMMARY_LOCK_WAIT_S = 300          # !summary gives up waiting for a running build after this
+SUMMARY_TICK_S = 900               # background refresh of active summaries (team edits, hand prices)
+SUMMARY_TICK_MAX_H = 72            # ...for this long after Kevin's last !summary
+SUMMARY_FORBIDDEN_WORDS = ('triumph', 'poketrader', 'pixel', 'allocation',
+                           'margin', 'resale', 'resell')
+# Column-M notes are copied onto the customer's sheet ONLY when they are one of
+# the team's customer-safe templates (apply_triumph_to_sheet.py REASONS / NO_FULL).
+# Anything else — internal wording, app reasons, buyer names — reads "❌ Not
+# buying this weekend".
+SUMMARY_SAFE_NOTES = (
+    "❌ NO — our limit for this range is full this weekend",
+    "❌ NO — not enough reliable sales data to price it",
+    "❌ NO — this cert was already submitted (duplicate)",
+    "❌ NO — we're not buying this sport in this price range this weekend",
+)
+_SUMMARY_SAFE_NOTE_RE = re.compile(
+    r"❌ NO — our (?:One Piece|Pokémon|Pokemon|sports|Sports) limit is full this weekend")
+SUMMARY_CHANNEL_PROP = "kts_ticket_channel"   # Drive appProperties (private to the bot's app)
+SUMMARY_POSTED_PROP = "kts_posted"            # '1' once the link went into the ticket
+SUMMARY_EXTRA_PROP = "kts_x"                  # kts_x1.. = Kevin-pasted sheets a build included
+SUMMARY_EXTRA_MAX = 25
+SUMMARY_META_FIELDS = ("id,name,trashed,createdTime,modifiedTime,parents,appProperties,"
+                       "lastModifyingUser(me)")
+summary_sheets = {}             # channel_id -> {"sid", "customer", "channel", "posted", ...}
+_summary_none_checked = set()   # channels whose clean Drive lookup found no summary
+_summary_refresh_pending = set()
+_summary_cmd_running = set()    # channels with a !summary in progress
+_summary_bg_tasks = set()       # strong refs: un-referenced asyncio tasks can be GC'd
+_summary_locks = {}             # channel_id -> (loop, asyncio.Lock)
+_summary_global = {}            # 'sem' -> (loop, asyncio.Semaphore(1)): one build bot-wide
+_summary_folder_cache = {}
+from collections import OrderedDict as _OrderedDict
+_summary_rows_cache = _OrderedDict()   # (sheet id, Drive modifiedTime) -> rows
+SUMMARY_ROWS_CACHE_MAX = 500
+_SUMMARY_TICKER = {}            # 'task' -> the background ticker
+_SUMMARY_EPOCH = date(1899, 12, 30)   # Sheets date serial 0
+_SUMMARY_TRANSIENT_RE = re.compile(
+    r"\b(429|500|502|503|504)\b|quota|rate ?limit|ratelimit|backenderror|"
+    r"internal error|timed out|timeout|temporarily unavailable", re.I)
+
+def _is_summary_sheet_name(name):
+    """A customer summary sheet (or its pre-rename seed) — never a buying sheet."""
+    n = (name or '').strip()
+    return n.endswith(SUMMARY_NAME_SUFFIX) or n.startswith(SUMMARY_SEED_PREFIX)
+
+def _summary_q(s):
+    """Escape a value for a Drive query string literal."""
+    return (s or '').replace('\\', '\\\\').replace("'", "\\'")
+
+def _summary_url(sid):
+    return f"https://docs.google.com/spreadsheets/d/{sid}/edit"
+
+def _summary_retry(fn, what=""):
+    """Run a blocking Drive/Sheets call, backing off on 429 / quota / 5xx / timeout.
+    Anything else (404, permission, bad request) raises straight away."""
+    waits = list(SUMMARY_BACKOFF_S)
+    while True:
+        try:
+            return fn()
+        except Exception as e:
+            if not waits or not _SUMMARY_TRANSIENT_RE.search(f"{type(e).__name__} {e}"):
+                raise
+            w = waits.pop(0)
+            print(f"summary: {what} — {str(e)[:80]} — backing off {w}s")
+            time.sleep(w)
+
+def _summary_set_timeout(gc):
+    """gspread's HTTP client has NO timeout by default; give the summary's one."""
+    for obj in (getattr(gc, 'http_client', None), gc):
+        fn = getattr(obj, 'set_timeout', None)
+        if callable(fn):
+            try:
+                fn(SUMMARY_HTTP_TIMEOUT_S)
+                return
+            except Exception:
+                pass
+
+def _summary_et(dt):
+    """datetime (aware, or naive UTC) -> US Eastern: 'Sent' days are Kevin's days."""
+    from datetime import timedelta as _td
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    try:
+        from zoneinfo import ZoneInfo
+        return dt.astimezone(ZoneInfo("America/New_York"))
+    except Exception:
+        return dt.astimezone(timezone(_td(hours=-4)))   # no tzdata: EDT
+
+def _summary_today():
+    return _summary_et(datetime.now(timezone.utc)).date()
+
+def _summary_stamp():
+    """'Sun 10/18, 3:42 PM ET' — row 3 of the sheet."""
+    t = _summary_et(datetime.now(timezone.utc))
+    return f"{t:%a} {t.month}/{t.day}, {t.hour % 12 or 12}:{t:%M} {'AM' if t.hour < 12 else 'PM'} ET"
+
+def _summary_day(created_iso):
+    """Drive createdTime ('2026-10-17T15:04:05.000Z') -> its Eastern date."""
+    try:
+        dt = datetime.strptime((created_iso or '')[:19], '%Y-%m-%dT%H:%M:%S')
+    except ValueError:
+        return _summary_today()
+    return _summary_et(dt).date()
+
+def _summary_num(v):
+    """A sheet cell as a number, or None ('not found', "didn't load — resend",
+    blank, '#VALUE!'). Accepts '$1,234.50'."""
+    import math
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        f = float(v)
+    else:
+        s = re.sub(r'[$,\s]', '', str(v or ''))
+        if not s:
+            return None
+        try:
+            f = float(s)
+        except ValueError:
+            return None
+    return f if math.isfinite(f) else None
+
+def _summary_sale_date(v):
+    """Column J (last sale): a Sheets date serial, '2026-08-01', or '8/1/2026'."""
+    from datetime import timedelta as _td
+    if v is None or isinstance(v, bool) or str(v).strip() == '':
+        return None
+    try:
+        f = float(v)
+        return _SUMMARY_EPOCH + _td(days=int(f)) if 20000 < f < 80000 else None
+    except (TypeError, ValueError):
+        pass
+    s = str(v).strip()
+    for fmt, part in (('%Y-%m-%d', s[:10]), ('%m/%d/%Y', s.split()[0]), ('%m/%d/%y', s.split()[0])):
+        try:
+            return datetime.strptime(part, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+def _summary_cert(v):
+    if isinstance(v, float) and v.is_integer():
+        v = int(v)
+    c = str(v if v is not None else '').strip()
+    if c.endswith('.0'):
+        c = c[:-2]
+    return c if c.isdigit() and len(c) >= 6 else None
+
+def _summary_row_is_cgc(r):
+    """A buying-sheet row for a CGC slab (A="CGC", grade "CGC 10", or a
+    CGC-length cert) — see _sheet_cert_token."""
+    return is_cgc_cert(_sheet_cert_token(r[0], _summary_cert(r[1]) or '', r[4]))
+
+def _summary_text(v):
+    if isinstance(v, float) and v.is_integer():
+        v = int(v)
+    return str(v if v is not None else '').strip()
+
+def _summary_customer_safe(text):
+    t = (text or '').lower()
+    return not any(w in t for w in SUMMARY_FORBIDDEN_WORDS)
+
+def _summary_safe_note(note):
+    """The team's column-M note, if it is one of the customer-safe templates."""
+    t = re.sub(r'\s+', ' ', _summary_text(note)).replace('’', "'")
+    t = t.replace(' - ', ' — ').replace(' – ', ' — ')
+    if (t in SUMMARY_SAFE_NOTES or _SUMMARY_SAFE_NOTE_RE.fullmatch(t)) and _summary_customer_safe(t):
+        return t
+    return None
+
+def _summary_day_label(d):
+    return f"{d:%a} {d.month}/{d.day}"
+
+def _summary_range_label(d0, d1):
+    if d0 == d1:
+        return f"{d0:%b} {d0.day}"
+    if (d0.year, d0.month) == (d1.year, d1.month):
+        return f"{d0:%b} {d0.day}–{d1.day}"
+    return f"{d0:%b} {d0.day}–{d1:%b} {d1.day}"
+
+def _summary_classify(r):
+    """One buying-sheet row (padded) -> what it says about the card:
+      buy       payout I > 0 on a numeric comp G (Kevin's hand-typed I wins)
+      buy_hand  payout I > 0 with no numeric comp ('Kevin will quote', 'agreed',
+                'not found' + a hand price…) — priced by hand, comp left blank
+      decline   numeric comp with an explicit 0 (H or I), or a ❌ note in M
+      dup       a decline whose note says the cert was already submitted
+      unpriced  nothing decided yet: comp blank / didn't load / not found /
+                'Kevin will quote' with no payout
+    A broken I ('#REF!' / blank — a number typed into the ARRAYFORMULA column
+    breaks the whole array) under a live rate 0 < H <= 1 is priced as G × H, the
+    value the formula would show, and flagged (pay_err) for Kevin."""
+    comp, pay, rate = _summary_num(r[6]), _summary_num(r[8]), _summary_num(r[7])
+    note = _summary_text(r[12])
+    out = {'kind': 'unpriced', 'comp': comp, 'pay': 0.0, 'rate': 0, 'pay_err': False}
+    if pay is not None and pay > 0:
+        if comp is not None and comp > 0:
+            out.update(kind='buy', pay=round(pay, 2), rate=round(pay / comp, 4))
+        else:
+            out.update(kind='buy_hand', comp=None, pay=round(pay, 2), rate='')
+    elif pay is None and comp is not None and comp > 0 and rate is not None and rate > 0:
+        if rate <= 1:
+            out.update(kind='buy', pay=round(comp * rate, 2), rate=round(rate, 4), pay_err=True)
+        else:
+            out['pay_err'] = True   # rate isn't a fraction — don't guess a payout
+    elif comp is not None and (pay == 0 or rate == 0):
+        out['kind'] = 'decline'
+    elif note.startswith('❌'):
+        out['kind'] = 'decline'
+    if out['kind'] == 'decline' and re.search(r'duplicate|already submitted', note, re.I):
+        out['kind'] = 'dup'
+    return out
+
+def _summary_reason(r, k, today):
+    """Customer-facing status for a card we're NOT (or not yet) buying."""
+    g = str(r[6] if r[6] is not None else '').strip().lower()
+    if k['kind'] == 'unpriced':
+        if 'load' in g:
+            return "⏳ Didn't load — resend it in the ticket"
+        if 'kevin will quote' in g:      # manual-review card, not priced yet
+            return "💎 Pricing this one by hand — we'll get back to you"
+        if not g or k['comp'] is not None:
+            return "⏳ Still pricing this one"
+        return "❌ Not buying — no CardLadder comp"
+    if _summary_row_is_cgc(r):
+        # CGC has its own short rulebook (Pokémon $1-$100) and no sale-age gate.
+        safe = _summary_safe_note(r[12])
+        if safe:
+            return safe
+        sp = normalize_sport(_summary_text(r[5]))
+        if sp and sp != 'pokemon':
+            return "❌ Not buying — we only take Pokémon in CGC"
+        if k['comp'] is not None and k['comp'] > CGC_MAX_PRICE:
+            return f"❌ Not buying — over our ${CGC_MAX_PRICE:,} max for CGC slabs"
+        if k['comp'] is not None and k['comp'] < CGC_MIN_PRICE:
+            return f"❌ Not buying — under our ${CGC_MIN_PRICE} minimum for CGC slabs"
+        if k['comp'] is None and g and 'load' not in g and 'kevin will quote' not in g:
+            return "❌ Not buying — no CardLadder comp"
+        return "❌ Not buying this weekend"
+    sd = _summary_sale_date(r[9])
+    if sd and (today - sd).days > SUMMARY_STALE_SALE_DAYS:
+        return f"❌ Not buying — no sales in the last {SUMMARY_STALE_SALE_DAYS} days"
+    safe = _summary_safe_note(r[12])
+    if safe:
+        return safe
+    if k['comp'] is None and g and 'load' not in g and 'kevin will quote' not in g:
+        return "❌ Not buying — no CardLadder comp"
+    return "❌ Not buying this weekend"
+
+def build_summary_data(customer, sheets, today=None, stamp=None):
+    """Pure: merge buying-sheet rows into the summary layout.
+    sheets: [{'createdTime': Drive iso, 'rows': sheet rows, header first,
+    'name': optional}]. In createdTime order, the LATEST row that decided the
+    card (buy / hand price / decline — see _summary_classify) wins per cert. A
+    later row that decided nothing (a re-send whose comp didn't load, came back
+    'not found', or isn't priced yet) never erases an earlier quote, and a $0
+    'already submitted (duplicate)' decline on a re-sent copy never erases an
+    earlier buy. 'Sent' is the first day the cert came in, with '(re-sent <Day>)'
+    when it came again on a later day. Payout is that row's I value (Kevin's
+    hand edits win), comp is G, rate = I/G. Buying rows first, then still-pricing,
+    then not-buying (with a reason); only buying rows count in the totals."""
+    import hashlib
+    today = today or _summary_today()
+    first_day, days_seen, hist = {}, {}, {}
+    for s in sorted(sheets, key=lambda s: s.get('createdTime') or ''):
+        day = _summary_day(s.get('createdTime'))
+        for r in (s.get('rows') or [])[1:]:
+            r = list(r) + [''] * 14
+            c = _summary_cert(r[1])
+            if not c:
+                continue
+            if _summary_row_is_cgc(r):
+                c = cert_label(cgc_cert(c))   # 'CGC 6193949247': own key + Cert # cell
+            first_day.setdefault(c, day)
+            days_seen.setdefault(c, set()).add(day)
+            hist.setdefault(c, []).append((r, _summary_classify(r), s.get('name') or ''))
+    buy, pend, nobuy, zeroed, pay_err = [], [], [], [], []
+    n_hand = 0
+    for c, entries in hist.items():
+        strong = [e for e in entries if e[1]['kind'] in ('buy', 'buy_hand', 'decline')]
+        weak = [e for e in entries if e[1]['kind'] == 'dup']
+        r, k, sname = (strong or weak or entries)[-1]
+        if k['pay_err'] and sname and sname not in pay_err:
+            pay_err.append(sname)
+        if k['kind'] == 'decline' and any(e[1]['kind'] in ('buy', 'buy_hand') for e in strong[:-1]):
+            zeroed.append(c)    # an earlier sheet was buying it; a later one says $0
+        base = [first_day[c], c, _summary_text(r[3]), _summary_text(r[4]), k['comp']]
+        if k['kind'] == 'buy':
+            buy.append(base + [k['rate'], k['pay'], '✅ Buying'])
+        elif k['kind'] == 'buy_hand':
+            n_hand += 1
+            buy.append(base[:4] + [None, '', k['pay'], '✅ Buying (priced by hand)'])
+        else:
+            why = _summary_reason(r, k, today)
+            (pend if why[:1] in ('⏳', '💎') else nobuy).append(base + [0, 0.0, why])
+    buy.sort(key=lambda x: (x[0], -x[6]))
+    pend.sort(key=lambda x: (x[0], x[1]))
+    nobuy.sort(key=lambda x: (x[0], -(x[4] or 0)))
+    tot_pay = round(sum(x[6] for x in buy), 2)
+    tot_comp = round(sum(x[4] or 0 for x in buy), 2)
+    per_day = {}
+    for x in buy:   # buy is day-sorted, so insertion order is chronological
+        k = per_day.setdefault(x[0], [0, 0.0])
+        k[0] += 1
+        k[1] += x[6]
+    listed = buy + pend + nobuy
+    n = len(listed)
+    rng = ''
+    if first_day:
+        d0 = min(first_day.values())
+        d1 = max(max(s) for s in days_seen.values())
+        rng = _summary_range_label(d0, d1)
+    counts = (f"{n} cards sent · {len(buy)} buying"
+              + (f" · {len(pend)} still pricing" if pend else '')
+              + f" · {len(nobuy)} not buying")
+    comp_label = ("Total comp (cards we're buying)" if not n_hand else
+                  f"Total comp (cards we're buying, not counting {n_hand} priced by hand)")
+    rows = [[f"{customer} — everything you sent us {rng}"],
+            [counts, '', f"{comp_label} ${tot_comp:,.2f}", '', '',
+             f"YOUR TOTAL PAYOUT ${tot_pay:,.2f}"],
+            [''],
+            ['Sent', 'Cert #', 'Card', 'Grade', 'Comp', 'Rate', 'You get', 'Status']]
+    for x in listed:
+        later = sorted(d for d in days_seen[x[1]] if d != x[0])
+        sent = _summary_day_label(x[0]) + (f" (re-sent {later[-1]:%a})" if later else '')
+        rows.append([sent, x[1], x[2], x[3], x[4] if x[4] is not None else '', x[5], x[6], x[7]])
+    day_block = ([['Sent', 'Cards buying', 'Payout']]
+                 + [[_summary_day_label(k), v[0], round(v[1], 2)] for k, v in per_day.items()]
+                 + [['Total', len(buy), tot_pay]])
+    digest = hashlib.sha1(json.dumps([rows, day_block], default=str).encode()).hexdigest()
+    if stamp:
+        rows[2] = [stamp]
+    return {'customer': customer, 'range': rng, 'rows': rows, 'day_block': day_block,
+            'n': n, 'n_buy': len(buy), 'n_pend': len(pend), 'n_nobuy': len(nobuy),
+            'n_hand': n_hand, 'tot_comp': tot_comp, 'tot_pay': tot_pay, 'n_days': len(per_day),
+            'statuses': [x[7] for x in listed], 'buy_certs': sorted(x[1] for x in buy),
+            'zeroed': zeroed, 'pay_err_sheets': pay_err, 'hash': digest}
+
+def _summary_formats(data):
+    n = len(data['rows'])
+    nd = data['n_days']
+    grey = {'red': 0.9, 'green': 0.9, 'blue': 0.9}
+    green = {"backgroundColor": {"red": 0.85, "green": 0.95, "blue": 0.85}}
+    amber = {"backgroundColor": {"red": 0.99, "green": 0.95, "blue": 0.80}}
+    red = {"backgroundColor": {"red": 0.98, "green": 0.86, "blue": 0.86}}
+    cur = {'numberFormat': {'type': 'CURRENCY', 'pattern': '$#,##0.00'}}
+    fm = [{'range': 'A1', 'format': {'textFormat': {'bold': True, 'fontSize': 14}}},
+          {'range': 'A2:H2', 'format': {'textFormat': {'bold': True}}},
+          {'range': 'F2', 'format': {'textFormat': {'bold': True, 'foregroundColor':
+                                                    {'red': 0.0, 'green': 0.45, 'blue': 0.15}}}},
+          {'range': 'A3', 'format': {'textFormat': {'italic': True, 'fontSize': 9, 'foregroundColor':
+                                                    {'red': 0.4, 'green': 0.4, 'blue': 0.4}}}},
+          {'range': 'A4:H4', 'format': {'textFormat': {'bold': True}, 'backgroundColor': grey}},
+          {'range': 'J4:L4', 'format': {'textFormat': {'bold': True}, 'backgroundColor': grey}},
+          {'range': f'J{5 + nd}:L{5 + nd}', 'format': {'textFormat': {'bold': True}}},
+          {'range': f'E5:E{n}', 'format': cur},
+          {'range': f'G5:G{n}', 'format': cur},
+          {'range': f'F5:F{n}', 'format': {'numberFormat': {'type': 'PERCENT', 'pattern': '0%'}}},
+          {'range': f'K5:K{5 + nd}', 'format': {'numberFormat': {'type': 'NUMBER', 'pattern': '0'}}},
+          {'range': f'L5:L{5 + nd}', 'format': cur},
+          {'range': f'B5:B{n}', 'format': {'numberFormat': {'type': 'TEXT'}}},
+          {'range': f'H5:H{n}', 'format': {'horizontalAlignment': 'LEFT'}}]
+    for i, st in enumerate(data['statuses']):
+        fm.append({'range': f'H{5 + i}',
+                   'format': green if st.startswith('✅') else amber if st[:1] in ('⏳', '💎') else red})
+    return fm
+
+SUMMARY_COL_WIDTHS = [180, 95, 470, 55, 95, 70, 95, 330, 20, 110, 95, 110]
+
+def _summary_write(ss, data):
+    """Rebuild the summary on a BRAND-NEW tab, then drop every older tab. A sheet
+    from the Apps Script creator carries the buying template's conditional
+    formats, data validation and colours — clearing values leaves all of that
+    behind, a fresh worksheet carries none of it. The old tab stays intact until
+    the new one is fully written, and ONE atomic batchUpdate then deletes the old
+    tabs and gives the new tab its final name, frozen header and widths — a
+    failure or redeploy at any step never leaves the customer a blank sheet or a
+    tab named 'building …' (the next build sweeps any leftover tab)."""
+    old = _summary_retry(lambda: ss.worksheets(), 'list tabs')
+    titles = {getattr(w, 'title', '') for w in old}
+    n = int(time.time() * 1000) % 10**9
+    while f"building {n}" in titles:   # a leftover tab from a failed build
+        n += 1
+    tmp = f"building {n}"
+    ws = _summary_retry(lambda: ss.add_worksheet(
+        title=tmp, rows=max(40, len(data['rows']) + 8), cols=12), 'add tab')
+    _summary_retry(lambda: ws.update(values=data['rows'], range_name='A1',
+                                     value_input_option='RAW'), 'write rows')
+    _summary_retry(lambda: ws.update(values=data['day_block'], range_name='J4',
+                                     value_input_option='RAW'), 'write per-day block')
+    _summary_retry(lambda: ws.batch_format(_summary_formats(data)), 'format')
+    reqs = [{'deleteSheet': {'sheetId': w.id}} for w in old if getattr(w, 'id', None) != ws.id]
+    reqs.append({'updateSheetProperties': {
+        'properties': {'sheetId': ws.id, 'title': data['range'] or 'Summary',
+                       'gridProperties': {'frozenRowCount': 4}},
+        'fields': 'title,gridProperties.frozenRowCount'}})
+    reqs += [{'updateDimensionProperties': {
+        'range': {'sheetId': ws.id, 'dimension': 'COLUMNS', 'startIndex': i, 'endIndex': i + 1},
+        'properties': {'pixelSize': w}, 'fields': 'pixelSize'}}
+        for i, w in enumerate(SUMMARY_COL_WIDTHS)]
+    _summary_retry(lambda: ss.batch_update({'requests': reqs}), 'finish tab')
+    return ws
+
+def _summary_window(created_after, max_days=SUMMARY_MAX_DAYS):
+    """(list_since, window_since) Drive createdTime floors. window_since: the
+    ticket's open time minus clock-skew slack, but never more than max_days back
+    (a repeat seller's long-open ticket must not merge last weekend's deal, which
+    is usually shipped and paid). list_since reaches back to the ticket's open
+    time, so sheets left OUT by the day cap are counted and Kevin is told."""
+    from datetime import timedelta as _td
+    cap = datetime.utcnow() - _td(days=max_days)
+    if created_after is None:
+        s = cap.strftime('%Y-%m-%dT%H:%M:%S')
+        return s, s
+    ca = (created_after.astimezone(timezone.utc).replace(tzinfo=None)
+          if created_after.tzinfo else created_after)
+    floor = ca - _td(minutes=SUMMARY_SKEW_MIN)
+    return floor.strftime('%Y-%m-%dT%H:%M:%S'), max(floor, cap).strftime('%Y-%m-%dT%H:%M:%S')
+
+def _summary_folder(drive, create=False):
+    """The Drive folder summaries live in (never the PSA folder itself)."""
+    if SUMMARY_FOLDER_ID:
+        return SUMMARY_FOLDER_ID
+    if _summary_folder_cache.get('id'):
+        return _summary_folder_cache['id']
+    q = (f"name = '{_summary_q(SUMMARY_FOLDER_NAME)}' and "
+         f"mimeType = 'application/vnd.google-apps.folder' and "
+         f"'{PSA_FOLDER_ID}' in parents and trashed=false")
+    files = _summary_retry(lambda: drive.files().list(
+        q=q, orderBy='createdTime', pageSize=10, fields='files(id,name,createdTime)').execute(),
+        'find summary folder').get('files', [])
+    if files:
+        _summary_folder_cache['id'] = files[0]['id']
+        return files[0]['id']
+    if not create:
+        return None
+    try:
+        f = _summary_retry(lambda: drive.files().create(
+            body={'name': SUMMARY_FOLDER_NAME, 'mimeType': 'application/vnd.google-apps.folder',
+                  'parents': [PSA_FOLDER_ID]}, fields='id').execute(), 'make summary folder')
+    except Exception as e:
+        raise RuntimeError(f"couldn't make the '{SUMMARY_FOLDER_NAME}' Drive folder "
+                           f"({str(e)[:80]}) — make a folder with that name inside the PSA "
+                           f"Slabs folder (or set SUMMARY_FOLDER_ID) and run !summary again")
+    _summary_folder_cache['id'] = f['id']
+    return f['id']
+
+def _summary_meta(drive, sid):
+    """The summary file's metadata, or None if it was trashed or deleted."""
+    try:
+        meta = _summary_retry(lambda: drive.files().get(
+            fileId=sid, fields=SUMMARY_META_FIELDS).execute(), 'check summary')
+    except Exception as e:
+        if re.search(r"\b404\b|not ?found", str(e), re.I):
+            return None
+        raise
+    return None if meta.get('trashed') else meta
+
+def _summary_targets(channel_name):
+    cname = (channel_name or '').lower()
+    targets = {_sanitize_channel_name(cname)}
+    if cname.startswith('ticket-'):
+        targets.add(_sanitize_channel_name(cname[len('ticket-'):]))
+    return targets - {''}
+
+def _summary_find_existing(drive, folder, channel_id, channel_name, customer, created_after,
+                           adopt_seed=False):
+    """This ticket's summary in the summaries folder, created since the ticket
+    opened (a repeat seller's summary from an earlier ticket is never reused):
+    '<customer> — summary (KTS Collectibles)', or with no customer one whose
+    owner sanitizes to the channel name. A file tagged (appProperties) for THIS
+    channel wins; one tagged for another ticket (same seller, two tickets open)
+    is never adopted; untagged ones only when they are unambiguous. adopt_seed:
+    also take an orphaned 'KTS summary <customer> discord …' seed (a redeploy or
+    a failed rename between the creator call and the rename).
+    Returns (file id, owner username, metadata, is_seed) — newest — or None."""
+    if not folder:
+        return None
+    since = _summary_window(created_after)[0]
+    files, token = [], None
+    for _ in range(10):   # paginate
+        kw = {'pageToken': token} if token else {}
+        resp = _summary_retry(lambda: drive.files().list(
+            q=f"'{folder}' in parents and trashed=false and createdTime > '{since}'",
+            orderBy='createdTime desc', pageSize=100,
+            fields=f'nextPageToken,files({SUMMARY_META_FIELDS})', **kw).execute(), 'find summary')
+        files += resp.get('files', [])
+        token = resp.get('nextPageToken')
+        if not token:
+            break
+    targets = _summary_targets(channel_name)
+    mine, untagged, seeds = [], [], []
+    for f in sorted(files, key=lambda f: f.get('createdTime') or '', reverse=True):
+        name = f.get('name') or ''
+        if name.endswith(SUMMARY_NAME_SUFFIX):
+            owner = name[:-len(SUMMARY_NAME_SUFFIX)]
+            if not ((owner == customer) if customer else (_sanitize_channel_name(owner) in targets)):
+                continue
+            tag = (f.get('appProperties') or {}).get(SUMMARY_CHANNEL_PROP)
+            if tag is None:
+                untagged.append((f['id'], owner, f, False))
+            elif tag == str(channel_id):
+                mine.append((f['id'], owner, f, False))
+            # tagged for another ticket: never this one's
+        elif adopt_seed and customer and name.startswith(f"{SUMMARY_SEED_PREFIX}{customer} discord"):
+            seeds.append((f['id'], customer, f, True))
+    if mine:
+        return mine[0]
+    if untagged:
+        if len({o for _, o, _, _ in untagged}) == 1:
+            return untagged[0]
+        print(f"summary lookup: #{channel_name} matches {sorted({o for _, o, _, _ in untagged})} — ambiguous")
+        return None
+    return seeds[0] if seeds else None
+
+def _summary_finalize(drive, sid, customer, channel_id, folder, parents=None):
+    """Rename a fresh (or orphaned) seed to '<customer> — summary (KTS
+    Collectibles)' — no ' discord ' in it, so rebuild_lot_from_sheets,
+    requote_stalled_tickets and the other sweeps ignore it — tag it with its
+    ticket's channel id (best-effort), and if the creator didn't put it in the
+    summaries folder, move it there in the same call."""
+    title = customer + SUMMARY_NAME_SUFFIX
+    kw = {}
+    if folder and parents is not None and folder not in parents:
+        kw = {'addParents': folder}
+        if parents:
+            kw['removeParents'] = ','.join(parents)
+    tagged = {'name': title, 'appProperties': {SUMMARY_CHANNEL_PROP: str(channel_id)}}
+    try:
+        try:
+            _summary_retry(lambda: drive.files().update(
+                fileId=sid, body=tagged, fields='id,name,parents', **kw).execute(), 'rename summary')
+        except Exception as e:
+            print(f"summary {sid}: rename+tag failed ({str(e)[:80]}) — renaming without the tag")
+            _summary_retry(lambda: drive.files().update(
+                fileId=sid, body={'name': title}, fields='id,name,parents', **kw).execute(),
+                'rename summary')
+    except Exception as e:
+        if kw:   # still sitting among the buying sheets
+            raise RuntimeError(f"new summary is stuck in the PSA Slabs folder — move it OUT by hand "
+                               f"(tonight's reconcile reads that folder) and rename it '{title}': "
+                               f"{_summary_url(sid)} ({str(e)[:60]})")
+        raise RuntimeError(f"new summary couldn't be renamed — rename it '{title}' by hand: "
+                           f"{_summary_url(sid)} ({str(e)[:60]})")
+
+def _summary_create(drive, customer, channel_id, folder):
+    """New summary spreadsheet via the same Apps Script creator as buying sheets
+    (the service account's own Drive is quota-full), made in the summaries
+    folder, then renamed + tagged. Returns the file id."""
+    url, _name, data = create_psa_sheet(SUMMARY_SEED_PREFIX + customer, ["00000000"], folder_id=folder)
+    sid = (data or {}).get("sheet_id") or extract_sheet_id(url)
+    if not sid:
+        raise RuntimeError("sheet creator returned no sheet id")
+    parents = _summary_retry(lambda: drive.files().get(
+        fileId=sid, fields='id,parents').execute(), 'check summary folder').get('parents')
+    _summary_finalize(drive, sid, customer, channel_id, folder, parents or [])
+    return sid
+
+def _summary_is_cached(f):
+    return bool(f.get('modifiedTime')) and (f['id'], f['modifiedTime']) in _summary_rows_cache
+
+def _summary_read_rows(gc, f):
+    """A buying sheet's first-tab rows (A:M, raw values: numbers stay numbers, J
+    dates come back as serials) in ONE Sheets read — or none at all when Drive's
+    modifiedTime says the sheet hasn't changed since we last read it."""
+    key = (f['id'], f.get('modifiedTime') or '')
+    if key[1] and key in _summary_rows_cache:
+        _summary_rows_cache.move_to_end(key)
+        return _summary_rows_cache[key]
+    params = {'valueRenderOption': 'UNFORMATTED_VALUE'}
+    def _get():
+        hc = getattr(gc, 'http_client', None)
+        if hc is not None and hasattr(hc, 'values_get'):
+            return hc.values_get(f['id'], 'A1:M', params=params)   # no tab name = first tab
+        return gc.open_by_key(f['id']).values_get('A1:M', params=params)
+    rows = (_summary_retry(_get, f"read {f.get('name')}") or {}).get('values', [])
+    if key[1]:
+        for k in [k for k in _summary_rows_cache if k[0] == key[0]]:
+            del _summary_rows_cache[k]
+        _summary_rows_cache[key] = rows
+        while len(_summary_rows_cache) > SUMMARY_ROWS_CACHE_MAX:
+            _summary_rows_cache.popitem(last=False)
+    return rows
+
+def _summary_owner(name):
+    return (name or '').split(' discord')[0].strip()
+
+def _summary_collect(drive, gc, customer, created_after, trusted_ids=(), cached_id=None):
+    """This deal's buying sheets, oldest first, with their rows:
+      - every '<customer> discord …' sheet (exact owner) inside the window;
+      - trusted_ids: sheets Kevin's cert pastes made in THIS ticket (the
+        cert-path history, plus the ones earlier builds recorded on the summary
+        file itself so they survive a redeploy);
+      - cached_id (channel_sheet) only if it is the customer's own sheet (or
+        one of the trusted ones). The cache is also written by Drive lookups
+        (!requoteall maps 'cwilk.' sheets to #cwilk; older code cached Kevin's
+        newest sheet from a tracking-number lookup), so a sheet named after
+        anyone else — Kevin included — needs the cert-path proof above.
+    Any other sheet is never merged onto the customer's sheet (it is reported). Unchanged sheets
+    are served from the (id, modifiedTime) cache. A sheet that can't be read
+    raises: a customer-visible total must never silently miss a sheet."""
+    list_since, win_since = _summary_window(created_after)
+    safe = _summary_q(customer)
+    files, token = [], None
+    for _ in range(10):   # paginate
+        kw = {'pageToken': token} if token else {}
+        resp = _summary_retry(lambda: drive.files().list(
+            q=(f"name contains '{safe} discord' and '{PSA_FOLDER_ID}' in parents "
+               f"and trashed=false and createdTime > '{list_since}'"),
+            orderBy='createdTime asc', pageSize=100,
+            fields='nextPageToken,files(id,name,createdTime,modifiedTime)', **kw).execute(), 'list sheets')
+        files += resp.get('files', [])
+        token = resp.get('nextPageToken')
+        if not token:
+            break
+    mine = [f for f in files
+            if _summary_owner(f.get('name')) == customer and not _is_summary_sheet_name(f.get('name'))]
+    use = [f for f in mine if (f.get('createdTime') or '')[:19] > win_since]
+    older = [f for f in mine if (f.get('createdTime') or '')[:19] <= win_since]
+    trusted = set(x for x in trusted_ids if x)
+    skipped, extra_ids = [], []
+    for xid in dict.fromkeys([*trusted_ids, cached_id]):
+        if not xid or any(f['id'] == xid for f in mine):
+            continue
+        try:
+            meta = _summary_retry(lambda: drive.files().get(
+                fileId=xid, fields='id,name,createdTime,modifiedTime,trashed').execute(), 'ticket sheet')
+        except Exception as e:
+            print(f"summary: ticket sheet {xid} unreadable ({e}) — skipped")
+            skipped.append(f"{xid[:10]}… (unreadable)")
+            continue
+        name = meta.get('name') or ''
+        if meta.get('trashed') or _is_summary_sheet_name(name):
+            continue
+        owner = _summary_owner(name)
+        if not (owner == customer or xid in trusted):
+            skipped.append(name or xid)   # someone else's sheet cached on this ticket
+            continue
+        ct = meta.get('createdTime') or ''
+        if ct and ct[:19] <= win_since:
+            older.append(meta)
+            continue
+        use.append({'id': xid, 'name': name, 'createdTime': ct or '~',
+                    'modifiedTime': meta.get('modifiedTime') or ''})
+        if owner != customer:
+            extra_ids.append(xid)
+    use.sort(key=lambda f: f.get('createdTime') or '')
+    out, read_any = [], False
+    for f in use:
+        if not _summary_is_cached(f):
+            if read_any and SUMMARY_READ_PAUSE_S:
+                time.sleep(SUMMARY_READ_PAUSE_S)
+            read_any = True
+        out.append({'id': f['id'], 'name': f.get('name', ''),
+                    'createdTime': f.get('createdTime') or '~', 'rows': _summary_read_rows(gc, f)})
+    oldest = min((f.get('createdTime') or '' for f in older), default='')
+    return out, {'older': len(older), 'older_from': oldest[:10], 'skipped': skipped,
+                 'extra_ids': extra_ids}
+
+def _summary_build_sync(channel_id, channel_name, customer, created_after, *, known_sid=None,
+                        allow_create=True, auto=False, cached_id=None,
+                        prev_hash=None, prog=None):
+    """Blocking (run via asyncio.to_thread): build or refresh this ticket's summary.
+      1. Which file: known_sid (if not trashed) -> lookup in the summaries
+         folder -> otherwise create one, only when allow_create (an auto-refresh
+         never creates).
+      2. auto: a summary someone edited by hand is left alone ('hand_edited'),
+         and an unchanged result isn't rewritten ('unchanged').
+      3. Read this deal's sheets, write a fresh tab. Sharing/posting is the
+         caller's job (_summary_publish_sync), only after the write succeeded.
+    prog (dict) gets 'sid' as soon as the file is known, so a failure after that
+    point is reported. Returns {'status': 'ok' | 'unchanged' | 'hand_edited' |
+    'no_summary' | 'no_customer' | 'no_sheets', ...}."""
+    prog = prog if prog is not None else {}
+    drive = get_drive_service()
+    folder = _summary_folder(drive, create=False)
+    sid, meta, adopted = None, None, False
+    if known_sid:
+        meta = _summary_meta(drive, known_sid)
+        if meta:
+            sid = known_sid
+        else:
+            print(f"summary {known_sid} for #{channel_name} is gone (trashed/deleted)")
+    if sid is None:
+        found = _summary_find_existing(drive, folder, channel_id, channel_name, customer,
+                                       created_after, adopt_seed=allow_create)
+        if found:
+            sid, owner, meta, is_seed = found
+            customer = customer or owner
+            if is_seed:
+                _summary_finalize(drive, sid, customer, channel_id, folder, meta.get('parents'))
+                adopted = True
+    if sid:
+        prog.update(sid=sid, customer=customer)
+    if sid is None and not allow_create:
+        return {'status': 'no_summary'}
+    if not customer:
+        return {'status': 'no_customer'}
+    props = (meta or {}).get('appProperties') or {}
+    hand_edited = bool(meta) and not adopted and (meta.get('lastModifyingUser') or {}).get('me') is False
+    base = {'sid': sid, 'customer': customer, 'url': _summary_url(sid) if sid else None,
+            'posted_before': props.get(SUMMARY_POSTED_PROP) == '1', 'hand_edited': hand_edited}
+    if auto and hand_edited:
+        return {**base, 'status': 'hand_edited'}
+    prev_extra = [props[k] for k in sorted(props, key=lambda k: (len(k), k))
+                  if k.startswith(SUMMARY_EXTRA_PROP) and props[k]]
+    trusted = list(dict.fromkeys(prev_extra + kevin_pasted_sheet_ids(channel_id)))
+    gc = get_gspread_client()
+    _summary_set_timeout(gc)
+    sheets, info = _summary_collect(drive, gc, customer, created_after, trusted, cached_id)
+    data = build_summary_data(customer, sheets, stamp=f"Last updated {_summary_stamp()}")
+    base.update(n_sheets=len(sheets), sheet_names=[s['name'] for s in sheets], **info)
+    if not data['n']:
+        return {**base, 'status': 'no_sheets'}
+    stats = {k: data[k] for k in ('n', 'n_buy', 'n_pend', 'n_nobuy', 'n_hand', 'tot_comp',
+                                  'tot_pay', 'range', 'buy_certs', 'zeroed', 'pay_err_sheets', 'hash')}
+    if auto and prev_hash and data['hash'] == prev_hash:
+        return {**base, **stats, 'status': 'unchanged', 'created': False}
+    created = False
+    if sid is None:
+        folder = folder or _summary_folder(drive, create=True)
+        sid = _summary_create(drive, customer, channel_id, folder)
+        created = True
+        prog.update(sid=sid, customer=customer)
+        base.update(sid=sid, url=_summary_url(sid))
+    ss = _summary_retry(lambda: gc.open_by_key(sid), 'open summary')
+    _summary_write(ss, data)
+    extra = list(dict.fromkeys(prev_extra + info['extra_ids']))[-SUMMARY_EXTRA_MAX:]
+    if extra != prev_extra:
+        try:   # remembered on the file: survives a redeploy that wipes DATA_DIR
+            _summary_retry(lambda: drive.files().update(fileId=sid, body={'appProperties': {
+                f"{SUMMARY_EXTRA_PROP}{i + 1}": v for i, v in enumerate(extra)}},
+                fields='id').execute(), 'record ticket sheets')
+        except Exception as e:
+            print(f"summary {sid}: couldn't record ticket sheets on the file ({str(e)[:80]})")
+    return {**base, **stats, 'status': 'ok', 'created': created}
+
+def _summary_publish_sync(sid):
+    """Right before the link is posted: make sure the file's real sharing matches
+    SUMMARY_LINK_SHARING (checked every time — a share that failed or never ran
+    is retried). Returns {'link_open', 'shared_now', 'share_err'}."""
+    drive = get_drive_service()
+    out = {'link_open': False, 'shared_now': False, 'share_err': None}
+    try:
+        perms = _summary_retry(lambda: drive.permissions().list(
+            fileId=sid, fields='permissions(id,type,role)').execute(), 'read sharing').get('permissions', [])
+        out['link_open'] = any(p.get('type') == 'anyone' for p in perms)
+        if not out['link_open'] and SUMMARY_LINK_SHARING:
+            _summary_retry(lambda: drive.permissions().create(
+                fileId=sid, body={'type': 'anyone', 'role': 'reader'}, fields='id').execute(),
+                'share summary')
+            out['link_open'] = out['shared_now'] = True
+    except Exception as e:
+        out['share_err'] = f"{type(e).__name__}: {str(e)[:80]}"
+        print(f"summary {sid}: link sharing check failed ({e})")
+    return out
+
+def _summary_mark_posted_sync(sid):
+    try:
+        _summary_retry(lambda: get_drive_service().files().update(
+            fileId=sid, body={'appProperties': {SUMMARY_POSTED_PROP: '1'}}, fields='id').execute(),
+            'mark posted')
+    except Exception as e:
+        print(f"summary {sid}: couldn't mark as posted ({str(e)[:80]})")
+
+def _summary_lock(channel_id):
+    """One build at a time per ticket (a !summary and an auto-refresh racing
+    would delete each other's fresh tab). Re-made if the event loop changed."""
+    loop = asyncio.get_running_loop()
+    ent = _summary_locks.get(channel_id)
+    if ent is None or ent[0] is not loop:
+        ent = (loop, asyncio.Lock())
+        _summary_locks[channel_id] = ent
+    return ent[1]
+
+def _summary_global_sem():
+    """One summary build at a time BOT-WIDE: they share the Sheets quota with
+    every ticket's quote."""
+    loop = asyncio.get_running_loop()
+    ent = _summary_global.get('sem')
+    if ent is None or ent[0] is not loop:
+        ent = (loop, asyncio.Semaphore(1))
+        _summary_global['sem'] = ent
+    return ent[1]
+
+async def _summary_acquire(channel_id, timeout=None):
+    """Take the ticket's lock, then the bot-wide slot. Returns a release()
+    callable, or None if `timeout` seconds passed first (nothing held)."""
+    lk, sem = _summary_lock(channel_id), _summary_global_sem()
+    async def both():
+        await lk.acquire()
+        try:
+            await sem.acquire()
+        except BaseException:
+            lk.release()
+            raise
+    def release():
+        sem.release()
+        lk.release()
+    if timeout is None:
+        await both()
+        return release
+    task = asyncio.ensure_future(both())
+    done, _ = await asyncio.wait({task}, timeout=timeout)
+    if task not in done:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            return None
+    task.result()
+    return release
+
+def _summary_register(channel_id, channel, res, confirmed=None, posted=None, requested=False):
+    """Remember a built/found summary for this ticket (auto-refresh + ticker)."""
+    ent = summary_sheets.get(channel_id)
+    if ent is None or ent.get('sid') != res.get('sid'):
+        ent = {}
+    ent.update(sid=res['sid'], customer=res['customer'], channel=channel)
+    for k in ('hash', 'buy_certs', 'tot_pay'):
+        if res.get(k) is not None:
+            ent[k] = res[k]
+    ent['posted'] = bool(ent.get('posted') or res.get('posted_before') or posted)
+    if confirmed is not None:
+        ent['confirmed'] = bool(ent.get('confirmed') or confirmed)
+    ent.setdefault('confirmed', ent['posted'])
+    if requested or 'active_since' not in ent:
+        ent['active_since'] = time.time()
+    if requested:
+        ent.pop('paused', None)
+    summary_sheets[channel_id] = ent
+    _summary_none_checked.discard(channel_id)
+    return ent
+
+def summary_customer_message(url, first, link_open, rng=''):
+    """The ticket post (customer-visible) — fixed wording, nothing internal."""
+    span = f" {rng}" if rng else ""
+    head = (f"📊 Here's one sheet with everything you've sent us{span}: " if first
+            else f"📊 Updated — here's one sheet with everything you've sent us{span}: ")
+    lines = [head + url,
+             "Every card, what we're buying and your total payout in one place — "
+             "it keeps updating as we price your cards."]
+    if not link_open:
+        lines.append("Click the link and request access to open it.")
+    return "\n".join(lines)
+
+def _summary_list(items, n=5):
+    items = list(items)
+    return ", ".join(items[:n]) + (f" +{len(items) - n} more" if len(items) > n else "")
+
+def _summary_kevin_notes(res):
+    """Kevin-only notes about what a build left out / found odd."""
+    notes = ""
+    if res.get('older'):
+        notes += (f" ℹ️ Left out {res['older']} older sheet{'s' if res['older'] != 1 else ''} "
+                  f"of theirs from this ticket (from {res.get('older_from') or '?'}) — over "
+                  f"{SUMMARY_MAX_DAYS} days old, treated as an earlier deal.")
+    if res.get('skipped'):
+        notes += (f" ⚠️ Left out sheet(s) that aren't theirs or from your pastes in this ticket: "
+                  f"{_summary_list(res['skipped'])}.")
+    if res.get('zeroed'):
+        notes += (f" ℹ️ {len(res['zeroed'])} card(s) bought on an earlier sheet are $0 on a later "
+                  f"one ({_summary_list(res['zeroed'])}) — shown as not buying; check that's intended.")
+    if res.get('pay_err_sheets'):
+        notes += (f" ⚠️ Broken payout cells (column I) on {_summary_list(res['pay_err_sheets'])} — "
+                  f"used comp × rate for those cards; fix the sheet.")
+    return notes
+
+async def run_summary_command(message, post=False):
+    """Kevin typed !summary (or `!summary post`) in a ticket. Never raises; every
+    problem goes to Kevin's DMs only — the ticket gets the link or nothing."""
+    channel = message.channel
+    channel_id = channel.id
+    cname = getattr(channel, 'name', '?')
+    try:
+        if channel_id in _summary_cmd_running:
+            await ping_kevin(f"📊 Still building #{cname}'s summary from your last `!summary` — "
+                             f"the link goes in the ticket when it's done.", channel)
+            return
+        _summary_cmd_running.add(channel_id)
+        try:
+            try:
+                await message.add_reaction('👀')   # ack: a first build can take a minute or two
+            except Exception:
+                pass
+            await _run_summary(channel, channel_id, cname, post)
+        finally:
+            _summary_cmd_running.discard(channel_id)
+    except Exception as e:
+        print(f"!summary failed for #{cname}: {e}")
+        await ping_kevin(f"⚠️ `!summary` in #{cname} failed ({type(e).__name__}: {str(e)[:300]}) — "
+                         f"nothing was posted in the ticket.", channel)
+
+async def _run_summary(channel, channel_id, cname, post):
+    ent = summary_sheets.get(channel_id) or {}
+    customer = ticket_customer_from_overwrites(channel)
+    errs, from_sheets = [], False
+    if not customer and ent.get('customer') and ent.get('confirmed'):
+        customer = ent['customer']   # Kevin already confirmed this ticket's customer
+    if not customer:
+        customer = await customer_username_for_channel(channel, days=SUMMARY_MAX_DAYS, errors=errs)
+        from_sheets = customer is not None
+    if not customer:
+        why = f"Drive/Sheets error: {errs[0]}" if errs else "couldn't tell whose ticket this is"
+        await ping_kevin(f"📊 `!summary` in #{cname}: no summary made ({why}). "
+                         f"Nothing was posted in the ticket.", channel)
+        return
+    if from_sheets and post and ent.get('customer') not in (None, customer):
+        await ping_kevin(f"📊 `!summary post` in #{cname}: the sheet names now point at **{customer}**, "
+                         f"not **{ent['customer']}** you checked — nothing posted. Run `!summary` again.",
+                         channel)
+        return
+    confirmed = (not from_sheets) or post   # `!summary post` = Kevin checked who it is
+    release = await _summary_acquire(channel_id, timeout=SUMMARY_LOCK_WAIT_S)
+    if release is None:
+        await ping_kevin(f"📊 `!summary` in #{cname}: another summary build is still running "
+                         f"(Google is slow or rate-limiting) — try again in a few minutes. "
+                         f"Nothing was posted.", channel)
+        return
+    pub = None
+    try:
+        ent = summary_sheets.get(channel_id) or {}
+        known = ent.get('sid') if ent.get('customer') == customer else None
+        res = await asyncio.to_thread(
+            _summary_build_sync, channel_id, cname, customer, getattr(channel, 'created_at', None),
+            known_sid=known, allow_create=True, auto=False, cached_id=channel_sheet.get(channel_id))
+        if res.get('status') == 'ok':
+            if confirmed:
+                pub = await asyncio.to_thread(_summary_publish_sync, res['sid'])
+            ent = _summary_register(channel_id, channel, res, confirmed=confirmed, requested=True)
+    finally:
+        release()
+    if res.get('status') != 'ok':
+        await ping_kevin(f"📊 `!summary` for **{customer}**: no buying sheets with certs from this "
+                         f"deal in this ticket — nothing posted in the ticket."
+                         + _summary_kevin_notes(res), channel)
+        return
+    counts = (f"{res['n']} cards · {res['n_buy']} buying"
+              + (f" · {res['n_pend']} still pricing" if res.get('n_pend') else '')
+              + f" · {res['n_nobuy']} not buying")
+    notes = _summary_kevin_notes(res)
+    if res.get('hand_edited'):
+        notes += " ℹ️ Someone had edited the summary itself by hand — it was rebuilt from the buying sheets."
+    if not confirmed:
+        await ping_kevin(
+            f"📊 Summary built for **{res['customer']}** ({res['range']}) but NOT posted: this channel has "
+            f"no ticket-opener overwrite, so I matched the customer by sheet name. Check it's them: "
+            f"{res['url']} — {counts}, payout **${res['tot_pay']:,.2f}**, from "
+            f"{_summary_list(res.get('sheet_names') or [])}. If it's right, type `!summary post` "
+            f"in the ticket.{notes}", channel)
+        return
+    first = not ent.get('posted')
+    link_open = bool(pub and pub['link_open'])
+    try:
+        await channel.send(summary_customer_message(res['url'], first, link_open, res['range']))
+        posted = "Link posted in the ticket."
+        if first:
+            await asyncio.to_thread(_summary_mark_posted_sync, res['sid'])
+        ent['posted'] = True
+    except Exception as e:
+        print(f"summary: ticket post failed for #{cname}: {e}")
+        posted = "⚠️ Couldn't post the link in the ticket — send it yourself."
+    if pub and pub['shared_now']:
+        notes += " 🔗 Anyone with the link can view it."
+    elif not link_open:
+        notes += (f" ⚠️ Link isn't shared ({pub['share_err']}) — they'll have to request access."
+                  if pub and pub['share_err'] else " ⚠️ Link isn't shared — they'll have to request access.")
+    if from_sheets:
+        notes += " ℹ️ Customer matched by sheet name (you confirmed with `!summary post`)."
+    await ping_kevin(
+        f"📊 Summary {'created' if res['created'] else 'refreshed'} for **{res['customer']}** "
+        f"({res['range']}): {counts} from {res['n_sheets']} sheet{'s' if res['n_sheets'] != 1 else ''} — "
+        f"comp ${res['tot_comp']:,.2f} → payout **${res['tot_pay']:,.2f}** — {res['url']} {posted}"
+        f"{notes} It refreshes itself after each quote here and every {SUMMARY_TICK_S // 60} min for "
+        f"{SUMMARY_TICK_MAX_H}h; hand edits on the summary itself pause that.", channel)
+
+def schedule_summary_refresh(channel, channel_id):
+    """Called after every quote (price_and_send_psa_offer) and by the ticker: if
+    this ticket has a summary, refresh it in the background. Never raises and
+    never awaits, so the quote path can't be delayed or broken. A ticket with no
+    summary in memory gets ONE background Drive lookup per process (restart
+    recovery); never auto-creates. Returns True if a refresh was scheduled."""
+    try:
+        if channel_id in _summary_refresh_pending:
+            return False   # one already waiting — it will read this quote's sheet too
+        ent = summary_sheets.get(channel_id)
+        if ent is None and channel_id in _summary_none_checked:
+            return False
+        if ent is not None and ent.get('paused'):
+            return False   # hand-edited summary: Kevin was told, waits for his !summary
+        _summary_refresh_pending.add(channel_id)
+        try:
+            task = asyncio.get_running_loop().create_task(_summary_auto_refresh(channel, channel_id))
+        except Exception:
+            _summary_refresh_pending.discard(channel_id)
+            raise
+        _summary_bg_tasks.add(task)
+        task.add_done_callback(_summary_bg_tasks.discard)
+        return True
+    except Exception as e:
+        print(f"summary auto-refresh not scheduled for {channel_id}: {e}")
+        return False
+
+async def _summary_auto_refresh(channel, channel_id):
+    cname = getattr(channel, 'name', '?')
+    known = channel_id in summary_sheets
+    started = False
+    prog = {}
+    try:
+        if SUMMARY_AUTO_REFRESH_DELAY_S:
+            await asyncio.sleep(SUMMARY_AUTO_REFRESH_DELAY_S)
+        release = await _summary_acquire(channel_id)
+        try:
+            started = True
+            _summary_refresh_pending.discard(channel_id)   # later quotes schedule anew
+            ent = summary_sheets.get(channel_id)
+            known = ent is not None
+            if ent is None and channel_id in _summary_none_checked:
+                return
+            if ent is not None and ent.get('paused'):
+                return
+            customer = (ent or {}).get('customer') or ticket_customer_from_overwrites(channel)
+            res = await asyncio.to_thread(
+                _summary_build_sync, channel_id, cname, customer, getattr(channel, 'created_at', None),
+                known_sid=(ent or {}).get('sid'), allow_create=False, auto=True,
+                cached_id=channel_sheet.get(channel_id),
+                prev_hash=(ent or {}).get('hash'), prog=prog)
+        finally:
+            release()
+        st = res.get('status')
+        if st in ('ok', 'unchanged'):
+            prev = dict(summary_sheets.get(channel_id) or {})   # snapshot: register mutates it
+            same_file = prev.get('sid') == res['sid']
+            ent = _summary_register(channel_id, channel, res)
+            if st == 'ok' and same_file and ent.get('posted') and prev.get('buy_certs') is not None:
+                dropped = sorted(set(prev['buy_certs']) - set(res.get('buy_certs') or ()))
+                was, now = prev.get('tot_pay') or 0.0, res['tot_pay']
+                if dropped or now < was - 0.005:
+                    await ping_kevin(
+                        f"📊 #{cname} summary refreshed — the customer now sees payout "
+                        f"${was:,.2f} → **${now:,.2f}**"
+                        + (f"; no longer buying: {_summary_list(dropped)}" if dropped else "")
+                        + f". If that's wrong, fix the buying sheet. {res['url']}", channel)
+            print(f"summary auto-refresh #{cname}: {st}, {res.get('n')} cards, "
+                  f"${res.get('tot_pay') or 0:,.2f} payout")
+        elif st == 'hand_edited':
+            ent = _summary_register(channel_id, channel, res)
+            if not ent.get('paused'):
+                ent['paused'] = True
+                await ping_kevin(
+                    f"✋ Someone edited #{cname}'s summary sheet by hand, so I stopped auto-refreshing "
+                    f"it (a rebuild would wipe that edit). Edit the buying sheets instead and type "
+                    f"`!summary` in the ticket to rebuild it. {res['url']}", channel)
+        elif st in ('no_summary', 'no_customer'):
+            summary_sheets.pop(channel_id, None)
+            _summary_none_checked.add(channel_id)
+            print(f"summary auto-refresh #{cname}: no summary for this ticket — off until !summary")
+        else:
+            print(f"summary auto-refresh for #{cname}: {st} — left as is")
+    except Exception as e:
+        print(f"summary auto-refresh failed for #{cname}: {e}")
+        if prog.get('sid') and channel_id not in summary_sheets and prog.get('customer'):
+            _summary_register(channel_id, channel, {'sid': prog['sid'], 'customer': prog['customer']})
+        if known or prog.get('sid'):   # only nag about a summary that's known to exist
+            try:
+                await ping_kevin(f"⚠️ Summary sheet auto-refresh failed for #{cname} "
+                                 f"({type(e).__name__}: {str(e)[:100]}) — type `!summary` "
+                                 f"in the ticket to retry.", channel)
+            except Exception:
+                pass
+    finally:
+        if not started:   # once started, the flag belongs to the NEXT quote's refresh
+            _summary_refresh_pending.discard(channel_id)
+
+def _summary_recover_sync():
+    """After a restart: summaries made in the last SUMMARY_TICK_MAX_H hours,
+    tagged with their ticket — [(channel_id, sid, owner, posted, created epoch)]."""
+    drive = get_drive_service()
+    folder = _summary_folder(drive, create=False)
+    if not folder:
+        return []
+    from datetime import timedelta as _td
+    since = (datetime.utcnow() - _td(hours=SUMMARY_TICK_MAX_H)).strftime('%Y-%m-%dT%H:%M:%S')
+    resp = _summary_retry(lambda: drive.files().list(
+        q=f"'{folder}' in parents and trashed=false and createdTime > '{since}'",
+        orderBy='createdTime desc', pageSize=200,
+        fields='files(id,name,createdTime,appProperties)').execute(), 'recover summaries')
+    out = []
+    for f in resp.get('files', []):
+        name, props = f.get('name') or '', f.get('appProperties') or {}
+        tag = str(props.get(SUMMARY_CHANNEL_PROP) or '')
+        if not (name.endswith(SUMMARY_NAME_SUFFIX) and tag.isdigit()):
+            continue
+        try:
+            ct = datetime.strptime((f.get('createdTime') or '')[:19], '%Y-%m-%dT%H:%M:%S')
+            ts = ct.replace(tzinfo=timezone.utc).timestamp()
+        except ValueError:
+            ts = time.time()
+        out.append((int(tag), f['id'], name[:-len(SUMMARY_NAME_SUFFIX)],
+                    props.get(SUMMARY_POSTED_PROP) == '1', ts))
+    return out
+
+async def _summary_recover():
+    """Re-register active summaries after a restart so the ticker keeps them
+    fresh even if no new quote lands in their ticket."""
+    try:
+        found = await asyncio.to_thread(_summary_recover_sync)
+    except Exception as e:
+        print(f"summary recovery scan failed: {e}")
+        return 0
+    n = 0
+    for cid, sid, owner, posted, ts in found:   # newest first: first one per ticket wins
+        if cid in summary_sheets:
+            continue
+        ch = bot.get_channel(cid)
+        if ch is None:
+            continue   # ticket closed
+        summary_sheets[cid] = {'sid': sid, 'customer': owner, 'channel': ch, 'posted': posted,
+                               'confirmed': posted, 'active_since': ts}
+        n += 1
+    if n:
+        print(f"summary: re-registered {n} active summar{'y' if n == 1 else 'ies'} after restart")
+    return n
+
+async def _summary_tick_once():
+    """Queue a refresh for every active summary (cheap when nothing changed:
+    Drive metadata only, no Sheets reads or writes)."""
+    n, now = 0, time.time()
+    for cid, ent in list(summary_sheets.items()):
+        if ent.get('paused') or now - ent.get('active_since', now) > SUMMARY_TICK_MAX_H * 3600:
+            continue
+        try:
+            ch = bot.get_channel(cid)
+        except Exception:
+            ch = ent.get('channel')
+        if ch is None:   # ticket closed (channel deleted): stop refreshing its summary
+            summary_sheets.pop(cid, None)
+            continue
+        if schedule_summary_refresh(ch, cid):
+            n += 1
+    return n
+
+async def summary_ticker():
+    await _summary_recover()
+    while True:
+        await asyncio.sleep(SUMMARY_TICK_S)
+        try:
+            await _summary_tick_once()
+        except Exception as e:
+            print(f"summary ticker error: {e}")
 
 def _cors(resp):
     resp.headers["Access-Control-Allow-Origin"] = "*"
@@ -3463,6 +5124,7 @@ def build_recent_tickets_csv(days=3, chan_links=None):
         q=f"'{PSA_FOLDER_ID}' in parents and trashed=false and createdTime > '{since}'",
         orderBy='createdTime asc', pageSize=200,
         fields='files(name,id,createdTime)').execute().get('files', [])
+    files = [f for f in files if not _is_summary_sheet_name(f.get('name'))]   # !summary sheets
     gcl = get_gspread_client()
     header = "Date,Customer,Cert,Card,Grade,Value,Rate,Payout,Ticket"
     by_cert = {}   # cert -> csv row (dedupes resubmitted lots; last sheet wins)
@@ -3549,9 +5211,14 @@ async def requote_stalled_tickets(days=7):
     done = skipped = failed = 0
     quoted_channels = set()
     for f in files:
+        if _is_summary_sheet_name(f.get('name')):
+            continue   # a !summary sheet, not a buying sheet — never requote it
         def _read(fid=f['id']):
             ws = get_gspread_client().open_by_key(fid).get_worksheet(0)
-            certs = [c for c in ws.col_values(2)[1:] if str(c).strip().isdigit()]
+            # A stalled sheet never got its column A stamped, so CGC is told
+            # apart by length (10+ digits) — same token the live quote uses.
+            certs = [_sheet_cert_token('', str(c).strip(), '')
+                     for c in ws.col_values(2)[1:] if str(c).strip().isdigit()]
             filled = [v for v in ws.col_values(7)[1:]
                       if str(v).strip() not in ('', 'not found', SHEET_NOT_LOADED_MARK)]
             return certs, filled
@@ -3624,6 +5291,10 @@ async def on_ready():
         _HELPER_MONITOR_STARTED = True
         asyncio.create_task(helper_health_monitor())
         asyncio.create_task(payout_digest_loop())
+    if not _SUMMARY_TICKER.get('task'):
+        # Customer summary sheets: restart recovery + periodic refresh (team edits,
+        # hand prices) of every active summary.
+        _SUMMARY_TICKER['task'] = asyncio.create_task(summary_ticker())
     global _PENDING_RETRIES_RESUMED
     if not _PENDING_RETRIES_RESUMED:
         _PENDING_RETRIES_RESUMED = True
@@ -4017,6 +5688,21 @@ async def on_message(message):
             )
         return
 
+    # ── !summary (Kevin only, inside the ticket): ONE customer-visible sheet with
+    # everything this ticket's customer sent this deal (latest priced row wins per
+    # cert); link posted in the ticket, refreshed after every later quote and on a
+    # timer. Anyone else's !summary is ignored. ──
+    _cmd = message.content.strip().lower()
+    if _cmd == '!summary' or _cmd.startswith('!summary '):
+        if message.author.id == YOUR_DISCORD_USER_ID:
+            if is_ticket:
+                # `!summary post`: Kevin checked a summary whose customer was matched
+                # by sheet name (no ticket-opener overwrite) — now post it.
+                await run_summary_command(message, post=_cmd.split()[1:2] == ['post'])
+            else:
+                await ping_kevin("📊 `!summary` only works inside a customer's ticket channel.")
+        return
+
     if not is_ticket:
         return
 
@@ -4041,6 +5727,39 @@ async def on_message(message):
             break
 
     certs = extract_certs(text) if text else []
+
+    # A lone bare 10-digit number with no "CGC" anywhere is as likely a phone /
+    # Zelle number as a CGC slab. Ask CardLadder BEFORE making a sheet — a junk
+    # sheet would be customer-visible AND replace this ticket's cached sheet (so
+    # the 'ship' / tracking rows would land on it). Not a CGC slab on CardLadder
+    # -> the message is treated as having no cert at all (exactly what the
+    # pre-CGC bot did with it); Kevin gets a quiet heads-up, the customer nothing.
+    prefetched_comps = None
+    if certs and cgc_needs_confirm(text, certs):
+        _probe, _probe_err = [], None
+        try:
+            async with message.channel.typing():
+                _probe = await asyncio.to_thread(lookup_comps, certs)
+        except Exception as e:
+            _probe_err = f"{type(e).__name__}: {str(e)[:80]}"
+        if any(c.get('found') for c in _probe or []):
+            prefetched_comps = _probe
+        else:
+            _num = cert_digits(certs[0])
+            if _probe_err or not _probe or any(_comp_is_infra_error(c) for c in _probe):
+                _why = _probe_err or "CardLadder page didn't load"
+                await ping_kevin(
+                    f"⚠️ **{username}** sent a lone number `{_num}` that might be a CGC cert, "
+                    f"but the comp helper couldn't check it ({_why}). No sheet made — if it's "
+                    f"a cert, have them resend it with \"CGC\" in front once the helper's back.",
+                    message.channel)
+            else:
+                await ping_kevin(
+                    f"ℹ️ **{username}** sent a lone number `{_num}` — CardLadder has no CGC "
+                    f"slab with that cert, so the bot ignored it (phone / payment number?). "
+                    f"No sheet made; if it IS a CGC cert, quote it by hand.",
+                    message.channel)
+            certs = []
 
     # ── WELCOME ──────────────────────────────────────────────────────────────────
     # Send the welcome EXACTLY ONCE, at the very start of the ticket. welcomed_tickets
@@ -4331,6 +6050,8 @@ async def on_message(message):
                 sheet_id = data.get("sheet_id") or extract_sheet_id(sheet_url)
                 if sheet_id:
                     remember_channel_sheet(channel_id, sheet_id)
+                    record_ticket_sheet(channel_id, sheet_id, username,
+                                        message.author.id == YOUR_DISCORD_USER_ID)
                     # Stamp VIP formulas at CREATION time too: if the helper is
                     # down and Kevin ends up quoting this sheet by hand (or the
                     # retry exhausts), the sheet must already carry their rates.
@@ -4352,11 +6073,14 @@ async def on_message(message):
                 # Now look up comps and price the lot (slow path).
                 comps = []
                 comp_error = None
-                try:
-                    comps = await asyncio.to_thread(lookup_comps, certs)
-                except Exception as e:
-                    comp_error = str(e)
-                    print(f"Helper comp lookup error: {e}")
+                if prefetched_comps is not None:
+                    comps = prefetched_comps   # the lone-number CardLadder check above
+                else:
+                    try:
+                        comps = await asyncio.to_thread(lookup_comps, certs)
+                    except Exception as e:
+                        comp_error = str(e)
+                        print(f"Helper comp lookup error: {e}")
 
                 await quote_or_pend_live(message.channel, channel_id, username, certs,
                                          comps, comp_error, sheet_id, sheet_url)
@@ -4364,20 +6088,62 @@ async def on_message(message):
                 print(f"Sheet error: {e}")
                 await message.channel.send("Small hiccup — Kevin will set this up manually and be right with you!")
                 await ping_kevin(
-                    f"⚠️ Sheet failed — **{username}**\nCerts: {', '.join(certs)}\nError: {str(e)}",
+                    f"⚠️ Sheet failed — **{username}**\nCerts: {', '.join(cert_label(c) for c in certs)}\nError: {str(e)}",
                     message.channel
                 )
         return
 
     # ── AGREED / SHIPPING ─────────────────────────────────────────────────────────
     if is_agreeing(text):
-        # A restart wiped this ticket's lot: rebuild it from the customer's sheets so
-        # Sports/One Piece still route to Doral (skip if Kevin himself typed it).
-        if channel_id not in lot_state and message.author.id != YOUR_DISCORD_USER_ID:
+        # Whose deal is this? When KEVIN types "ship" in a customer's ticket,
+        # username is HIS name — resolve the ticket's customer (channel overwrites
+        # first, sheet names as a fallback) so the lot rebuild, ship-list record,
+        # sheet lookup and pings are about the customer (Oct 18: yungturtle's NBA
+        # lot got the VA address).
+        kevin_typed = message.author.id == YOUR_DISCORD_USER_ID
+        lot_wiped = channel_id not in lot_state
+        cust_errs, cust_from_sheets, drive_tried = [], False, False
+        if not kevin_typed:
+            customer = username
+        else:
+            # Discord first: the ticket opener's member overwrite (no network call).
+            customer = ticket_customer_from_overwrites(message.channel)
+            # The sheet-name scan costs Drive calls — only spend them BEFORE the
+            # address when a wiped lot needs a name to rebuild from.
+            if customer is None and lot_wiped:
+                drive_tried = True
+                customer = await customer_username_for_channel(message.channel, errors=cust_errs)
+                cust_from_sheets = customer is not None
+        who = customer or f"#{message.channel.name}"
+        typed_by = f"You typed 'ship' for {who}" if kevin_typed else f"{username} typed 'ship'"
+        # A restart wiped this ticket's lot: rebuild it from this ticket's sheets
+        # (the customer's, plus the cached one even if Kevin pasted it) so
+        # Sports/One Piece still route to Doral.
+        rebuild_err = None
+        if lot_wiped and customer:
             try:
-                await asyncio.to_thread(rebuild_lot_from_sheets, channel_id, username)
+                await asyncio.to_thread(
+                    rebuild_lot_from_sheets, channel_id, customer,
+                    created_after=getattr(message.channel, 'created_at', None),
+                    extra_sheet_id=[channel_sheet.get(channel_id)] + kevin_pasted_sheet_ids(channel_id))
             except Exception as e:
-                print(f"lot rebuild from sheets failed for {username}: {e}")
+                rebuild_err = f"{type(e).__name__}: {str(e)[:80]}"
+                print(f"lot rebuild from sheets failed for {customer}: {e}")
+        # Nothing rebuilt -> compose_shipping fails open to the VA address. A
+        # customer-typed ship already says so in knote; when Kevin typed it, say
+        # why and that the address needs a second look.
+        rebuild_warn = ""
+        if kevin_typed and lot_wiped and channel_id not in lot_state:
+            _err = rebuild_err or (cust_errs[0] if cust_errs else None)
+            if _err:
+                _why = f"Drive/Sheets error: {_err}"
+            elif customer:
+                _why = f"no priced rows on {customer}'s sheets from this ticket"
+            else:
+                _why = "couldn't tell whose ticket this is"
+            rebuild_warn = (f" ⚠️ Lot was wiped by a restart and couldn't be rebuilt ({_why})"
+                            " — they got the default VA address; double-check it "
+                            "(Sports/One Piece ship to Doral).")
         # Legacy combined-lot minimum (currently MIN_LOT_VALUE=0, so inert) — still
         # honored if ever re-enabled. Fail OPEN with no recorded lot (redeploy wiped
         # in-memory state) so we never stonewall a seller who already got an offer.
@@ -4385,7 +6151,7 @@ async def on_message(message):
             _sc, _sv, _si, _cb = lot_summary(channel_id)
             await message.channel.send(proceed_or_hold_tail(channel_id))
             await ping_kevin(
-                f"⏳ **{username} typed 'ship' but lot is below minimum** "
+                f"⏳ **{typed_by} but lot is below minimum** "
                 f"({_sc} slab(s), combined ${_cb:,.2f}) — address NOT sent.",
                 message.channel
             )
@@ -4393,34 +6159,51 @@ async def on_message(message):
         # Lane-aware: Pokémon → VA (no min); Sports/One Piece → Doral ($1,500+).
         ship_msg, gave_addr, knote = compose_shipping(channel_id)
         await message.channel.send(ship_msg)
+        if kevin_typed and customer is None and not drive_tried:
+            # The address is out — now a Drive scan can name the customer for the
+            # ping, ship-list record and tracking row without delaying it.
+            customer = await customer_username_for_channel(message.channel)
+            cust_from_sheets = customer is not None
+            who = customer or f"#{message.channel.name}"
+            typed_by = f"You typed 'ship' for {who}"
+        if cust_from_sheets:
+            rebuild_warn += (" ℹ️ Customer matched by sheet name (no ticket-opener "
+                             "overwrite on the channel) — double-check it's them.")
         if not gave_addr:
             # Sports/OP-only under the $1,500 minimum — held, no address sent.
             await ping_kevin(
-                f"⏳ **{username} typed 'ship' — {knote}.** Address NOT sent.",
+                f"⏳ **{typed_by} — {knote}.** Address NOT sent.{rebuild_warn}",
                 message.channel
             )
             return
         # Snapshot the accepted ship-list for the local ticket tracker (GET /tickets).
         try:
-            _rec = record_accepted_ship_list(channel_id, username)
+            _rec = record_accepted_ship_list(channel_id, customer or message.channel.name)
         except Exception as e:
             _rec = None
             print(f"ship-list record failed (non-critical): {e}")
         _rec_note = (f" 📦 Ship-list recorded ({len(_rec['certs'])} certs) — tracker → Sync from bot."
                      if _rec else " ⚠️ No lot on record to snapshot (redeploy?) — add this one to the tracker manually.")
-        await ping_kevin(f"✅ **{username} agreed** — shipping sent ({knote}).{_rec_note}", message.channel)
+        _by_note = " (you typed 'ship')" if kevin_typed else ""
+        await ping_kevin(f"✅ **{who} agreed**{_by_note} — shipping sent ({knote}).{_rec_note}{rebuild_warn}",
+                         message.channel)
         # Resolve the sheet through the cache + Drive fallback (channel_sheet used
         # to be memory-only, so a redeploy between quote and "ship" silently
-        # skipped the tracking row).
-        ship_sheet_id = await find_sheet_for_channel(
-            channel_id, message.channel.name, username, message.channel.created_at)
+        # skipped the tracking row). Never search by Kevin's own name — it could
+        # match a sheet of certs he pasted elsewhere.
+        try:
+            ship_sheet_id = await find_sheet_for_channel(
+                channel_id, message.channel.name, customer or "", message.channel.created_at)
+        except Exception as e:
+            ship_sheet_id = None
+            print(f"ship: sheet lookup failed for {who} (non-critical, no tracking row): {e}")
         if ship_sheet_id:
             try:
                 import urllib.request as urlreq
                 post_data = json.dumps({
                     "action": "add_tracking",
                     "sheet_id": ship_sheet_id,
-                    "username": username
+                    "username": customer or message.channel.name
                 }).encode("utf-8")
                 req = urlreq.Request(
                     APPS_SCRIPT_URL,
@@ -4428,13 +6211,17 @@ async def on_message(message):
                     headers={"Content-Type": "application/json"}
                 )
                 await asyncio.to_thread(urlreq.urlopen, req, timeout=15)
-                print(f"Added tracking row for {username}")
+                print(f"Added tracking row for {who}")
             except Exception as e:
                 print(f"Tracking row error (non-critical): {e}")
         return
 
     # ── TRACKING NUMBER ───────────────────────────────────────────────────────────
-    tracking_match = re.search(r'\b([0-9]{20,22}|1Z[A-Z0-9]{16}|[0-9]{12,15})\b', text)
+    # A bare 1401… 13-digit number is a CGC cert (one extract_certs passed over,
+    # e.g. in a chatty message) — never save it as the ticket's tracking number.
+    tracking_match = next(
+        (m for m in re.finditer(r'\b([0-9]{20,22}|1Z[A-Z0-9]{16}|[0-9]{12,15})\b', text)
+         if not _looks_like_cgc_13(m.group(1))), None)
     if tracking_match:
         tracking_num = tracking_match.group(1)
         # Cache + exact-prefix Drive fallback. The old inline fallback searched
@@ -4443,8 +6230,14 @@ async def on_message(message):
         # could match — and silently write tracking into — the WRONG customer's
         # sheet. find_sheet_for_channel handles both; if it can't find a confident
         # match it returns None and we ping Kevin instead of guessing.
+        # Kevin typing a customer's tracking number: search by the CUSTOMER, never
+        # by his own name — that matched (and cached for this ticket) his newest
+        # pasted sheet, possibly from another customer's ticket.
+        _track_user = username
+        if message.author.id == YOUR_DISCORD_USER_ID:
+            _track_user = ticket_customer_from_overwrites(message.channel) or ""
         sheet_id = await find_sheet_for_channel(
-            channel_id, message.channel.name, username, message.channel.created_at)
+            channel_id, message.channel.name, _track_user, message.channel.created_at)
         if sheet_id:
             try:
                 import urllib.request as urlreq
