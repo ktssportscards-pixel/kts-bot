@@ -121,7 +121,8 @@ CGC_POKEMON_RATE = 0.83
 # Time-gated so the go-live needs NO second deploy — before this instant the
 # hold message fires exactly as before; at/after it, sports/OP classify
 # normally. 3 AM EDT (UTC-4, DST still on through Nov 1 2026) = 07:00 UTC.
-SPORTS_OP_GO_LIVE_UTC = datetime(2026, 10, 17, 7, 0, tzinfo=timezone.utc)
+# Oct 23 (Kevin): same hold for the Oct 23-25 weekend — re-armed for Sat Oct 24.
+SPORTS_OP_GO_LIVE_UTC = datetime(2026, 10, 24, 7, 0, tzinfo=timezone.utc)
 def sports_op_live():
     return datetime.now(timezone.utc) >= SPORTS_OP_GO_LIVE_UTC
 SPORTS_OP_HOLD_MSG = ("🗓️ Sports & One Piece open **Saturday 3 AM ET** — Pokémon "
@@ -135,13 +136,13 @@ SPORTSOP_SPORTS = ('one piece', 'basketball', 'mlb', 'football')
 PSA_SPORT_MAX_PRICE = {
     'pokemon': 5000,      # Oct 17-18 weekend: continuous $1-$5,000, fat pools every band
     'one piece': 1000,    # Oct 17-18: $1-$700 + $900-$1,000 (gap 700-900 in classify)
-    'mlb': 700,           # Oct 17-18: $1-$240 + $250-$700 (gap 240-250 in classify)
+    'mlb': 800,           # Oct 23-25: $1-$240 + $250-$800 (gap 240-250 in classify)
     'basketball': 1400,   # Oct 17-18: $1-$800 + $900-$1,400 (gap 800-900 via bands)
-    'football': 220,      # Oct 17-18: $1-$220 continuous
+    'football': 800,      # Oct 23-25: $1-$800 continuous
 }
-MLB_GENERAL_MAX = 700    # Oct 17-18 weekend ceilings — no select-player lanes this week
+MLB_GENERAL_MAX = 800    # Oct 23-25 weekend ceilings — no select-player lanes this week
 NBA_GENERAL_MAX = 1400
-NFL_GENERAL_MAX = 220
+NFL_GENERAL_MAX = 800
 # Select-player bands ABOVE the general ceilings (inclusive; from the flyer's
 # SPECIALTY rows). Values between bands are rejected even for listed players.
 MLB_SLUGGER_BANDS = []   # Oct 10-11: no slugger lanes above the $220 ceiling
@@ -298,13 +299,12 @@ PSA_BASKETBALL_PER_CARD_TIERS = [
     (1000.01, 3500.01, 0.92),
     (3500.01, float('inf'), 0.93),
 ]
-# MLB rates: $1-$30 → 100%, $30+ → 90% (general reach now $1-$300, Oct 5);
-# Sluggers $600-$1,000 → 90%, $1,400-$2,000 → 91% (lane suspended Oct 4),
-# $3,750-$5,000 → 91%. PSA 7+.
+# MLB (Oct 23-25 flyer): $1-$30 → 100%, $30-$240 + $250-$500 → 90%,
+# $500-$800 → 89%. PSA 7+; over $100 needs a sale ≤60d (CL 3+).
 PSA_MLB_PER_CARD_TIERS = [
-    (0, 30.01, 1.00),
-    (30.01, 1000.01, 0.90),
-    (1000.01, float('inf'), 0.91),
+    (0, 30.01, 1.00),              # $1-$30 → 100%
+    (30.01, 500.01, 0.90),         # $30-$500 → 90% (gap $240-$250 in classify)
+    (500.01, float('inf'), 0.89),  # $500-$800 → 89% (Oct 23-25)
 ]
 # One Piece (Oct 2): $1-$100 → 88%; $100-$900 → 83% (CL 4+ = sale ≤30d).
 # PSA 7+.
@@ -312,12 +312,12 @@ PSA_ONE_PIECE_PER_CARD_TIERS = [
     (0, 100.01, 0.89),
     (100.01, float('inf'), 0.84),
 ]
-# NFL rates: $1-$300 → 90% (general reach cut from $600, Oct 5); QB GOATs
-# $600-$1,000 → 88%, $1,400-$2,000 → 90%. PSA 7+.
+# NFL (Oct 23-25 flyer): $1-$30 → 100%, $30-$500 → 90%, $500-$800 → 89%.
+# PSA 7+; over $100 needs a sale ≤60d (CL 3+).
 PSA_FOOTBALL_PER_CARD_TIERS = [
     (0, 30.01, 1.00),              # $1-$30 → 100% (Kevin, Oct 15)
-    (30.01, 220.01, 0.90),         # $30-$220 → 90%
-    (220.01, float('inf'), 0.90),  # unreachable (ceiling $220)
+    (30.01, 500.01, 0.90),         # $30-$500 → 90%
+    (500.01, float('inf'), 0.89),  # $500-$800 → 89% (Oct 23-25, ceiling $800)
 ]
 
 # ── BASKETBALL-SPECIFIC REJECTION RULES ──────────────────────────────────────────
@@ -1360,7 +1360,7 @@ def classify_psa_comp(comp):
     if sport == 'mlb' and 240 < cv < 250:
         return ('rejected',
                 f"${cv:,.2f} ($240-$250 is a gap in our MLB ranges this weekend — "
-                f"taking $1-$240 and $250-$700)")
+                f"taking $1-$240 and $250-$800)")
     if sport == 'one piece' and 700 < cv < 900:
         return ('rejected',
                 f"${cv:,.2f} (our One Piece ranges are $1-$700 and $900-$1,000 "
@@ -2533,20 +2533,28 @@ WELCOME_MSG = (
     "We're currently buying (PSA graded slabs — send your cert numbers):\n"
     "• **Pokémon** — $17–$5,000 🔥 ANY grade · ANY cert — 90% up to $100, 87% above\n"
     "• **One Piece** — $1–$700 and $900–$1,000\n"
-    "• **Baseball / MLB** — $1–$240 and $250–$700\n"
+    "• **Baseball / MLB** — $1–$240 and $250–$800\n"
     "• **Basketball / NBA** — $1–$800 and $900–$1,400\n"
-    "• **Football / NFL** — $1–$220\n"
+    "• **Football / NFL** — $1–$800\n"
     + _POKEMON_RAW_WELCOME_LINE +
     "\n"
     f"**CGC slabs — Pokémon only:** ${CGC_MIN_PRICE}–${CGC_MAX_PRICE} at "
     f"{int(round(CGC_POKEMON_RATE * 100))}% (send the cert numbers with \"CGC\" in front)\n\n"
     "⚠️ We are **not** buying raw cards — PSA slabs (plus CGC Pokémon) only.\n\n"
     "📊 **Pokémon:** no minimum — send what you've got!\n"
-    "🗓️ **Sports & One Piece** open **Saturday 3 AM ET** — those need **$1,500+** "
-    "(combined) and ship to a **separate address** from your Pokémon.\n"
+    "<<SPORTS_OP_LINE>>"
     + _POKEMON_RAW_MIN_LINE +
     "\nWhat are you looking to sell?"
 )
+_SPORTS_OP_TAIL = ("— those need **$1,500+** (combined) and ship to a "
+                   "**separate address** from your Pokémon.\n")
+
+def welcome_msg():
+    """WELCOME_MSG with the sports/One Piece line matching the go-live gate, so
+    it stops saying "open Saturday 3 AM ET" once they're actually open."""
+    line = ("🏈 **Sports & One Piece** are open " if sports_op_live()
+            else "🗓️ **Sports & One Piece** open **Saturday 3 AM ET** ")
+    return WELCOME_MSG.replace("<<SPORTS_OP_LINE>>", line + _SPORTS_OP_TAIL)
 
 SHIPPING_MSG = (
     "📦 **Awesome, let's do it!** Ship your cards to the address below — you'll be paid out once your package arrives and is processed.\n\n"
@@ -3296,11 +3304,13 @@ def build_sheet_h_formula(r, pokemon_tiers=None, sport_rates=None):
     mlb = (f'IF(N(E{r})<{g},0,'
            f'IFS(AND(G{r}>=1,G{r}<=30),{m1},'
            f'AND(G{r}>30,G{r}<=240),{m2},'
-           f'AND(G{r}>=250,G{r}<=700),{m2},'
+           f'AND(G{r}>=250,G{r}<=500),{m2},'
+           f'AND(G{r}>500,G{r}<=800),{m3},'
            f'TRUE,0))')
     nfl = (f'IF(N(E{r})<{g},0,'
            f'IFS(AND(G{r}>=1,G{r}<=30),{f1},'
-           f'AND(G{r}>30,G{r}<=220),{f2},'
+           f'AND(G{r}>30,G{r}<=500),{f2},'
+           f'AND(G{r}>500,G{r}<=800),{f3},'
            f'TRUE,0))')
     rate = (f'IFS('
             f'F{r}="pokemon",{pok},'
@@ -5799,7 +5809,7 @@ async def on_message(message):
         # them) — that ticket never got greeted, so still welcome it.
         if not already_welcomed and not kevin_replied and prior_human_msgs < 2:
             await asyncio.sleep(1)
-            await message.channel.send(WELCOME_MSG)
+            await message.channel.send(welcome_msg())
             # If they already sent certs or a CSV with their first message,
             # don't make them re-send — fall through to processing below.
             if not (certs or csv_attachment):
