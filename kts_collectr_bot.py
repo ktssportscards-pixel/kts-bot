@@ -102,6 +102,14 @@ PSA_MAX_AGE_DAYS = 30
 # what the comp helper takes and echoes back), so a CGC and a PSA cert with the
 # same digits can never collide in lots, retries or by-cert maps; sheets carry
 # the bare digits in column B with "CGC" in column A.
+# Pokémon master switch (Kevin, Oct 25: "No more pokemon for the weekend. Can't
+# buy it"). False = every PSA AND CGC Pokémon slab is rejected with
+# POKEMON_CLOSED_MSG, the sheet H formula pays 0 on Pokémon/CGC rows, and the
+# welcome / min-lot / CSV messages stop offering Pokémon. Flip back to True
+# with the next weekend's flyer.
+POKEMON_BUYING = False
+POKEMON_CLOSED_MSG = "Pokémon is closed for the rest of this weekend — Sports & One Piece only right now"
+CGC_CLOSED_MSG = "CGC slabs are closed for the rest of this weekend — PSA Sports & One Piece only right now"
 CGC_PREFIX = "cgc:"
 CGC_MIN_PRICE = 1
 CGC_MAX_PRICE = 100
@@ -1301,6 +1309,8 @@ def classify_cgc_comp(comp):
         return ('rejected', COMP_NOT_LOADED_MSG)
     if not comp.get('found'):
         return ('rejected', 'no comp on CardLadder')
+    if not POKEMON_BUYING:   # CGC is a Pokémon-only lane
+        return ('rejected', CGC_CLOSED_MSG)
     cv = comp.get('clValue')
     try:
         cv = float(cv) if cv is not None else None
@@ -1341,13 +1351,16 @@ def classify_psa_comp(comp):
     if cv is None:
         return ('rejected', 'no CL value')
     sport = normalize_sport(comp.get('sport'))
+    if sport == 'pokemon' and not POKEMON_BUYING:
+        return ('rejected', POKEMON_CLOSED_MSG)
     if not sports_op_live() and sport in SPORTSOP_SPORTS:
         return ('rejected', SPORTS_OP_HOLD_MSG)
     max_price = PSA_SPORT_MAX_PRICE.get(sport)
     if max_price is None:
         sport_label = sport or 'unknown sport'
         return ('rejected',
-                f"{sport_label} (we buy Pokemon, One Piece, MLB, NBA and NFL slabs)")
+                f"{sport_label} (we buy {'Pokemon, ' if POKEMON_BUYING else ''}"
+                f"One Piece, MLB, NBA and NFL slabs)")
     if cv > max_price:
         return ('rejected', f"${cv:,.2f} (over our ${max_price:,} {sport} max)")
     if cv < PSA_MIN_PRICE:
@@ -2456,7 +2469,8 @@ def proceed_or_hold_tail(channel_id):
                     f"You're **${short:,.2f}** short, so add more to include it.")
         return (f"📊 Your **Sports & One Piece** slabs total **${so_lane:,.2f}** — the minimum for "
                 f"that lane is **${SPORTS_OP_MIN_LOT:,}** (it ships to a separate address, so we batch it). "
-                f"You're **${short:,.2f}** short. Add more and resubmit, or send **Pokémon** (no minimum)!")
+                f"You're **${short:,.2f}** short. Add more and resubmit"
+                + (", or send **Pokémon** (no minimum)!" if POKEMON_BUYING else "!"))
     if lot_qualifies(channel_id):
         return None
     slab_count, slab_value, singles, combined = lot_summary(channel_id)
@@ -2531,23 +2545,28 @@ _POKEMON_RAW_OFF_LINE = (
 WELCOME_MSG = (
     "👋 Welcome to KTS Collectibles!\n\n"
     "We're currently buying (PSA graded slabs — send your cert numbers):\n"
-    "• **Pokémon** — $17–$5,000 🔥 ANY grade · ANY cert — 90% up to $100, 87% above\n"
+    + ("• **Pokémon** — $17–$5,000 🔥 ANY grade · ANY cert — 90% up to $100, 87% above\n"
+       if POKEMON_BUYING else
+       "• **Pokémon** — ❌ closed for the rest of this weekend\n") +
     "• **One Piece** — $1–$700 and $900–$1,000\n"
     "• **Baseball / MLB** — $1–$240 and $250–$800\n"
     "• **Basketball / NBA** — $1–$800 and $900–$1,400\n"
     "• **Football / NFL** — $1–$800\n"
     + _POKEMON_RAW_WELCOME_LINE +
     "\n"
-    f"**CGC slabs — Pokémon only:** ${CGC_MIN_PRICE}–${CGC_MAX_PRICE} at "
-    f"{int(round(CGC_POKEMON_RATE * 100))}% (send the cert numbers with \"CGC\" in front)\n\n"
-    "⚠️ We are **not** buying raw cards — PSA slabs (plus CGC Pokémon) only.\n\n"
-    "📊 **Pokémon:** no minimum — send what you've got!\n"
+    + ((f"**CGC slabs — Pokémon only:** ${CGC_MIN_PRICE}–${CGC_MAX_PRICE} at "
+        f"{int(round(CGC_POKEMON_RATE * 100))}% (send the cert numbers with \"CGC\" in front)\n\n"
+        "⚠️ We are **not** buying raw cards — PSA slabs (plus CGC Pokémon) only.\n\n"
+        "📊 **Pokémon:** no minimum — send what you've got!\n")
+       if POKEMON_BUYING else
+       "⚠️ We are **not** buying raw cards or CGC slabs — PSA slabs only.\n\n") +
     "<<SPORTS_OP_LINE>>"
     + _POKEMON_RAW_MIN_LINE +
     "\nWhat are you looking to sell?"
 )
-_SPORTS_OP_TAIL = ("— those need **$1,500+** (combined) and ship to a "
-                   "**separate address** from your Pokémon.\n")
+_SPORTS_OP_TAIL = (("— those need **$1,500+** (combined) and ship to a "
+                    "**separate address** from your Pokémon.\n") if POKEMON_BUYING else
+                   "— those need **$1,500+** (combined).\n")
 
 def welcome_msg():
     """WELCOME_MSG with the sports/One Piece line matching the go-live gate, so
@@ -2627,8 +2646,9 @@ def compose_shipping(channel_id):
             f"📊 **Almost there!** Your Sports & One Piece slabs total **${so:,.2f}** — "
             f"our minimum for that lane is **${SPORTS_OP_MIN_LOT:,}** (Sports/One Piece ship to a "
             f"separate address, so we batch them). You're **${short:,.2f}** short.\n\n"
-            f"Add more Sports/One Piece slabs to hit **${SPORTS_OP_MIN_LOT:,}+** and resubmit — "
-            f"or send any **Pokémon** (no minimum) and I'll get you shipping right away! 🙌"
+            f"Add more Sports/One Piece slabs to hit **${SPORTS_OP_MIN_LOT:,}+** and resubmit"
+            + (" — or send any **Pokémon** (no minimum) and I'll get you shipping right away! 🙌"
+               if POKEMON_BUYING else "! 🙌")
         )
         return msg, False, f"HELD — sports/OP ${so:,.2f} < ${SPORTS_OP_MIN_LOT:,}, no pokemon"
     lanes = []
@@ -3290,7 +3310,7 @@ def build_sheet_h_formula(r, pokemon_tiers=None, sport_rates=None):
            f'IF(AND(G{r}>=17,G{r}<=5000,LEFT(B{r}&"",1)="0"),0,'
            f'IFS(AND(G{r}>=17,G{r}<=100),{p1},'
            f'AND(G{r}>100,G{r}<=5000),{p2},'
-           f'TRUE,0)))')
+           f'TRUE,0)))') if POKEMON_BUYING else '0'
     op = (f'IF(N(E{r})<{g},0,'
           f'IFS(AND(G{r}>=1,G{r}<=100),{o1},'
           f'AND(G{r}>100,G{r}<=700),{o2},'
@@ -3325,7 +3345,7 @@ def build_sheet_h_formula(r, pokemon_tiers=None, sport_rates=None):
     # template's 70% non-PSA branch, and never a VIP rate. fill_buying_sheet
     # writes this formula into each CGC row's H; a VIP H-column rewrite keeps it.
     cgc = (f'IF(AND(F{r}="pokemon",G{r}>={CGC_MIN_PRICE},G{r}<={CGC_MAX_PRICE}),'
-           f'{_n(CGC_POKEMON_RATE)},0)')
+           f'{_n(CGC_POKEMON_RATE)},0)') if POKEMON_BUYING else '0'
     return (f'=IF(OR(NOT(ISNUMBER(G{r})),G{r}=0),"",IF(A{r}="CGC",{cgc},'
             f'IF(A{r}<>"PSA",0.7,IF({too_old},0,{rate}))))')
 
@@ -5855,7 +5875,7 @@ async def on_message(message):
                         await message.channel.send(
                             f"❌ **We're not buying raw singles this weekend — PSA graded slabs only.**\n\n"
                             f"Detected One Piece cards in your CSV:\n{card_list}\n\n"
-                            f"We're buying **PSA slabs** (Pokémon, Basketball, Baseball & Football) — "
+                            f"We're buying **PSA slabs** ({'Pokémon, ' if POKEMON_BUYING else 'One Piece, '}Basketball, Baseball & Football) — "
                             f"drop your cert numbers here! 🙏"
                         )
                     elif issue_type == "pokemon_off":
@@ -5863,8 +5883,10 @@ async def on_message(message):
                             f"❌ **We're not buying Pokémon raw cards this weekend.**\n\n"
                             f"Detected Pokémon cards in your CSV:\n{card_list}\n\n"
                             f"We're currently buying **One Piece raw singles** (English, NM, $1–$150). "
-                            f"We're still happy to look at any **PSA graded Pokémon slabs** you have — "
-                            f"just drop your cert numbers here! 🙏"
+                            + (f"We're still happy to look at any **PSA graded Pokémon slabs** you have — "
+                               f"just drop your cert numbers here! 🙏" if POKEMON_BUYING else
+                               f"Pokémon slabs are closed for the rest of this weekend too — "
+                               f"we're taking PSA Sports & One Piece slabs only right now. 🙏")
                         )
                     elif issue_type == "other_game":
                         await message.channel.send(
