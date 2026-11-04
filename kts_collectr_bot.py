@@ -135,20 +135,28 @@ def sports_op_live():
 SPORTS_OP_HOLD_MSG = ("🗓️ Sports & One Piece open **Saturday 3 AM ET** — we're "
                       "not taking them before then. Drop your cert numbers "
                       "Saturday and we'll price them right away!")
+# Shown on any quote that accepts sports/One Piece. The portal (source of truth)
+# routes these to Triumph and gates on LIVE allocation + CardLadder confidence —
+# neither of which the bot's comp can see — so we quote the in-range rate and
+# disclaim final acceptance (mirrors the KTS Portal's own behavior).
+SPORTSOP_ALLOCATION_NOTE = (
+    "ℹ️ *Sports & One Piece quotes are based on current CardLadder comps — final "
+    "acceptance depends on live allocation at lock-in, so a card in range can "
+    "occasionally come back full.*")
 # Sports + One Piece (slabs) ship to the Doral address and require the sports/OP
 # slab portion to total $1,500+ (combined across MLB/NBA/NFL/One Piece) — that's
 # what justifies the separate address. Pokémon has NO minimum and ships to VA.
 SPORTS_OP_MIN_LOT = 1500
 SPORTSOP_SPORTS = ('one piece', 'basketball', 'mlb', 'football')
 PSA_SPORT_MAX_PRICE = {
-    'pokemon': 5000,      # Oct 17-18 weekend: continuous $1-$5,000, fat pools every band
-    'one piece': 1000,    # Oct 17-18: $1-$700 + $900-$1,000 (gap 700-900 in classify)
-    'mlb': 800,           # Oct 23-25: $1-$240 + $250-$800 (gap 240-250 in classify)
-    'basketball': 1400,   # Oct 17-18: $1-$800 + $900-$1,400 (gap 800-900 via bands)
-    'football': 800,      # Oct 23-25: $1-$800 continuous
+    'pokemon': 5000,      # off (POKEMON_BUYING False) — value irrelevant while closed
+    'one piece': 1200,    # Nov 4 portal: $0-$240 + $250-$1,200 (gap 240-250 in classify)
+    'mlb': 600,           # Nov 4 portal: $1-$220 + $250-$600 (gaps 30-35, 220-250, 450-500)
+    'basketball': 1000,   # Nov 4 portal: $0.60-$240 + $250-$800 + $900-$1,000 (gaps 240-250, 800-900)
+    'football': 800,      # Nov 4 portal: $0.40-$800 continuous
 }
-MLB_GENERAL_MAX = 800    # Oct 23-25 weekend ceilings — no select-player lanes this week
-NBA_GENERAL_MAX = 1400
+MLB_GENERAL_MAX = 600    # Nov 4 portal ceiling (= PSA_SPORT_MAX_PRICE['mlb'])
+NBA_GENERAL_MAX = 1000
 NFL_GENERAL_MAX = 800
 # Select-player bands ABOVE the general ceilings (inclusive; from the flyer's
 # SPECIALTY rows). Values between bands are rejected even for listed players.
@@ -160,11 +168,11 @@ NFL_GOAT_BANDS = []      # Oct 10-11: QB Sheeps lane is $0-$100, inside the gene
 # sports $1-$300 only now; above that we take ONLY what the Triumph app can
 # absorb right now — $300-$1,000 general is app-full and $2,000-$2,500 is an
 # app gap => reject):
-NBA_GENERAL_BANDS = [(1, 800), (900, 1400)]   # Oct 17-18: $240-$800 pool is back
+NBA_GENERAL_BANDS = [(0.6, 240), (250, 800), (900, 1000)]   # Nov 4 portal (gaps 240-250, 800-900)
 # 2000s-list players additionally ride the app's 2000s specialty lanes with
 # real room: $0-$1,000 and $3,000-$3,750 (the $1,400-$2,500 lane is ~$850
 # left => nothing fits => not offered).
-NBA_2000S_BANDS = [(1, 800), (900, 1400)]     # Oct 17-18: NO 2000s specialty — same as general
+NBA_2000S_BANDS = [(0.6, 240), (250, 800), (900, 1000)]     # portal has no 2000s specialty — same as general
 NFL_MIN_PRICE = 1     # dormant — no NFL floor
 MLB_MIN_PRICE = 1     # dormant since Oct 12 ($1-$300 greenlight; was 25 for the Oct 10-11 app floor)
 # Select-player name lists captured from the Triumph Partners app (Oct 2) —
@@ -302,22 +310,21 @@ PSA_POKEMON_PER_CARD_TIERS = [
 # NBA (Oct 2): $1-$1,000 → 95% (ANY grade); $1,000-$3,500 → 92% (PSA 7+);
 # 2000s-list $3,500-$3,750 → 93% (PSA 7+).
 PSA_BASKETBALL_PER_CARD_TIERS = [
-    (0, 1000.01, 0.95),
-    (1000.01, 3500.01, 0.92),
-    (3500.01, float('inf'), 0.93),
+    (0, float('inf'), 0.95),       # Nov 4 portal: flat 95% in-band (bands/gaps/max in classify)
 ]
 # MLB (Oct 23-25 flyer): $1-$30 → 100%, $30-$240 + $250-$500 → 90%,
 # $500-$800 → 89%. PSA 7+; over $100 needs a sale ≤60d (CL 3+).
 PSA_MLB_PER_CARD_TIERS = [
     (0, 30.01, 1.00),              # $1-$30 → 100%
-    (30.01, 500.01, 0.90),         # $30-$500 → 90% (gap $240-$250 in classify)
-    (500.01, float('inf'), 0.89),  # $500-$800 → 89% (Oct 23-25)
+    (30.01, 500, 0.90),            # $35-$450 → 90% (gaps 30-35, 220-250, 450-500 in classify)
+    (500, float('inf'), 0.89),     # $500-$600 → 89% (Nov 4 portal)
 ]
 # One Piece (Oct 2): $1-$100 → 88%; $100-$900 → 83% (CL 4+ = sale ≤30d).
 # PSA 7+.
 PSA_ONE_PIECE_PER_CARD_TIERS = [
-    (0, 100.01, 0.89),
-    (100.01, float('inf'), 0.84),
+    (0, 100.01, 0.89),             # $0-$100 → 89%
+    (100.01, 1000.01, 0.84),       # $100-$1,000 → 84% (gap 240-250 in classify)
+    (1000.01, float('inf'), 0.85), # $1,000-$1,200 → 85% (Nov 4 portal)
 ]
 # NFL (Oct 23-25 flyer): $1-$30 → 100%, $30-$500 → 90%, $500-$800 → 89%.
 # PSA 7+; over $100 needs a sale ≤60d (CL 3+).
@@ -1364,19 +1371,18 @@ def classify_psa_comp(comp):
         return ('rejected', f"${cv:,.2f} (over our ${max_price:,} {sport} max)")
     if cv < PSA_MIN_PRICE:
         return ('rejected', f"${cv:.2f} (under ${PSA_MIN_PRICE} min)")
-    # Oct 10-11 weekend floors/gaps straight from the Triumph allocation page:
+    # Nov 4 portal: MLB floor + allocation gaps (values BETWEEN bands rejected).
     if sport == 'mlb' and cv < MLB_MIN_PRICE:
         return ('rejected',
-                f"${cv:,.2f} (under our ${MLB_MIN_PRICE} baseball minimum this weekend)")
-    # Oct 17-18 weekend gaps straight from the Triumph allocation page:
-    if sport == 'mlb' and 240 < cv < 250:
+                f"${cv:,.2f} (under our ${MLB_MIN_PRICE} baseball minimum)")
+    if sport == 'mlb' and ((30 < cv < 35) or (220 < cv < 250) or (450 < cv < 500)):
         return ('rejected',
-                f"${cv:,.2f} ($240-$250 is a gap in our MLB ranges this weekend — "
-                f"taking $1-$240 and $250-$800)")
-    if sport == 'one piece' and 700 < cv < 900:
+                f"${cv:,.2f} (gap in our MLB ranges — taking $1-$30, $35-$220, "
+                f"$250-$450 and $500-$600)")
+    if sport == 'one piece' and 240 < cv < 250:
         return ('rejected',
-                f"${cv:,.2f} (our One Piece ranges are $1-$700 and $900-$1,000 "
-                f"this weekend)")
+                f"${cv:,.2f} ($240-$250 is a gap in our One Piece ranges — "
+                f"taking $1-$240 and $250-$1,200)")
 
     # ── SELECT-PLAYER lanes (Oct 2): above each sport's general ceiling,
     # only listed players qualify, and only inside the flyer's specialty
@@ -1408,8 +1414,8 @@ def classify_psa_comp(comp):
                 return ('rejected',
                         f"${cv:,.2f} (over our ${NBA_GENERAL_MAX:,} NBA max this weekend)")
             return ('rejected',
-                    f"${cv:,.2f} (our NBA ranges are $1-$800 and $900-$1,400 "
-                    f"this weekend)")
+                    f"${cv:,.2f} (gap in our NBA ranges — taking $1-$240, "
+                    f"$250-$800 and $900-$1,000)")
 
     # Pokémon (Oct 3 allocation update): unlimited ≤$100, slot-limited
     # $100-$200 / $200-$300 / $1,400-$1,800, everything else rejected.
@@ -1431,9 +1437,10 @@ def classify_psa_comp(comp):
             return ('rejected',
                     f"cert {comp.get('cert')} — we can't take certs starting "
                     f"with 0 on Pokémon ${PIXEL_WHOLE_LO:,.0f}-${PIXEL_WHOLE_HI:,.0f}")
-    # Grade floor PSA 7+ — EXCEPT Pokémon $3,000+ (flyer: any grade) and
-    # NBA ≤ $1,000 (flyer row carries no PSA badge; mirrors Triumph).
-    any_grade = pokemon_big or pokemon_pixel or (sport == 'basketball' and cv <= 1000)
+    # Grade floor PSA 7+ applies to POKÉMON only (its Pixel big-band + Pixel lane
+    # are any-grade). Sports + One Piece: NO grade floor — the Nov 4 portal gates
+    # by value/confidence, not grade (CL-confidence is disclaimed on the quote).
+    any_grade = (sport != 'pokemon') or pokemon_big or pokemon_pixel
     if not any_grade:
         grade_raw = str(comp.get('grade') or '').replace('PSA', '').strip()
         try:
@@ -1449,22 +1456,15 @@ def classify_psa_comp(comp):
         last_d = datetime.strptime(str(last_sale).strip(), '%Y-%m-%d').date()
     except (ValueError, AttributeError):
         return ('rejected', f"unparseable sale date '{last_sale}'")
-    # Sale-age gates (Kevin's decode: CL 4+ ≈ sale ≤30d, CL 3+ ≈ ≤60d):
-    #   pokemon: ≤$100 60d · $100-$3,000 30d (CL 4+) · $3,000+ none (any conf)
-    #   one piece: ≤$100 60d · >$100 30d (CL 4+)
-    #   NBA: ≤$1,000 any sale ever · >$1,000 60d (CL 3+)
-    #   MLB: ≤$100 any sale ever · >$100 60d (CL 3+)
-    #   NFL: ≤$100 any sale ever · >$100 60d (CL 3+, GOAT bands included)
+    # Sale-age: the Nov 4 portal does NOT gate on sale age (it gates on CL
+    # confidence, which the bot can't see — that's disclaimed on the quote). So
+    # sports + One Piece have NO age limit; we keep only the "must show a visible
+    # sale" data-quality check above (a safe-stricter overlay, like the NBA bans).
+    # Pokémon keeps its age gate for when that lane reopens (off right now).
     if sport == 'pokemon':
-        max_age = float('inf') if pokemon_big else 60   # ≤$100 + Pixel conf-3 ($100-$2k) = 60d; $2k+ conf-5 flagged (manual)
-    elif sport == 'one piece':
-        max_age = 60 if cv <= 100 else 30
-    elif sport == 'basketball':
-        max_age = float('inf') if cv <= 1000 else 60
-    elif sport in ('mlb', 'football'):
-        max_age = float('inf') if cv <= 100 else 60
+        max_age = float('inf') if pokemon_big else 60
     else:
-        max_age = PSA_SPORT_MAX_AGE_DAYS.get(sport, PSA_MAX_AGE_DAYS)
+        max_age = float('inf')
     if (date.today() - last_d).days > max_age:
         return ('rejected', f"last sale {last_sale} (>{max_age:g}d ago)")
 
@@ -2021,6 +2021,9 @@ async def price_and_send_psa_offer(channel, channel_id, username, certs, comps,
     if n_unloaded and not delayed:
         _loaded_head = "✅ Comps loaded!"   # not "All" — some need a re-check
     customer_parts = [_loaded_head, ""]
+    _accepted_has_sportsop = any(
+        normalize_sport(c.get('sport')) in SPORTSOP_SPORTS
+        for c in accepted if not _comp_is_cgc(c))
     if n_accepted > 0:
         customer_parts += [
             f"**Total comp:** ${total_comp:,.2f}",
@@ -2030,6 +2033,8 @@ async def price_and_send_psa_offer(channel, channel_id, username, certs, comps,
             "**Breakdown:**",
             *breakdown_lines,
         ]
+        if _accepted_has_sportsop:
+            customer_parts += ["", SPORTSOP_ALLOCATION_NOTE]
     if rejected:
         customer_parts.append("")
         if n_accepted > 0:
@@ -2547,9 +2552,9 @@ WELCOME_MSG = (
     + ("• **Pokémon** — $17–$5,000 🔥 ANY grade · ANY cert — 90% up to $100, 87% above\n"
        if POKEMON_BUYING else
        "• **Pokémon** — ❌ closed for the rest of this weekend\n") +
-    "• **One Piece** — $1–$700 and $900–$1,000\n"
-    "• **Baseball / MLB** — $1–$240 and $250–$800\n"
-    "• **Basketball / NBA** — $1–$800 and $900–$1,400\n"
+    "• **One Piece** — $1–$240 and $250–$1,200\n"
+    "• **Baseball / MLB** — $1–$220 and $250–$600\n"
+    "• **Basketball / NBA** — $1–$240, $250–$800 and $900–$1,000\n"
     "• **Football / NFL** — $1–$800\n"
     + _POKEMON_RAW_WELCOME_LINE +
     "\n"
@@ -3277,8 +3282,8 @@ def build_sheet_h_formula(r, pokemon_tiers=None, sport_rates=None):
         if flat is not None:
             return [_n(flat)] * len(tier_list)
         return [_n(t[2]) for t in tier_list]
-    o1, o2 = _sport(PSA_ONE_PIECE_PER_CARD_TIERS, 'one piece')
-    b1, b2, b3 = _sport(PSA_BASKETBALL_PER_CARD_TIERS, 'basketball')
+    o1, o2, o3 = _sport(PSA_ONE_PIECE_PER_CARD_TIERS, 'one piece')
+    b1 = _sport(PSA_BASKETBALL_PER_CARD_TIERS, 'basketball')[0]
     m1, m2, m3 = _sport(PSA_MLB_PER_CARD_TIERS, 'mlb')
     f1, f2, f3 = _sport(PSA_FOOTBALL_PER_CARD_TIERS, 'football')
     g = PSA_MIN_GRADE
@@ -3295,14 +3300,16 @@ def build_sheet_h_formula(r, pokemon_tiers=None, sport_rates=None):
     bans = (f'OR(REGEXMATCH(LOWER(D{r}&""),"{ban_always}"),'
             f'AND(G{r}>{BBALL_PLAYER_PRICE_CAP},'
             f'REGEXMATCH(LOWER(D{r}&""),"{ban_over}")))')
-    # Sale-age gates (100000 ≈ none): pokemon 60/30/none; OP 60/30;
-    # NBA none ≤$1,000 else 60; MLB+NFL none ≤$100 else 60; default 30.
+    # Sale-age: Nov 4 portal has NO age gate on sports/OP (CL-confidence is
+    # disclaimed, not reproducible on the sheet). 100000 ≈ none. A BLANK sale date
+    # still zeroes the row via too_old (the "must show a sale" data-quality
+    # overlay). Pokémon keeps its age gate for when that lane reopens (off now).
     maxage = (f'IFS(F{r}="pokemon",IF(N(G{r})<=2000,60,100000),'
-              f'{is_op},IF(N(G{r})<=100,60,30),'
-              f'F{r}="basketball",IF(N(G{r})<=1000,100000,60),'
-              f'{is_mlb},IF(N(G{r})<=100,100000,60),'
-              f'{is_nfl},IF(N(G{r})<=100,100000,60),'
-              f'TRUE,30)')
+              f'{is_op},100000,'
+              f'F{r}="basketball",100000,'
+              f'{is_mlb},100000,'
+              f'{is_nfl},100000,'
+              f'TRUE,100000)')
     # Pokémon bands (Oct 3): $1-100, $100-300, $1,400-1,800 — slot quotas are
     # bot-side only (a formula can't count), so the sheet shows the band rate.
     pok = (f'IF(G{r}<17,0,'
@@ -3310,27 +3317,28 @@ def build_sheet_h_formula(r, pokemon_tiers=None, sport_rates=None):
            f'IFS(AND(G{r}>=17,G{r}<=100),{p1},'
            f'AND(G{r}>100,G{r}<=5000),{p2},'
            f'TRUE,0)))') if POKEMON_BUYING else '0'
-    op = (f'IF(N(E{r})<{g},0,'
-          f'IFS(AND(G{r}>=1,G{r}<=100),{o1},'
-          f'AND(G{r}>100,G{r}<=700),{o2},'
-          f'AND(G{r}>=900,G{r}<=1000),{o2},'
-          f'TRUE,0))')
+    # Nov 4 portal bands. No grade floor on sports/OP (dropped to match the app);
+    # NBA keeps the bot's player/collegiate bans ({bans}). Values between bands
+    # (gaps) fall through to 0. Floors are >=1 to match classify's $1 min overlay.
+    op = (f'IFS(AND(G{r}>=1,G{r}<=100),{o1},'
+          f'AND(G{r}>100,G{r}<=240),{o2},'
+          f'AND(G{r}>=250,G{r}<=1000),{o2},'
+          f'AND(G{r}>1000,G{r}<=1200),{o3},'
+          f'TRUE,0)')
     nba = (f'IF({bans},0,'
-           f'IFS(AND(G{r}>=1,G{r}<=800),{b1},'
+           f'IFS(AND(G{r}>=1,G{r}<=240),{b1},'
+           f'AND(G{r}>=250,G{r}<=800),{b1},'
            f'AND(G{r}>=900,G{r}<=1000),{b1},'
-           f'AND(G{r}>1000,G{r}<=1400,N(E{r})>={g}),{b2},'
            f'TRUE,0))')
-    mlb = (f'IF(N(E{r})<{g},0,'
-           f'IFS(AND(G{r}>=1,G{r}<=30),{m1},'
-           f'AND(G{r}>30,G{r}<=240),{m2},'
-           f'AND(G{r}>=250,G{r}<=500),{m2},'
-           f'AND(G{r}>500,G{r}<=800),{m3},'
-           f'TRUE,0))')
-    nfl = (f'IF(N(E{r})<{g},0,'
-           f'IFS(AND(G{r}>=1,G{r}<=30),{f1},'
+    mlb = (f'IFS(AND(G{r}>=1,G{r}<=30),{m1},'
+           f'AND(G{r}>=35,G{r}<=220),{m2},'
+           f'AND(G{r}>=250,G{r}<=450),{m2},'
+           f'AND(G{r}>=500,G{r}<=600),{m3},'
+           f'TRUE,0)')
+    nfl = (f'IFS(AND(G{r}>=1,G{r}<=30),{f1},'
            f'AND(G{r}>30,G{r}<=500),{f2},'
            f'AND(G{r}>500,G{r}<=800),{f3},'
-           f'TRUE,0))')
+           f'TRUE,0)')
     rate = (f'IFS('
             f'F{r}="pokemon",{pok},'
             f'{is_op},{op},'
