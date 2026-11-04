@@ -1,11 +1,11 @@
 {"pokemonPsaForTriumph":false,"windows":{"pokemon":{"dow":5,"hour":19,"minute":0},"triumph":null},"tracks":{
 "pokemon:PSA":{"enabled":true,"tiers":[{"min":1,"max":100,"rate":93,"minConf":1,"minGrade":""},{"min":400,"max":650,"rate":85,"minConf":4,"minGrade":""},{"min":100.01,"max":399.99,"rate":82,"minConf":4,"minGrade":""},{"min":650.01,"max":1000,"rate":82,"minConf":4,"minGrade":""}],"company":"Trade","minGrade":7,"minCert":70000000},
 "pokemon:CGC":{"enabled":false,"tiers":[{"min":1,"max":100,"rate":83,"minConf":1,"minGrade":""}],"company":"GameStop","minGrade":""},
-"onepiece:PSA":{"enabled":true,"tiers":[{"min":0,"max":100,"rate":89,"minConf":3,"minGrade":""},{"min":100.01,"max":1000,"rate":84,"minConf":4,"minGrade":""},{"min":1000.01,"max":1200,"rate":84,"minConf":4,"minGrade":""}],"company":"","minGrade":""},
+"onepiece:PSA":{"enabled":true,"tiers":[{"min":0,"max":100,"rate":89,"minConf":3,"minGrade":""},{"min":100.01,"max":240,"rate":84,"minConf":4,"minGrade":""},{"min":250,"max":1000,"rate":84,"minConf":4,"minGrade":""},{"min":1000.01,"max":1200,"rate":84,"minConf":4,"minGrade":""}],"company":"","minGrade":""},
 "onepiece:CGC":{"enabled":false,"tiers":[],"company":"","minGrade":""},
-"basketball:PSA":{"enabled":true,"tiers":[{"min":0.6,"max":30,"rate":95,"minConf":1,"minGrade":""},{"min":30.01,"max":100,"rate":95,"minConf":1,"minGrade":""},{"min":100.01,"max":999.99,"rate":95,"minConf":1,"minGrade":""}],"company":"","minGrade":""},
+"basketball:PSA":{"enabled":true,"tiers":[{"min":0.6,"max":240,"rate":95,"minConf":1,"minGrade":""},{"min":250,"max":800,"rate":95,"minConf":1,"minGrade":""},{"min":900,"max":1000,"rate":95,"minConf":1,"minGrade":""}],"company":"","minGrade":""},
 "basketball:CGC":{"enabled":false,"tiers":[],"company":"","minGrade":""},
-"baseball:PSA":{"enabled":true,"tiers":[{"min":1,"max":30,"rate":100,"minConf":1,"minGrade":""},{"min":35,"max":100,"rate":90,"minConf":1,"minGrade":""},{"min":100.01,"max":220,"rate":90,"minConf":3,"minGrade":""},{"min":250,"max":450,"rate":90,"minConf":3,"minGrade":""}],"company":"","minGrade":""},
+"baseball:PSA":{"enabled":true,"tiers":[{"min":1,"max":30,"rate":100,"minConf":1,"minGrade":""},{"min":35,"max":100,"rate":90,"minConf":1,"minGrade":""},{"min":100.01,"max":220,"rate":90,"minConf":3,"minGrade":""},{"min":250,"max":450,"rate":90,"minConf":3,"minGrade":""},{"min":500,"max":600,"rate":89,"minConf":3,"minGrade":""}],"company":"","minGrade":""},
 "baseball:CGC":{"enabled":false,"tiers":[],"company":"","minGrade":""},
 "football:PSA":{"enabled":true,"tiers":[{"min":0.4,"max":30,"rate":100,"minConf":1,"minGrade":""},{"min":30.01,"max":100,"rate":90,"minConf":1,"minGrade":""},{"min":100.01,"max":500,"rate":90,"minConf":3,"minGrade":""},{"min":500.01,"max":800,"rate":89,"minConf":3,"minGrade":""}],"company":"","minGrade":""},
 "football:CGC":{"enabled":false,"tiers":[],"company":"","minGrade":""}
