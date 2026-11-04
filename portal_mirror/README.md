@@ -38,7 +38,7 @@ Last run: **116,433 points, 0 mismatches.**
   attaches `ALLOCATION_DISCLAIMER` on those categories.
 
 ## Rules currently mirrored (Nov 4 board, 21:10 — exact Triumph allocation bands, gaps preserved)
-- Pokémon PSA (manual "Trade", PSA 7+, cert ≥70M): $1–100 93% · $100–400 82% · $400–650 85% · $650–1,000 82%  [unchanged]
+- Pokémon PSA: **PARKED / empty** — buyer undecided (Triumph vs Pixel), so the track is `enabled:false`. Prior Trade-lane rates are kept in rules.json (PSA 7+, cert ≥70M: $1–100 93% · $100–400 82% · $400–650 85% · $650–1,000 82%) for one-flag re-enable once Kevin picks the buyer.
 - One Piece PSA: $0–100 89% · $100.01–240 84% · $250–1,000 84% · $1,000–1,200 85%  (gap $240–250)
 - NBA PSA: $0.60–240 95% · $250–800 95% · $900–1,000 95%  (gaps $240–250 and $800–900)
 - MLB PSA: $1–30 100% · $35–100 90% · $100–220 90% · $250–450 90% · $500–600 89%  (gaps $30–35, $220–250, $450–500; tops at $600)
