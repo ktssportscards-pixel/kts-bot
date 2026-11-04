@@ -11,7 +11,7 @@ staged mirror ready to switch on — no lanes are opened by anything on this bra
 
 ## Files
 - `rules.json` — the portal rules board, mirrored from the live Fly.io config
-  (`updated_at` 2026-10-30). Re-mirror = replace this file, then re-verify.
+  (`updated_at` 2026-11-04). Re-mirror = replace this file, then re-verify.
 - `portal_pricing.py` — the engine. `evaluate(comp)` takes the bot's own CardLadder
   comp (`clValue`, `grade`, `sport`, `cert`) and returns accept/reject + offer,
   matching `offer.js` to the cent. `rate_card_lines()` builds the welcome rate card.
@@ -37,12 +37,12 @@ Last run: **116,433 points, 0 mismatches.**
   (takeability from live allocation). The bot can't ask, so it quotes the rate and
   attaches `ALLOCATION_DISCLAIMER` on those categories.
 
-## Rules currently mirrored (Oct 30 board)
-- Pokémon PSA (manual "Trade", PSA 7+, cert ≥70M): $1–100 93% · $100–400 82% · $400–650 85% · $650–1,000 82%
-- One Piece PSA: $0–100 89% · $100–700 84%
-- NBA PSA: $0.60–800 95% · $900–1,000 95% · $1,000–1,400 92%  (gap $800–900)
-- MLB PSA: $1–30 100% · $30–240 90% · $250–500 90% · $500–600 89%  (gap $240–250)
-- NFL PSA: $0.40–30 100% · $30–500 90% · $500–800 89% · $800–1,000 90% · $1,000–1,400 92%
+## Rules currently mirrored (Nov 4 board — sports/OP matched to Triumph's current bands)
+- Pokémon PSA (manual "Trade", PSA 7+, cert ≥70M): $1–100 93% · $100–400 82% · $400–650 85% · $650–1,000 82%  [unchanged]
+- One Piece PSA: $0–100 89% · $100–1,000 84% · $1,000–1,200 84%  (top band % is a PLACEHOLDER pending Kevin; re-mirror when he sets it)
+- NBA PSA: $0.60–999.99 95%  (old $800–900 gap closed; tops at ~$1,000)
+- MLB PSA: $1–30 100% · $35–100 90% · $100–220 90% · $250–450 90%  (gaps $30–35 and $220–250; tops at $450)
+- NFL PSA: $0.40–30 100% · $30–500 90% · $500–800 89%  (tops at $800)
 - CGC: all tracks off.
 
 ## Going live (when Kevin is buying again)

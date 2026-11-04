@@ -45,5 +45,5 @@ for (const cert of ['090000000', '69999999', '70000000', '70000001', '150000000'
   const o = oracle('pokemon', v, 8, 5, cert);
   rows.push({ sport: 'pokemon', value: v, grade: 8, cert: cert, decision: o.decision, offer: o.offer });
 }
-fs.writeFileSync(path.join(__dirname, 'oracle_grid.json'), JSON.stringify({ generatedFrom: 'offer.js', rules_updated_at: '2026-10-30', count: rows.length, rows }));
+fs.writeFileSync(path.join(__dirname, 'oracle_grid.json'), JSON.stringify({ generatedFrom: 'offer.js', rules_updated_at: '2026-11-04', count: rows.length, rows }));
 console.log('wrote oracle_grid.json with', rows.length, 'rows');
