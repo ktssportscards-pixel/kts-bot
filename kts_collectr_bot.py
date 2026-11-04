@@ -122,20 +122,19 @@ CGC_POKEMON_RATE = 0.83
 # Oct 2 weekend flyer. Ceilings here are the MAX-POSSIBLE per sport (select
 # players included); non-select caps are enforced in classify via the
 # *_GENERAL_MAX constants + the Triumph select lists (triumph_lists.py).
-# Oct 16: Pokémon (Pixel) is live nightly now; Sports + One Piece (Triumph)
-# don't open until Sat 3 AM ET — hold them with a friendly message until then
-# (flip True + wire poketrader address/min-lot before Saturday).
-# Oct 16: Sports + One Piece (Triumph/Doral) auto-open Sat Oct 17, 3 AM ET.
+# Pokémon (Pixel) handled separately; Sports + One Piece (Triumph) don't open
+# until Sat 3 AM ET — hold them with a friendly message until then.
 # Time-gated so the go-live needs NO second deploy — before this instant the
-# hold message fires exactly as before; at/after it, sports/OP classify
-# normally. 3 AM EDT (UTC-4, DST still on through Nov 1 2026) = 07:00 UTC.
-# Oct 23 (Kevin): same hold for the Oct 23-25 weekend — re-armed for Sat Oct 24.
-SPORTS_OP_GO_LIVE_UTC = datetime(2026, 10, 24, 7, 0, tzinfo=timezone.utc)
+# hold message fires exactly as before; at/after it, sports/OP classify normally.
+# Nov 4 (Kevin): re-armed for Sat Nov 7, mirroring the KTS Portal's Triumph
+# window. DST ended Nov 1 2026, so Eastern is now EST (UTC-5): 3 AM EST = 08:00
+# UTC (the old 07:00 figure was EDT, no longer in effect).
+SPORTS_OP_GO_LIVE_UTC = datetime(2026, 11, 7, 8, 0, tzinfo=timezone.utc)
 def sports_op_live():
     return datetime.now(timezone.utc) >= SPORTS_OP_GO_LIVE_UTC
-SPORTS_OP_HOLD_MSG = ("🗓️ Sports & One Piece open **Saturday 3 AM ET** — Pokémon "
-                      "is live right now, so send those through, and resubmit "
-                      "your sports/One Piece Saturday!")
+SPORTS_OP_HOLD_MSG = ("🗓️ Sports & One Piece open **Saturday 3 AM ET** — we're "
+                      "not taking them before then. Drop your cert numbers "
+                      "Saturday and we'll price them right away!")
 # Sports + One Piece (slabs) ship to the Doral address and require the sports/OP
 # slab portion to total $1,500+ (combined across MLB/NBA/NFL/One Piece) — that's
 # what justifies the separate address. Pokémon has NO minimum and ships to VA.
