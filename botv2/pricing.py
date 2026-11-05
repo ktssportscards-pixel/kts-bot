@@ -10,6 +10,7 @@ same offer.js the app runs), so this module only PARTITIONS and PRESENTS:
 """
 from dataclasses import dataclass, field
 
+from . import config
 from .portal_client import PricedRow
 
 CATEGORY_LABELS = {
@@ -30,14 +31,28 @@ def money(v) -> str:
 
 
 def reject_reason(r: PricedRow) -> str:
-    """Customer-safe reason a row wasn't taken. Never surfaces buyer identity or
-    payout internals — only the portal's own reason text or a generic fallback."""
-    txt = (r.reason or r.rejection_reason or "").strip()
-    if txt:
-        return txt
+    """CUSTOMER-safe reason a row wasn't taken. Scrubs any portal reason that names
+    the backend — e.g. Triumph's "Allocation Exceeded." carries a forbidden word — so
+    supplier/backend details never reach a customer. Kevin's DM uses kevin_reason()
+    for the true text."""
+    raw = (r.reason or r.rejection_reason or "").strip()
+    low = raw.lower()
+    if "allocation" in low:                         # band/pool is full — don't name it
+        return "we're at our buying limit on this one right now"
+    if raw and not any(w in low for w in config.CUSTOMER_FORBIDDEN_WORDS):
+        return raw
     if not r.priced:
         return "no comp found for this cert"
     return "doesn't fit our current buying criteria"
+
+
+def kevin_reason(r: PricedRow) -> str:
+    """The TRUE reason, for Kevin's DM only (he may see backend terms the customer
+    must never see, e.g. 'Allocation Exceeded.')."""
+    raw = (r.reason or r.rejection_reason or "").strip()
+    if raw:
+        return raw
+    return "no comp found" if not r.priced else "out of current buying criteria"
 
 
 # ── the quote model ─────────────────────────────────────────────────────────────
@@ -185,7 +200,7 @@ def kevin_summary(q: Quote, username: str, sheet_url: str = "", ticket_link: str
                      f"{money(r.offer)} — {(r.card_name or '')[:50]} "
                      f"({r.grader} {r.grade})")
     for r in q.rejected:
-        lines.append(f"• `{r.cert}` — ❌ {reject_reason(r)}")
+        lines.append(f"• `{r.cert}` — ❌ {kevin_reason(r)}")
     for r in q.unpriced:
         lines.append(f"• `{r.cert}` — ⚠️ re-check ({r.error})")
     return "\n".join(lines)

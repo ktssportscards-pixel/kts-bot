@@ -89,6 +89,15 @@ def test_pricing():
     novm = PricedRow(cert="cgc:8", cert_id="8", value=60, value_basis="lastSold",
                      decision="BUY", offer=54)
     check(novm.priced and novm.comp_value == 60, "value-only CGC not dropped")
+    # "Allocation Exceeded." must NOT leak the backend word to the customer, but
+    # Kevin's DM keeps the real reason.
+    alloc = PricedRow(cert="9", cert_id="9", category="basketball", decision="PASS",
+                      reason="Allocation Exceeded.")
+    qa = pricing.build_quote([alloc])
+    check("allocation" not in pricing.customer_message(qa).lower(),
+          "customer msg scrubs the 'allocation' reason")
+    check("Allocation Exceeded" in pricing.kevin_summary(qa, "someone"),
+          "kevin DM keeps the real allocation reason")
 
 
 # ── lots + shipping ───────────────────────────────────────────────────────────
