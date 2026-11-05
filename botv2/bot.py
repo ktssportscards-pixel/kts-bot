@@ -245,6 +245,24 @@ async def _handle_message(message) -> None:
     proceed = lots.proceed_or_hold_tail(channel.id)
     await channel.send(pricing.customer_message(quote, proceed_override=proceed))  # instant
 
+    # Auto-claim: reserve Triumph allocation for the BUYs the instant we quote them,
+    # to lock a slot before the team pools fill. DOUBLE-GATED — the portal's own kill
+    # switch AND config.AUTO_CLAIM must BOTH be on, else claim_certs comes back all-
+    # skipped and nothing is reserved. Off the customer's path; Kevin gets the outcome.
+    if config.AUTO_CLAIM and quote.accepted:
+        try:
+            results = await portal_client.claim_certs(
+                [r.cert for r in quote.accepted], idempotency_key=str(channel.id))
+            locked = [r for r in results if r.claimed or r.already_claimed]
+            errs = [r for r in results if r.error]
+            if locked or errs:
+                msg = f"🔒 Auto-claim #{channel.name}: **{len(locked)}** locked of {len(results)}"
+                if errs:
+                    msg += f" | ⚠️ {len(errs)} errored"
+                await ping_kevin(msg)
+        except portal_client.PortalError as e:
+            await ping_kevin(f"⚠️ auto-claim error #{channel.name}: {e}")
+
     # Buying sheet for Kevin — deliberately OFF the customer's critical path (the
     # Apps Script is slow). The customer already has their quote; Kevin gets the
     # sheet link + summary once it's built. A sheet failure never blocks the DM.

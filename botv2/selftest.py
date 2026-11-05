@@ -167,6 +167,12 @@ def test_vip_commands_client():
                                                  customer="topguy", rate_override={"basketball": 97}))
     check(len(rows) == 2 and all(r.cert for r in rows), "mock client w/ customer+override")
 
+    cr = asyncio.run(portal_client.claim_certs(["12345678"], idempotency_key="t"))
+    check(len(cr) == 1 and not cr[0].ok and "mock" in cr[0].skipped.lower(),
+          "claim client mock (nothing claims by default)")
+    ur = asyncio.run(portal_client.unclaim_certs(["12345678"]))
+    check(len(ur) == 1, "unclaim client mock")
+
 
 # ── PSA folder isolation guard ──────────────────────────────────────────────────
 def test_psa_folder_guard():

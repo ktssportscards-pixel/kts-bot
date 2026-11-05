@@ -6,9 +6,15 @@ port). Serves JSON from the state stores, which the payments / ship-accept flow
 populate. Read-only; CORS wide open (the local ticket/owed tracker is the only
 consumer). Ported from v1's owed web server.
 """
+import datetime
+
 import aiohttp.web as web
 
 from . import config, state
+
+# Captured at process start, so /health reveals which deploy is live: a recent
+# timestamp = a fresh redeploy (lets a deploy be verified from outside).
+_STARTED = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
 
 
 def _cors(resp):
@@ -17,7 +23,8 @@ def _cors(resp):
 
 
 async def _health(_req):
-    return _cors(web.Response(text="KTS botv2 — owed/tickets endpoint OK"))
+    return _cors(web.Response(
+        text=f"KTS botv2 — owed/tickets endpoint OK · started {_STARTED}"))
 
 
 async def _owed(_req):

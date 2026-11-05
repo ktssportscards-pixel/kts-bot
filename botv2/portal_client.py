@@ -288,3 +288,120 @@ def _mock_row(cert: str) -> PricedRow:
         offer=offer,
         reason="" if buy else "[mock] out of band",
     )
+
+
+# ── claim client (reserve Triumph allocation via /bot/claim; UNDO via /bot/unclaim) ─
+@dataclass
+class ClaimResult:
+    """One cert's result from /bot/claim or /bot/unclaim. The portal re-prices and
+    claims only decision==BUY; a PASS/ineligible cert rides as `skipped`, never an
+    error. `claimed`/`removed` are the success flags; `idempotent`/`already_claimed`
+    mean a prior identical call already did it (so a retry can't double-claim)."""
+    cert_id: str
+    claimed: bool = False
+    already_claimed: bool = False
+    removed: bool = False           # from /bot/unclaim
+    skipped: str = ""               # e.g. "Auto-claim is turned off." or a PASS reason
+    error: str = ""
+    idempotent: bool = False
+
+    @property
+    def ok(self) -> bool:
+        return self.claimed or self.already_claimed or self.removed
+
+    @classmethod
+    def from_api(cls, row: dict) -> "ClaimResult":
+        row = row or {}
+        return cls(
+            cert_id=str(row.get("certId") or ""),
+            claimed=bool(row.get("claimed", False)),
+            already_claimed=bool(row.get("alreadyClaimed", False)),
+            removed=bool(row.get("removed", False)),
+            skipped=str(row.get("skipped") or ""),
+            error=str(row.get("error") or ""),
+            idempotent=bool(row.get("idempotent", False)),
+        )
+
+
+async def claim_certs(certs: list, idempotency_key: Optional[str] = None,
+                      session: Optional[aiohttp.ClientSession] = None) -> list:
+    """Reserve Triumph allocation for BUY certs via the portal's /bot/claim. DOUBLE-
+    GATED: the portal claims only when ITS kill switch is on AND config.AUTO_CLAIM is
+    on here; otherwise every BUY comes back skipped. Idempotent on (idempotencyKey,
+    certId) so a retry can't double-claim. Per-cert issues ride as the row's
+    skipped/error; raises PortalAuthError/PortalBadRequest on a 4xx, PortalUnavailable
+    when transient failures exhaust retries."""
+    return await _claim_call(config.CLAIM_ENDPOINT, certs, idempotency_key, session)
+
+
+async def unclaim_certs(certs: list, idempotency_key: Optional[str] = None,
+                        session: Optional[aiohttp.ClientSession] = None) -> list:
+    """The UNDO — remove drafted claims before the weekly submit, via /bot/unclaim.
+    Lets the kill switch actively reverse a wrongly-drafted claim, not just halt."""
+    return await _claim_call(config.UNCLAIM_ENDPOINT, certs, idempotency_key, session)
+
+
+async def _claim_call(endpoint, certs, idempotency_key, session):
+    certs = [str(c).strip() for c in certs if str(c).strip()]
+    if not certs:
+        return []
+    if config.PRICE_MOCK:
+        return [_mock_claim(c) for c in certs]
+    own = session is None
+    if own:
+        session = aiohttp.ClientSession()
+    try:
+        out = []
+        for i in range(0, len(certs), config.PRICE_BATCH_CAP):
+            out.extend(await _claim_chunk(session, endpoint,
+                                          certs[i:i + config.PRICE_BATCH_CAP], idempotency_key))
+        return out
+    finally:
+        if own:
+            await session.close()
+
+
+async def _claim_chunk(session, endpoint, chunk, idempotency_key):
+    headers = {"x-bot-key": config.BOT_API_KEY,
+               "content-type": "application/json",
+               "accept": "application/json",
+               "accept-encoding": "gzip, deflate"}
+    payload = {"certs": chunk}
+    if idempotency_key:
+        payload["idempotencyKey"] = str(idempotency_key)
+    last_exc = None
+    for attempt in range(config.PRICE_MAX_RETRIES + 1):
+        try:
+            async with session.post(endpoint, json=payload, headers=headers,
+                                    timeout=aiohttp.ClientTimeout(total=config.PRICE_TIMEOUT_S)) as resp:
+                if resp.status == 401:
+                    raise PortalAuthError("portal rejected x-bot-key on claim (401)")
+                if resp.status == 400:
+                    body = (await resp.text())[:300]
+                    raise PortalBadRequest(f"claim 400: {body}")
+                if resp.status >= 500:
+                    raise PortalUnavailable(f"claim {resp.status}")
+                if resp.status != 200:
+                    body = (await resp.text())[:200]
+                    raise PortalUnavailable(f"claim {resp.status}: {body}")
+                try:
+                    data = await resp.json(content_type=None)
+                except (aiohttp.ClientError, ValueError) as e:
+                    raise PortalUnavailable(f"claim non-JSON body ({e})")
+            rows = data.get("results") if isinstance(data, dict) else None
+            if not isinstance(rows, list):
+                raise PortalUnavailable(f"claim returned no results array: {str(data)[:200]}")
+            return [ClaimResult.from_api(r) for r in rows]
+        except (PortalAuthError, PortalBadRequest):
+            raise
+        except (aiohttp.ClientError, asyncio.TimeoutError, PortalUnavailable) as e:
+            last_exc = e
+            if attempt < config.PRICE_MAX_RETRIES:
+                await asyncio.sleep(config.PRICE_RETRY_BACKOFF_S * (attempt + 1))
+            continue
+    raise PortalUnavailable(f"claim endpoint unavailable after {config.PRICE_MAX_RETRIES + 1} tries: {last_exc}")
+
+
+def _mock_claim(cert: str) -> "ClaimResult":
+    # Offline/selftest: mirror the kill-switch-off default (nothing claims).
+    return ClaimResult(cert_id=_digits(cert), skipped="[mock] auto-claim off")

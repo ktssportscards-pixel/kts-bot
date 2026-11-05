@@ -33,6 +33,15 @@ PRICE_RETRY_BACKOFF_S = 1.5    # base backoff between retries
 # can answer so the bot is testable before the portal endpoint is deployed.
 PRICE_MOCK = os.environ.get("BOTV2_PRICE_MOCK", "").lower() in ("1", "true", "yes")
 
+# ── Auto-claim (reserve Triumph allocation via the portal's /bot/claim) ─────────
+# DOUBLE-GATED: this bot-side flag AND the portal's own kill switch (default OFF,
+# flipped only on Kevin's word) must BOTH be on before anything is claimed. With
+# this off, the bot never calls /bot/claim at all. The portal re-prices each cert
+# and only claims decision==BUY; the claim is idempotent on (idempotencyKey,certId).
+AUTO_CLAIM = os.environ.get("BOTV2_AUTO_CLAIM", "").lower() in ("1", "true", "yes")
+CLAIM_ENDPOINT = PORTAL_BASE_URL.rstrip("/") + "/bot/claim"
+UNCLAIM_ENDPOINT = PORTAL_BASE_URL.rstrip("/") + "/bot/unclaim"
+
 # ── Google Sheets (buying sheets) ──────────────────────────────────────────────
 GOOGLE_CREDENTIALS_JSON = os.environ.get("GOOGLE_CREDENTIALS_JSON")
 GOOGLE_CREDENTIALS_FILE = os.environ.get(
