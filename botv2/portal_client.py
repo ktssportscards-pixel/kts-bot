@@ -189,7 +189,11 @@ async def _price_chunk(session: aiohttp.ClientSession, chunk: list[str],
                        rate_override: Optional[dict] = None) -> list[PricedRow]:
     headers = {"x-bot-key": config.BOT_API_KEY,
                "content-type": "application/json",
-               "accept": "application/json"}
+               "accept": "application/json",
+               # Ask for gzip only — these payloads are tiny, and this removes any
+               # dependency on a brotli ('br') decoder being present/consistent in
+               # the runtime (a mismatched brotli wheel otherwise fails the decode).
+               "accept-encoding": "gzip, deflate"}
     payload: dict = {"certs": chunk}
     if customer:
         payload["customer"] = customer
