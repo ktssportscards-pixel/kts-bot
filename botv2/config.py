@@ -11,7 +11,9 @@ NO CardLadder helper, and NO rules engine of its own.
 import os
 
 # ── Discord ───────────────────────────────────────────────────────────────────
-DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN", "")
+# Accept the existing v1 Railway var name (DISCORD_BOT_TOKEN) first, so the same
+# bot token works unchanged on the shared service; DISCORD_TOKEN is a fallback.
+DISCORD_TOKEN = os.environ.get("DISCORD_BOT_TOKEN") or os.environ.get("DISCORD_TOKEN") or ""
 # Kevin's Discord user id — used to DM him quote summaries and to detect an
 # in-flight ticket (if he's already talking in a channel, skip the welcome).
 KEVIN_USER_ID = int(os.environ.get("KEVIN_USER_ID", "0") or "0")
