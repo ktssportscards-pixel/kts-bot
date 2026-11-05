@@ -17,10 +17,18 @@ def build_digest() -> str:
         return ""
     pending.sort(key=lambda r: r.get("date", ""))
     total = sum(float(r.get("payout", 0) or 0) for r in pending)
+    payinfo = state.load("payinfo", dict)   # load once; flag entries with no details on file
     lines = [f"💰 **Payout digest** — {len(pending)} unpaid, **${total:,.2f}** total:", ""]
+    missing = 0
     for r in pending:
         track = f" · 📦 `{r['tracking']}`" if r.get("tracking") else " · ⏳ no tracking yet"
+        pin = "" if (r.get("user") or "").lstrip("@").strip().lower() in payinfo else " · ❓ no payment info"
+        if pin:
+            missing += 1
         lines.append(f"• **{r.get('user', '?')}** — ${float(r.get('payout', 0) or 0):,.2f} "
-                     f"({r.get('cards', 0)} cards, {r.get('date', '')}){track}")
-    lines += ["", "Mark each paid with `!paid` in their ticket."]
+                     f"({r.get('cards', 0)} cards, {r.get('date', '')}){track}{pin}")
+    tail = ["", "`!owe` for copy-paste payment packets · mark each paid with `!paid` in their ticket."]
+    if missing:
+        tail.insert(1, f"❓ {missing} missing payment info — `!payinfo set <name> <details>` to add.")
+    lines += tail
     return "\n".join(lines)
