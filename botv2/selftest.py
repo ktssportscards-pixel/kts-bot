@@ -421,11 +421,40 @@ def test_delivery():
           and tracking.carrier_of("123456789012") == "FedEx", "delivery: carrier_of shapes")
 
 
+# ── register-tracking: bot → portal watch + backfill list ────────────────────────
+def test_register_tracking():
+    section("register-tracking")
+    # portal_client.register_tracking (mock) returns a started watch; empty is a no-op.
+    r = asyncio.run(portal_client.register_tracking(60, "1Z777CC30111222333"))
+    check(r.get("ok") and r.get("registered") and r.get("tracking") == "1Z777CC30111222333",
+          "register_tracking: mock returns a started watch")
+    check(asyncio.run(portal_client.register_tracking(60, "")).get("ok") is False,
+          "register_tracking: empty tracking is a no-op")
+
+    # tickets_with_open_tracking: only OPEN (not delivered) tickets that carry a number.
+    tracking.record_quote(61, {"username": "backfill_bob", "comp": 300, "payout": 270,
+                               "cards": 1, "certs": {}}, channel_name="backfill_bob")
+    tracking.record_tracking(61, "1Z777CC30999000111")
+    tracking.record_quote(62, {"username": "no_track", "comp": 100, "payout": 90,
+                               "cards": 1, "certs": {}}, channel_name="no_track")   # no tracking #
+    tracking.record_quote(63, {"username": "already_del", "comp": 200, "payout": 180,
+                               "cards": 1, "certs": {}}, channel_name="already_del")
+    tracking.record_tracking(63, "1Z777CC30222333444")
+    tracking.mark_delivered(channel_id=63)             # delivered → excluded from backfill
+    pend = tracking.tickets_with_open_tracking()
+    chans = {p["channel_id"] for p in pend}
+    check(61 in chans and 62 not in chans and 63 not in chans,
+          "tickets_with_open_tracking: open+tracked only (skips untracked + delivered)")
+    bob = next((p for p in pend if p["channel_id"] == 61), None)
+    check(bob and bob["tracking"] == "1Z777CC30999000111" and bob["user"] == "backfill_bob",
+          "tickets_with_open_tracking: carries tracking + user")
+
+
 def main():
     print("botv2 selftest:")
     for t in (test_certs, test_pricing, test_lots_shipping, test_tracking_digest,
               test_payout_flow, test_vip_commands_client, test_psa_folder_guard,
-              test_alerts_status, test_analytics, test_delivery):
+              test_alerts_status, test_analytics, test_delivery, test_register_tracking):
         t()
     if _fails:
         print(f"\nFAILED ({len(_fails)}):")

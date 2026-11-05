@@ -456,3 +456,70 @@ def _mock_allocation() -> dict:
         ],
         "reliability": "approximate — Triumph's figures can be off; treat as a near-full signal, not exact.",
     }
+
+
+# ── delivery-tracking registration (bot → portal: watch a package for delivery) ──
+async def register_tracking(channel_id, tracking: str,
+                            session: Optional[aiohttp.ClientSession] = None) -> dict:
+    """Ask the portal to WATCH a UPS tracking number for delivery (POST /bot/register-
+    tracking). The portal registers an EasyPost tracker + stores channel_id for exact
+    ticket resolution; on delivery it relays to the bot's /delivery. SHADOW-SAFE — this
+    only starts WATCHING a package; nothing customer-facing (the customer 'arrived' post
+    is separately gated by config.DELIVERY_TRACKING). Deduped on the portal side, so a
+    re-call is a no-op/no re-charge. Returns the portal's result dict
+    {ok, already, registered, status, tracking}; raises PortalAuthError/PortalBadRequest
+    on a 4xx, PortalUnavailable when transient failures exhaust retries."""
+    tnum = str(tracking or "").strip()
+    if not tnum:
+        return {"ok": False, "error": "no tracking"}
+    if config.PRICE_MOCK:
+        return _mock_register(channel_id, tnum)
+    headers = {"x-bot-key": config.BOT_API_KEY,
+               "content-type": "application/json",
+               "accept": "application/json",
+               "accept-encoding": "gzip, deflate"}
+    payload = {"tracking": tnum}
+    if channel_id is not None:
+        payload["channel_id"] = channel_id
+    own = session is None
+    if own:
+        session = aiohttp.ClientSession()
+    try:
+        last_exc = None
+        for attempt in range(config.PRICE_MAX_RETRIES + 1):
+            try:
+                async with session.post(config.REGISTER_TRACKING_ENDPOINT, json=payload, headers=headers,
+                                        timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                    if resp.status == 401:
+                        raise PortalAuthError("portal rejected x-bot-key on register-tracking (401)")
+                    if resp.status == 400:
+                        body = (await resp.text())[:300]
+                        raise PortalBadRequest(f"register-tracking 400: {body}")
+                    if resp.status >= 500:
+                        raise PortalUnavailable(f"register-tracking {resp.status}")
+                    if resp.status != 200:
+                        body = (await resp.text())[:200]
+                        raise PortalUnavailable(f"register-tracking {resp.status}: {body}")
+                    try:
+                        data = await resp.json(content_type=None)
+                    except (aiohttp.ClientError, ValueError) as e:
+                        raise PortalUnavailable(f"register-tracking non-JSON body ({e})")
+                return data if isinstance(data, dict) else {"ok": True}
+            except (PortalAuthError, PortalBadRequest):
+                raise
+            except (aiohttp.ClientError, asyncio.TimeoutError, PortalUnavailable) as e:
+                last_exc = e
+                if attempt < config.PRICE_MAX_RETRIES:
+                    await asyncio.sleep(config.PRICE_RETRY_BACKOFF_S * (attempt + 1))
+                continue
+        raise PortalUnavailable(
+            f"register-tracking unavailable after {config.PRICE_MAX_RETRIES + 1} tries: {last_exc}")
+    finally:
+        if own:
+            await session.close()
+
+
+def _mock_register(channel_id, tracking: str) -> dict:
+    # Offline/selftest: a successful watch, in_transit.
+    return {"ok": True, "already": False, "registered": True,
+            "status": "in_transit", "tracking": tracking, "channel_id": channel_id}

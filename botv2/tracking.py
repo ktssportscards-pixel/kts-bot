@@ -139,6 +139,18 @@ def delivery_status(channel_id) -> dict:
     return {}
 
 
+def tickets_with_open_tracking() -> list:
+    """Open tickets (not yet delivered) that carry a tracking number — for a backfill
+    registration with the delivery watcher. Returns [{channel_id, tracking, user}]."""
+    out = []
+    for r in state.load("tickets", list):
+        tnum = r.get("tracking") or (r.get("delivery") or {}).get("number")
+        if not tnum or (r.get("delivery") or {}).get("status") == "delivered":
+            continue
+        out.append({"channel_id": r.get("channel_id"), "tracking": tnum, "user": r.get("user", "")})
+    return out
+
+
 def delivery_customer_message(user: str = "") -> str:
     """Customer-safe 'your package arrived' note for the ticket. Deliberately generic —
     no buyer name, no payout, no internal terms — and scrubbed against the forbidden
