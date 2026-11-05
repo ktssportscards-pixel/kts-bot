@@ -349,20 +349,10 @@ BBALL_PLAYERS_REJECT_OVER_200 = [
     # emptied Nov 4 — Triumph takes these over $200 (Zion verified on a live cert).
 ]
 BBALL_PLAYER_PRICE_CAP = 200
-# WNBA players treated as a separate sport (rejected). CardLadder reports them
-# under sport='basketball', so we match by player name.
-WNBA_PLAYERS = [
-    "caitlin clark",
-    "a'ja wilson",
-    "aja wilson",         # alternate spelling without apostrophe
-    "sabrina ionescu",
-    "angel reese",
-    "paige bueckers",
-    "juju watkins",
-    "breanna stewart",
-    "diana taurasi",
-    "sue bird",
-]
+# Nov 4: emptied to match the portal — only Karl Malone is hard-excluded now;
+# WNBA (like everything else) defers to Triumph. List name kept so re-adding is
+# trivial if Triumph's stance changes. v2 drops this entirely.
+WNBA_PLAYERS = []
 # Brand/set keywords that indicate unlicensed product (no NBA logo). These flag
 # the lot for Kevin's manual review rather than auto-reject — sometimes legit
 # sub-brands collide. He'll eyeball before paying.
@@ -374,22 +364,9 @@ UNLICENSED_BRAND_KEYWORDS = [
     "bowman u now",
     "bowman university now",
 ]
-# Collegiate set keywords — cards featuring NBA players in college/USA Basketball
-# jerseys. Hard-rejected because Kevin doesn't buy the entire product line.
-COLLEGIATE_SET_KEYWORDS = [
-    "bowman university",
-    "bowman u ",            # trailing space avoids matching "Bowman Update"
-    "bowman u'",            # catches "Bowman U's" / possessive forms
-    "topps chrome university",
-    "topps university",
-    "panini prizm draft picks",
-    "prizm draft picks",
-    "panini chronicles draft",
-    "chronicles draft",
-    "stars & stripes",
-    "stars and stripes",
-    "usa basketball",
-]
+# Nov 4: emptied to match the portal — collegiate defers to Triumph now (only
+# Karl Malone is hard-excluded). v2 drops this entirely.
+COLLEGIATE_SET_KEYWORDS = []
 
 
 def check_basketball_rejections(comp):
