@@ -89,6 +89,45 @@ async def _analytics(req):
     return _cors(web.json_response(analytics.summary(days)))
 
 
+async def _delivery(req):
+    """Delivery webhook SINK (provider-agnostic). AUTHENTICATED with x-bot-key. The
+    portal / carrier aggregator (EasyPost · Shippo · AfterShip) POSTs here when a
+    tracked package is delivered; the bot flips the ticket to delivered and — ONLY if
+    config.DELIVERY_TRACKING is on — posts a customer-safe 'arrived!' note in that
+    ticket + DMs Kevin. Body: {channel_id? | tracking?, status?='delivered',
+    delivered_at?, carrier?}; resolves by channel_id, else by tracking number. The bot
+    holds NO carrier credentials and makes no outbound carrier calls. Always 200 on the
+    delivered path (even when no ticket matches) so a webhook can't retry-storm."""
+    if not config.BOT_API_KEY or req.headers.get("x-bot-key") != config.BOT_API_KEY:
+        return web.json_response({"error": "unauthorized"}, status=401)
+    try:
+        body = await req.json()
+    except Exception:
+        return web.json_response({"error": "bad json"}, status=400)
+    if not isinstance(body, dict):                   # valid JSON but not an object (e.g. [] / null)
+        return web.json_response({"error": "body must be a JSON object"}, status=400)
+    from . import tracking
+    status = str(body.get("status", "delivered")).lower()
+    channel_id = body.get("channel_id")
+    tracking_num = body.get("tracking") or body.get("tracking_num") or body.get("trackingNumber")
+    if channel_id is None and not tracking_num:
+        return web.json_response({"error": "need channel_id or tracking"}, status=400)
+    if status != "delivered":                       # only 'delivered' acts; ack the rest
+        return _cors(web.json_response({"ok": True, "ignored": status}))
+    res = tracking.mark_delivered(channel_id=channel_id, tracking_num=tracking_num,
+                                  delivered_at=body.get("delivered_at"),
+                                  carrier=body.get("carrier"))
+    posted = False
+    if res.get("found") and not res.get("already"):   # notify_delivered gates the customer post itself
+        try:
+            from . import bot as botmod
+            posted = await botmod.notify_delivered(res["channel_id"], res.get("user", ""))
+        except Exception as e:
+            print(f"[web] delivery notify failed (non-fatal): {e}")
+    return _cors(web.json_response(
+        {**res, "posted": posted, "messaging_enabled": config.DELIVERY_TRACKING}))
+
+
 async def start():
     """Start the web server on $PORT. Returns the AppRunner (keep a reference)."""
     app = web.Application()
@@ -102,6 +141,7 @@ async def start():
         web.get("/ops", _ops),
         web.get("/status", _status),
         web.get("/analytics", _analytics),
+        web.post("/delivery", _delivery),
     ])
     runner = web.AppRunner(app)
     await runner.setup()

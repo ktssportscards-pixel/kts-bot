@@ -7,7 +7,7 @@ than duplicating. State-store backed, so it survives redeploys with a DATA_DIR v
 """
 from datetime import date, datetime
 
-from . import state
+from . import config, state
 
 
 def _upsert(store_name: str, rec: dict) -> None:
@@ -41,8 +41,25 @@ def record_accepted_ship(channel_id, snapshot: dict):
     return base
 
 
+def carrier_of(tracking_num: str) -> str:
+    """Best-effort carrier from the tracking-number shape (display only — the real
+    carrier comes from the aggregator). UPS `1Z…`, USPS 20-22 digits, FedEx 12-15."""
+    t = (tracking_num or "").strip().upper()
+    if t.startswith("1Z"):
+        return "UPS"
+    if t.isdigit() and 20 <= len(t) <= 22:
+        return "USPS"
+    if t.isdigit() and 12 <= len(t) <= 15:
+        return "FedEx"
+    return ""
+
+
 def record_tracking(channel_id, tracking_num: str) -> bool:
-    """Attach a tracking number to this channel's ticket + owed entries (if any)."""
+    """Attach a tracking number to this channel's ticket + owed entries (if any), and
+    open a `delivery` sub-record on the ticket (status 'in_transit') so the carrier
+    'delivered' event can flip it later. Keeps the flat `tracking` string too — the
+    local tracker + ops dashboard already read that. Never clobbers a 'delivered'
+    state when the same number is re-dropped."""
     hit = False
     for store, key in (("tickets", f"tk_{channel_id}"), ("owed", f"owed_{channel_id}")):
         data = state.load(store, list)
@@ -50,10 +67,93 @@ def record_tracking(channel_id, tracking_num: str) -> bool:
         for r in data:
             if r.get("id") == key:
                 r["tracking"] = tracking_num
+                if store == "tickets":
+                    d = r.get("delivery") or {}
+                    if not (d.get("status") == "delivered" and d.get("number") == tracking_num):
+                        r["delivery"] = {
+                            "number": tracking_num,
+                            "carrier": carrier_of(tracking_num),
+                            "status": "in_transit",
+                            "noted_at": datetime.now().isoformat(timespec="seconds"),
+                            "delivered_at": None,
+                        }
                 changed = hit = True
         if changed:
             state.save(store, data)
     return hit
+
+
+def find_channel_by_tracking(tracking_num: str):
+    """Resolve a tracking number to its ticket's channel_id (scans the tickets store),
+    so the delivery webhook can act on a number alone. None if no ticket matches."""
+    num = (tracking_num or "").strip().upper()        # tracking #s are case-insensitive
+    if not num:
+        return None
+    for r in state.load("tickets", list):
+        stored = str(r.get("tracking") or "").upper()
+        dnum = str((r.get("delivery") or {}).get("number") or "").upper()
+        if num in (stored, dnum):
+            return r.get("channel_id")
+    return None
+
+
+def mark_delivered(channel_id=None, tracking_num=None, delivered_at=None,
+                   carrier=None) -> dict:
+    """Flip a ticket's delivery sub-record to 'delivered' (idempotent). Resolve by
+    channel_id, else by tracking number. Returns {found, channel_id, already, user,
+    number} so the caller can decide whether to post the customer 'arrived' note. The
+    delivered state is recorded even when customer messaging is off (ops + Kevin see
+    it); only the customer-facing post is gated by config.DELIVERY_TRACKING upstream."""
+    if channel_id is None and tracking_num:
+        channel_id = find_channel_by_tracking(tracking_num)
+    miss = {"found": False, "channel_id": channel_id, "already": False,
+            "user": "", "number": (tracking_num or "")}
+    if channel_id is None:
+        return miss
+    data = state.load("tickets", list)
+    for r in data:
+        if r.get("id") == f"tk_{channel_id}":
+            d = r.get("delivery") or {}
+            number = d.get("number") or r.get("tracking") or (tracking_num or "")
+            if d.get("status") == "delivered":
+                return {"found": True, "channel_id": channel_id, "already": True,
+                        "user": r.get("user", ""), "number": number}
+            r["delivery"] = {
+                "number": number,
+                "carrier": carrier or d.get("carrier") or carrier_of(number),
+                "status": "delivered",
+                "noted_at": d.get("noted_at"),
+                "delivered_at": delivered_at or datetime.now().isoformat(timespec="seconds"),
+            }
+            state.save("tickets", data)
+            return {"found": True, "channel_id": channel_id, "already": False,
+                    "user": r.get("user", ""), "number": number}
+    return miss
+
+
+def delivery_status(channel_id) -> dict:
+    """The delivery sub-record for a channel's ticket, or {} if none."""
+    for r in state.load("tickets", list):
+        if r.get("id") == f"tk_{channel_id}":
+            return r.get("delivery") or {}
+    return {}
+
+
+def delivery_customer_message(user: str = "") -> str:
+    """Customer-safe 'your package arrived' note for the ticket. Deliberately generic —
+    no buyer name, no payout, no internal terms — and scrubbed against the forbidden
+    list as a belt-and-suspenders guard before it can ever post."""
+    msg = "📦 Your package just arrived — got it safely, thank you! We'll take it from here. 🙌"
+    if any(w in msg.lower() for w in config.CUSTOMER_FORBIDDEN_WORDS):
+        return "📦 Your package just arrived — got it safely, thank you! 🙌"
+    return msg
+
+
+def delivery_kevin_message(user: str = "", number: str = "") -> str:
+    """Kevin-side heads-up when a package is delivered (his DM; may name the number)."""
+    who = f"**{user}**'s" if user else "a"
+    tail = f" (`{number}`)" if number else ""
+    return f"📦 Delivered — {who} package just arrived{tail}. It's in; verify the lot when you get a sec."
 
 
 def mark_paid(channel_id) -> bool:
@@ -148,6 +248,8 @@ def ops_view(channel_sheet: dict = None, detail: bool = False) -> list:
             "claimed": t.get("claimed"),
             "shipped": bool(o),
             "tracking": t.get("tracking") or o.get("tracking") or "",
+            "delivered": (t.get("delivery") or {}).get("status") == "delivered",
+            "delivered_at": (t.get("delivery") or {}).get("delivered_at"),
             "owed": o.get("payout") if o else None,
             "paid": bool(o.get("paid")) if o else None,
             "paid_date": o.get("paid_date"),
