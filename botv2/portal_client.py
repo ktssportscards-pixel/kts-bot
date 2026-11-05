@@ -124,11 +124,17 @@ def _digits(cert: str) -> str:
 
 # ── the client ───────────────────────────────────────────────────────────────
 async def price_certs(certs: list[str],
+                       rate_override: Optional[dict] = None,
                        session: Optional[aiohttp.ClientSession] = None) -> list[PricedRow]:
     """Price a list of certs via the portal. Returns one PricedRow per input cert,
     in input order. Chunks at the portal's 200 cap. Retries only transient failures
     (5xx / network / timeout); raises PortalAuthError / PortalBadRequest on a 4xx
-    config error, PortalUnavailable if transient failures exhaust retries."""
+    config error, PortalUnavailable if transient failures exhaust retries.
+
+    rate_override: optional per-customer VIP rates, applied by the portal through
+    offer.js's own {rateOverrides} path (so ALL offer math stays in offer.js, and
+    offer.js caps it at 100%). Shape: {category: flat_pct | [{min,max,rate}], ...}.
+    Omitted -> public rates. One call = one customer's lot = one override map."""
     certs = [str(c).strip() for c in certs if str(c).strip()]
     if not certs:
         return []
@@ -142,18 +148,21 @@ async def price_certs(certs: list[str],
         out: list[PricedRow] = []
         for i in range(0, len(certs), config.PRICE_BATCH_CAP):
             chunk = certs[i:i + config.PRICE_BATCH_CAP]
-            out.extend(await _price_chunk(session, chunk))
+            out.extend(await _price_chunk(session, chunk, rate_override))
         return out
     finally:
         if own_session:
             await session.close()
 
 
-async def _price_chunk(session: aiohttp.ClientSession, chunk: list[str]) -> list[PricedRow]:
+async def _price_chunk(session: aiohttp.ClientSession, chunk: list[str],
+                       rate_override: Optional[dict] = None) -> list[PricedRow]:
     headers = {"x-bot-key": config.BOT_API_KEY,
                "content-type": "application/json",
                "accept": "application/json"}
-    payload = {"certs": chunk}
+    payload: dict = {"certs": chunk}
+    if rate_override:
+        payload["rateOverride"] = rate_override
     last_exc: Optional[Exception] = None
 
     for attempt in range(config.PRICE_MAX_RETRIES + 1):
