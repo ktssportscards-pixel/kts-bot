@@ -39,40 +39,54 @@ endpoint is deployed.
 ## `/bot/price` contract (owned by the portal side)
 ```
 POST {PORTAL_BASE_URL}/bot/price   header x-bot-key: <BOT_API_KEY>
-body {"certs":[...]}  (<=200)   ->   {"rows":[ row, ... ]}  (one per cert, in order)
-row = {certId, grader, grade, cardTitle, imageUrl, category, marketValue,
-       lastSale, status, rejectionReason, clConfidence, decision, offer, reason}
+body {"certs":[...≤200], "customer"?: "<discord_username>", "rateOverride"?: {...}}
+  -> {"rows":[ row, ... ] (one per cert, in order), "customerMatched": bool}
+row = {certId, grader, grade, cardTitle, imageUrl, category, marketValue, lastSale,
+       status, rejectionReason, clConfidence, decision, offer, reason, vip}
 ```
+VIP is single-source in the portal: `customer` = the raw Discord username (Kevin
+requires it at signup); the portal matches its VIP section case-insensitively and
+applies that seller's rates (per-row `vip`). Precedence: explicit `rateOverride`
+> `customer` VIP > public. `payoutCents`/`memberMultiplier` never leave the portal.
 
-## Module layout
-| module | status | role |
-|---|---|---|
-| `config.py` | ✅ | env + tunables + confidential-field guard |
-| `portal_client.py` | ✅ | **the price source** — `price_certs()` → `PricedRow`s |
-| `pricing.py` | ⏳ | aggregate rows into a quote (group by category, totals) — no band logic |
-| `sheets.py` | ⏳ | buying-sheet create + fill (writes the portal's values/offer) |
-| `tickets.py` | ⏳ | ticket-channel registry |
-| `welcome.py` | ⏳ | welcome / rate-card copy |
-| `lots.py` | ⏳ | lot state + buying minimums + lane totals |
-| `shipping.py` | ⏳ | dual-address (VA / Doral) routing |
-| `vip.py` | ⏳ | per-customer rate overrides (see Open decisions) |
-| `quotas.py` | ⏳ | Pokémon slot quotas |
-| `payments.py` | ⏳ | payout packets / digest |
-| `summary.py` | ⏳ | `!summary` customer buying sheets |
-| `webserver.py` | ⏳ | /owed /tickets /leaderboard /links /health |
-| `state.py` | ⏳ | JSON persistence stores |
-| `bot.py` | ⏳ | Discord client, `on_message` router, commands (entry) |
+## Module layout (all ✅ — slab flow feature-complete)
+| module | role |
+|---|---|
+| `config.py` | env + tunables + confidential-field guard |
+| `portal_client.py` | **the price source** — `price_certs()` → `PricedRow`s (customer/VIP/override) |
+| `pricing.py` | aggregate rows → quote + customer/Kevin messages (no band logic) |
+| `certs.py` | cert + tracking-number extraction (verbatim v1 parser) |
+| `sheets.py` | buying-sheet create + fill (portal offer as a number) + tracking save |
+| `tickets.py` | overflow-proof ticket-channel registry |
+| `welcome.py` | one-time greeting |
+| `lots.py` | lot state + minimums + lane totals + redeploy rebuild-from-sheets |
+| `shipping.py` | VA/Doral routing + ship/proceed gate |
+| `vip.py` | rare manual override (VIP is portal-sourced by username) |
+| `tracking.py` | record accepted lots → owed/tickets stores, tracking #, mark paid |
+| `payout_digest.py` | Friday 9am ET unpaid-owed digest DM to Kevin |
+| `commands.py` | `!ping` / `!help` / `!adopt` / `!paid` |
+| `webserver.py` | /health + /owed /tickets /leaderboard /links (binds $PORT) |
+| `state.py` | atomic JSON persistence |
+| `bot.py` | Discord client, `on_message` router, entry |
+| `selftest.py` | the test suite — `python -m botv2.selftest` |
 
-All ⏳ modules are rebuilt fresh, using v1 as the reference so no battle-tested
-edge case is lost (state recovery, CGC, overflow-proof tickets, min-lot holds…).
+Rebuilt fresh using v1 as the reference so no battle-tested edge case was lost
+(state recovery, CGC, overflow-proof tickets, min-lot holds, cert-parser guards).
 
-## Open decisions (settle while building, flag to Kevin)
-1. **Sheet offer**: v1 used a formula that re-priced from bands. v2 writes the
-   portal's value + offer as numbers; editing a value means a re-quote (no local
-   band formula — the portal is the source of truth). → going with numbers.
-2. **VIP**: per-Discord-customer overrides aren't known to the portal. Either the
-   bot post-adjusts the offer for VIP customers, or `/bot/price` accepts an
-   optional per-request rate override. → scope with the portal side.
+**Dropped (Kevin, Nov 4):** Pokémon-singles Collectr CSV (not buying them now) and
+`!summary` (he exports a CSV from the app). Pokémon slot quotas are moot — the
+portal does allocation.
+
+## Decisions (settled)
+- **Sheet payout**: the portal's number written straight in (H = offer rate); no
+  local band formula — the portal is the source of truth. Editing a comp = re-quote.
+- **VIP**: single-source in the portal, keyed by the raw Discord username the bot
+  sends; the portal applies it. A local manual override remains for a one-off.
+
+## Still open
+- Integration-test against the live `/bot/price` (needs the portal endpoint built
+  on Kevin's direct go). Until then v2 runs on the mock.
+- Deploy wiring (Procfile/requirements) when Kevin moves v2 off local.
 
 ## Backups of v1 (the months of proven work)
 - git tag `v1-stable-2026-11-04`, branch `v1-backup-2026-11-04`
