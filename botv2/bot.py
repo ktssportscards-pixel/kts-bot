@@ -18,7 +18,7 @@ import asyncio
 import discord
 
 from . import (certs, commands, config, lots, portal_client, pricing, sheets,
-               shipping, state, tickets, vip, webserver, welcome)
+               shipping, state, tickets, tracking, vip, webserver, welcome)
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -27,6 +27,8 @@ bot = discord.Client(intents=intents)
 
 # Welcomed ticket channels (persisted; survives redeploys with a DATA_DIR volume).
 _welcomed: set = set(int(x) for x in state.load("welcomed", list))
+# Per-channel snapshot of the latest accepted quote, used to record the lot on ship.
+_last_quote: dict = {}
 
 
 def _remember_welcomed(cid: int) -> None:
@@ -51,8 +53,10 @@ async def ping_kevin(text: str) -> bool:
 # ── events ────────────────────────────────────────────────────────────────────
 async def _handle_ship(channel) -> None:
     """Customer said 'ship'/'proceed' — give the routed address(es) or the hold."""
-    msg, _gave, note = shipping.compose_shipping(channel.id)
+    msg, gave, note = shipping.compose_shipping(channel.id)
     await channel.send(msg)
+    if gave:
+        tracking.record_accepted_ship(channel.id, _last_quote.get(channel.id))
     await ping_kevin(f"🚚 #{channel.name} — ship: {note}")
 
 
@@ -160,6 +164,11 @@ async def _handle_message(message) -> None:
         channel.id,
         {r.cert: r.market_value for r in quote.accepted if r.market_value is not None},
         {r.cert: r.category for r in quote.accepted})
+    _last_quote[channel.id] = {
+        "username": username, "comp": quote.comp_total, "payout": quote.payout_total,
+        "cards": quote.n_accepted,
+        "certs": {r.cert: r.market_value for r in quote.accepted if r.market_value is not None},
+    }
     proceed = lots.proceed_or_hold_tail(channel.id)
     await channel.send(pricing.customer_message(quote, proceed_override=proceed))  # instant
 

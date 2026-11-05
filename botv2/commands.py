@@ -5,7 +5,7 @@ Handled BEFORE the ticket gate so `!adopt` works in a channel the gate doesn't y
 recognize (an overflow ticket). Unknown commands fall through to normal processing
 (which simply ignores non-cert text), so this never swallows a real message.
 """
-from . import config, tickets
+from . import config, tickets, tracking
 
 
 async def handle(bot, message) -> bool:
@@ -31,6 +31,7 @@ async def handle(bot, message) -> bool:
         if is_kevin:
             base += ("\n\n**Admin (you):**\n"
                      "• `!adopt` — treat this channel as a ticket\n"
+                     "• `!paid` — mark this ticket's lot paid\n"
                      "• VIP is managed in the KTS app's VIP section (portal is the source of truth)")
         await channel.send(base)
         return True
@@ -40,6 +41,13 @@ async def handle(bot, message) -> bool:
             return True   # silently ignore admin commands from non-Kevin
         tickets.remember(channel.id)
         await channel.send("✅ Adopted — I'll treat this channel as a ticket now.")
+        return True
+
+    if cmd == "paid":
+        if not is_kevin:
+            return True
+        ok = tracking.mark_paid(channel.id)
+        await channel.send("✅ Marked paid." if ok else "⚠️ No owed entry for this channel.")
         return True
 
     return False   # unknown command → fall through (normal processing ignores it)
