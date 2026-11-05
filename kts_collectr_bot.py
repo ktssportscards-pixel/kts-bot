@@ -336,16 +336,17 @@ PSA_FOOTBALL_PER_CARD_TIERS = [
 
 # ── BASKETBALL-SPECIFIC REJECTION RULES ──────────────────────────────────────────
 # Players we won't buy AT ALL regardless of price.
+# Nov 4: pulled Ja Morant + the whole over-$200 list — verified on live certs that
+# Triumph ACCEPTS those players (Ja Morant + Zion confirmed), so banning them
+# rejected cards Triumph takes, against Kevin's "take whatever Triumph takes."
+# Karl Malone kept (Kevin: Triumph won't buy him); WNBA + collegiate kept below
+# (Triumph rejects those). v2 defers to Triumph per-cert and drops all of this.
 BBALL_PLAYERS_REJECT_ALWAYS = [
     "karl malone",
-    "ja morant",
 ]
 # Players we won't buy if the comp is over $200.
 BBALL_PLAYERS_REJECT_OVER_200 = [
-    "trae young",
-    "jaren jackson jr",
-    "jaren jackson",     # catches "Jaren Jackson Jr." after normalization too
-    "zion williamson",
+    # emptied Nov 4 — Triumph takes these over $200 (Zion verified on a live cert).
 ]
 BBALL_PLAYER_PRICE_CAP = 200
 # WNBA players treated as a separate sport (rejected). CardLadder reports them
