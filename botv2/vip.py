@@ -1,15 +1,17 @@
 """
-vip — per-customer rate overrides.
+vip — RARE manual bot-side rate override.
 
-A VIP customer's rates are applied by the PORTAL, not the bot: the bot just looks
-up the customer's override map and passes it to /bot/price, which runs it through
-offer.js's own {rateOverrides} path (capped at 100%). So all offer math stays in
-offer.js and the bot never prices — v2 reintroduces zero rate logic.
+The source of truth for who's VIP is Kevin's **KTS Portal VIP section** — the bot
+passes the customer's Discord username to /bot/price and the portal applies that
+seller's VIP rates itself (and flags each row vip=True). So the two stay in sync
+with zero bot-side list to maintain, and all offer math stays in offer.js.
+
+This module is only a fallback for a ONE-OFF VIP who isn't a portal seller: a local
+override map, merged in as /bot/price's optional `rateOverride`. Normally empty.
 
 Store shape (keyed by lowercased Discord username):
   {"someuser": {"basketball": 97, "pokemon": [{"min":0,"max":100,"rate":93}]}}
-where each category maps to a flat percent OR a list of {min,max,rate} bands —
-exactly the portal's rateOverride contract.
+each category → a flat percent OR [{min,max,rate}] bands (the portal's rateOverride).
 """
 from . import state
 

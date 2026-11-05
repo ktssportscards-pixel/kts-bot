@@ -18,7 +18,7 @@ import asyncio
 import discord
 
 from . import (certs, config, lots, portal_client, pricing, sheets, shipping,
-               state, tickets, vip, welcome)
+               state, tickets, vip, webserver, welcome)
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -56,9 +56,18 @@ async def _handle_ship(channel) -> None:
     await ping_kevin(f"🚚 #{channel.name} — ship: {note}")
 
 
+_web_runner = None
+
+
 @bot.event
 async def on_ready():
-    print(f"[bot] logged in as {bot.user} (botv2 {config.__name__.split('.')[0]})")
+    global _web_runner
+    print(f"[bot] logged in as {bot.user} (botv2)")
+    if _web_runner is None:                       # start once; on_ready re-fires on reconnect
+        try:
+            _web_runner = await webserver.start()
+        except Exception as e:
+            print(f"[bot] web server start failed (non-fatal): {e}")
     try:
         await tickets.sweep_overflow(bot)
     except Exception as e:
@@ -120,11 +129,15 @@ async def _handle_message(message) -> None:
             return
 
     username = tickets.sanitize_channel_name(channel.name) or message.author.name
-    rate_override = vip.override_for(username)   # None = public rates; portal applies VIP
+    # VIP is portal-sourced: pass the username and the portal applies that seller's
+    # VIP rates from its own VIP section (single source). rate_override is only a
+    # rare manual bot-side override for a one-off non-portal customer (usually None).
+    rate_override = vip.override_for(username)
 
     async with channel.typing():
         try:
-            rows = await portal_client.price_certs(cert_list, rate_override=rate_override)
+            rows = await portal_client.price_certs(cert_list, customer=username,
+                                                   rate_override=rate_override)
         except portal_client.PortalAuthError as e:
             await ping_kevin(f"🚨 **botv2 can't authenticate to pricing** — {e}. "
                              f"Check BOT_API_KEY / the portal.")

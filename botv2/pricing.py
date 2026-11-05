@@ -62,6 +62,7 @@ class Quote:
     breakdown: list = field(default_factory=list)    # CategoryBreakdown (accepted)
     comp_total: float = 0.0
     payout_total: float = 0.0
+    vip: bool = False               # portal applied this customer's VIP rates
 
     @property
     def n_accepted(self) -> int:
@@ -97,6 +98,7 @@ def build_quote(rows: list[PricedRow]) -> Quote:
         CategoryBreakdown(cat, category_label(cat), g["count"], g["comp"], g["pay"])
         for cat, g in sorted(groups.items())
     ]
+    q.vip = any(r.vip for r in q.accepted)
     return q
 
 
@@ -122,6 +124,8 @@ def customer_message(q: Quote, head: str = "✅ All comps loaded!",
             "**Breakdown:**",
             *breakdown_lines(q),
         ]
+        if q.vip:
+            parts += ["", "✨ *VIP rates applied — thanks for being a top supporter!*"]
     if q.rejected:
         parts.append("")
         n = len(q.rejected)
@@ -160,7 +164,7 @@ def kevin_summary(q: Quote, username: str, sheet_url: str = "") -> str:
     """Kevin's DM: totals + per-cert detail. Shows comp values only — never the
     portal's payout rate (it never reaches the bot)."""
     n = q.n_accepted + len(q.rejected) + len(q.unpriced)
-    header = (f"📋 **{username}** — {n} cert{'s' if n != 1 else ''} | "
+    header = (f"📋 **{username}**{' ✨VIP' if q.vip else ''} — {n} cert{'s' if n != 1 else ''} | "
               f"Accepted **{q.n_accepted}** | Comp **{money(q.comp_total)}** | "
               f"Payout **{money(q.payout_total)}**")
     if q.rejected:

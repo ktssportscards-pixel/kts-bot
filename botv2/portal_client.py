@@ -70,6 +70,7 @@ class PricedRow:
     offer: Optional[float] = None            # dollars (from the portal's offer.js)
     reason: str = ""               # PASS reason / note
     error: str = ""                # transport/portal error for THIS cert, if any
+    vip: bool = False              # portal applied this customer's VIP rate
 
     @property
     def priced(self) -> bool:
@@ -115,6 +116,7 @@ class PricedRow:
             offer=num(row.get("offer")),
             reason=str(row.get("reason") or ""),
             error=str(row.get("error") or ""),
+            vip=bool(row.get("vip", False)),
         )
 
 
@@ -124,6 +126,7 @@ def _digits(cert: str) -> str:
 
 # ── the client ───────────────────────────────────────────────────────────────
 async def price_certs(certs: list[str],
+                       customer: Optional[str] = None,
                        rate_override: Optional[dict] = None,
                        session: Optional[aiohttp.ClientSession] = None) -> list[PricedRow]:
     """Price a list of certs via the portal. Returns one PricedRow per input cert,
@@ -131,10 +134,13 @@ async def price_certs(certs: list[str],
     (5xx / network / timeout); raises PortalAuthError / PortalBadRequest on a 4xx
     config error, PortalUnavailable if transient failures exhaust retries.
 
-    rate_override: optional per-customer VIP rates, applied by the portal through
-    offer.js's own {rateOverrides} path (so ALL offer math stays in offer.js, and
-    offer.js caps it at 100%). Shape: {category: flat_pct | [{min,max,rate}], ...}.
-    Omitted -> public rates. One call = one customer's lot = one override map."""
+    customer: the Discord username — the portal matches it against its own VIP
+    section (single source of truth for who's VIP) and auto-applies that seller's
+    rates, flagging each row vip=True. This is the primary VIP path.
+    rate_override: an optional MANUAL override map ({category: flat_pct |
+    [{min,max,rate}]}) for a one-off non-portal customer; the portal applies it via
+    offer.js's {rateOverrides} (100%-capped). Omitted -> customer's VIP, else public.
+    Either way ALL offer math stays in offer.js — the bot never prices."""
     certs = [str(c).strip() for c in certs if str(c).strip()]
     if not certs:
         return []
@@ -148,7 +154,7 @@ async def price_certs(certs: list[str],
         out: list[PricedRow] = []
         for i in range(0, len(certs), config.PRICE_BATCH_CAP):
             chunk = certs[i:i + config.PRICE_BATCH_CAP]
-            out.extend(await _price_chunk(session, chunk, rate_override))
+            out.extend(await _price_chunk(session, chunk, customer, rate_override))
         return out
     finally:
         if own_session:
@@ -156,11 +162,14 @@ async def price_certs(certs: list[str],
 
 
 async def _price_chunk(session: aiohttp.ClientSession, chunk: list[str],
+                       customer: Optional[str] = None,
                        rate_override: Optional[dict] = None) -> list[PricedRow]:
     headers = {"x-bot-key": config.BOT_API_KEY,
                "content-type": "application/json",
                "accept": "application/json"}
     payload: dict = {"certs": chunk}
+    if customer:
+        payload["customer"] = customer
     if rate_override:
         payload["rateOverride"] = rate_override
     last_exc: Optional[Exception] = None
