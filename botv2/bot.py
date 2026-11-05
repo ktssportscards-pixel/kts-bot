@@ -96,6 +96,14 @@ async def _handle_tracking(channel, tnum) -> None:
                f"moment it arrives — no need to check it yourself. 🙌")
     await channel.send(ack)
     tracking.record_tracking(channel.id, tnum)
+    if config.REGISTER_TRACKING:                        # ask the portal to watch it for delivery
+        try:
+            await portal_client.register_tracking(channel.id, tnum)
+        except Exception as e:                          # fail-soft: never block the ack/sheet-save
+            print(f"[bot] register-tracking failed (non-fatal): {e}")
+            await alert_kevin(f"register_track:{type(e).__name__}",
+                              f"⚠️ couldn't register tracking `{tnum}` (#{channel.name}) with the "
+                              f"delivery watcher: {e} — the auto delivery update may not fire for this one.")
     sheet_url = _channel_sheet.get(str(channel.id))
     saved = ""
     if sheet_url:

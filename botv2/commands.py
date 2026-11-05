@@ -36,6 +36,7 @@ async def handle(bot, message) -> bool:
                      "• `!stats [days]` — DM you volume + payout analytics\n"
                      "• `!owe [user]` — DM you copy-paste payment packets for the unpaid queue\n"
                      "• `!payinfo` — store/view a seller's wire info (use in a DM; I scrub it from channels)\n"
+                     "• `!synctracking` — register open tickets' tracking #s with the delivery watcher\n"
                      "• VIP is managed in the KTS app's VIP section (portal is the source of truth)")
         await channel.send(base)
         return True
@@ -158,6 +159,43 @@ async def handle(bot, message) -> bool:
                 await channel.send("💸 Payment packet(s) sent to your DMs.")
             except Exception:
                 pass
+        return True
+
+    if cmd == "synctracking":
+        # Backfill: register any open tickets' tracking numbers with the delivery watcher
+        # (for ones dropped before registration was on, or to re-sync). Kevin-only; the
+        # portal dedups, so it's safe to re-run. Registers even if the auto flag is off.
+        if not is_kevin:
+            return True
+        from . import portal_client                     # config is already module-level
+        if getattr(channel, "guild", None) is not None:
+            try:
+                await message.delete()
+            except Exception:
+                pass
+        pending = tracking.tickets_with_open_tracking()
+        if not pending:
+            try:
+                await message.author.send("📦 No open tickets with a tracking number to register.")
+            except Exception:
+                pass
+            return True
+        ok = fail = 0
+        for t in pending:
+            try:
+                await portal_client.register_tracking(t["channel_id"], t["tracking"])
+                ok += 1
+            except Exception as e:
+                fail += 1
+                print(f"[cmd] synctracking failed for {t['tracking']}: {e}")
+        gate = "" if config.REGISTER_TRACKING else \
+            "  ⚠️ BOTV2_REGISTER_TRACKING is OFF, so NEW drops won't auto-register yet."
+        try:
+            await message.author.send(
+                f"📦 Registered {ok}/{len(pending)} open tracking number(s) with the delivery watcher"
+                + (f" — {fail} failed (see logs)" if fail else "") + "." + gate)
+        except Exception:
+            pass
         return True
 
     return False   # unknown command → fall through (normal processing ignores it)

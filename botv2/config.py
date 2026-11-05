@@ -62,6 +62,18 @@ NEAR_FULL_PCT = int(os.environ.get("NEAR_FULL_PCT", "85"))
 # provider-agnostic and holds no carrier credentials.
 DELIVERY_TRACKING = os.environ.get("BOTV2_DELIVERY_TRACKING", "").lower() in ("1", "true", "yes")
 
+# ── Delivery-tracking registration (bot → portal) ──────────────────────────────
+# When a customer drops a UPS tracking number, the bot asks the portal to start
+# WATCHING it for delivery (POST /bot/register-tracking): the portal registers an
+# EasyPost tracker and, on delivery, relays to the bot's /delivery. This is the
+# "shadow mode" switch — ON = the bot registers tracking numbers (so deliveries flip
+# tickets + DM Kevin), with NOTHING customer-facing (the customer "arrived!" post is
+# the SEPARATE DELIVERY_TRACKING flag). DEFAULT OFF so a deploy is inert until Kevin
+# activates. Shadow mode = REGISTER_TRACKING on + DELIVERY_TRACKING off; customer-live
+# = both on. The portal dedups, so a re-register is a no-op (no re-charge).
+REGISTER_TRACKING = os.environ.get("BOTV2_REGISTER_TRACKING", "").lower() in ("1", "true", "yes")
+REGISTER_TRACKING_ENDPOINT = PORTAL_BASE_URL.rstrip("/") + "/bot/register-tracking"
+
 # ── Google Sheets (buying sheets) ──────────────────────────────────────────────
 GOOGLE_CREDENTIALS_JSON = os.environ.get("GOOGLE_CREDENTIALS_JSON")
 GOOGLE_CREDENTIALS_FILE = os.environ.get(
