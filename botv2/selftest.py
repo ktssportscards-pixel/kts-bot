@@ -371,11 +371,59 @@ def test_analytics():
     check("Stats" in txt and "payout" in txt, "analytics: !stats summary text")
 
 
+# ── delivery tracking: record → mark_delivered → customer-safe note ─────────────
+def test_delivery():
+    section("delivery tracking")
+    from botv2 import config
+    # A quote opens a ticket; dropping a tracking number opens an in_transit delivery.
+    tracking.record_quote(50, {"username": "ship_sam", "comp": 400, "payout": 360,
+                               "cards": 1, "certs": {"a": 400}}, channel_name="ship_sam")
+    check(tracking.record_tracking(50, "1Z888BB20999888777"), "delivery: tracking recorded")
+    d = tracking.delivery_status(50)
+    check(d.get("status") == "in_transit" and d.get("number") == "1Z888BB20999888777"
+          and d.get("carrier") == "UPS", "delivery: in_transit sub-record + carrier inferred")
+    check(tracking.find_channel_by_tracking("1Z888BB20999888777") == 50,
+          "delivery: resolve channel by tracking number")
+
+    # Mark delivered BY TRACKING NUMBER (what the webhook carries), then idempotency.
+    res = tracking.mark_delivered(tracking_num="1Z888BB20999888777")
+    check(res["found"] and res["channel_id"] == 50 and not res["already"]
+          and res["user"] == "ship_sam", "delivery: mark_delivered resolves + flips")
+    ds = tracking.delivery_status(50)
+    check(ds["status"] == "delivered" and ds["delivered_at"], "delivery: status + timestamp set")
+    again = tracking.mark_delivered(channel_id=50)
+    check(again["found"] and again["already"], "delivery: idempotent (already delivered)")
+
+    # Mark delivered BY CHANNEL_ID for a ticket whose number was never recorded.
+    tracking.record_quote(51, {"username": "noeta", "comp": 200, "payout": 180,
+                               "cards": 1, "certs": {"b": 200}}, channel_name="noeta")
+    r2 = tracking.mark_delivered(channel_id=51)
+    check(r2["found"] and not r2["already"], "delivery: mark_delivered by channel_id")
+
+    # Unknown tracking number → graceful miss (no crash).
+    miss = tracking.mark_delivered(tracking_num="1ZDOESNOTEXIST999")
+    check(not miss["found"] and miss["channel_id"] is None, "delivery: unknown tracking → miss")
+
+    # ops dashboard surfaces the delivered flag.
+    drow = next((r for r in tracking.ops_view({}) if r["channel_id"] == 50), None)
+    check(drow and drow["delivered"] is True and drow["delivered_at"],
+          "delivery: ops row shows delivered")
+
+    # CUSTOMER SAFETY: the 'arrived' note names no buyer and no forbidden word.
+    msg = tracking.delivery_customer_message("ship_sam")
+    low = msg.lower()
+    check(msg and not any(w in low for w in config.CUSTOMER_FORBIDDEN_WORDS)
+          and "payout" not in low, "delivery: customer note is scrubbed + buyer-safe")
+    check(tracking.carrier_of("1Z999AA10123456784") == "UPS"
+          and tracking.carrier_of("9400100000000000000000") == "USPS"
+          and tracking.carrier_of("123456789012") == "FedEx", "delivery: carrier_of shapes")
+
+
 def main():
     print("botv2 selftest:")
     for t in (test_certs, test_pricing, test_lots_shipping, test_tracking_digest,
               test_payout_flow, test_vip_commands_client, test_psa_folder_guard,
-              test_alerts_status, test_analytics):
+              test_alerts_status, test_analytics, test_delivery):
         t()
     if _fails:
         print(f"\nFAILED ({len(_fails)}):")

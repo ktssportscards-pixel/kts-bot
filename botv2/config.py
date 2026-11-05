@@ -48,6 +48,20 @@ UNCLAIM_ENDPOINT = PORTAL_BASE_URL.rstrip("/") + "/bot/unclaim"
 ALLOCATION_ENDPOINT = PORTAL_BASE_URL.rstrip("/") + "/bot/allocation"
 NEAR_FULL_PCT = int(os.environ.get("NEAR_FULL_PCT", "85"))
 
+# ── Delivery tracking (auto "your package arrived" update) ─────────────────────
+# A customer drops a tracking number in their ticket (or the app); when the carrier
+# marks it delivered, the bot flips the ticket to delivered and — ONLY if this flag
+# is on — posts a customer-safe "arrived!" note in their own ticket, so they don't
+# check the carrier or DM Kevin "did you get it?". This is a DELIBERATE, NARROW
+# exception to the "bot never messages customers" rule: factual delivery/status
+# updates to that one ticket, scrubbed of any buyer name — nothing else.
+# DEFAULT OFF: with it off, delivery status is still recorded (ops + Kevin's DM see
+# it) but NOTHING is posted to the customer. The carrier integration itself
+# (EasyPost / Shippo / AfterShip account + webhook) lives OUTSIDE the bot: that
+# service calls the bot's authenticated POST /delivery, so this side is
+# provider-agnostic and holds no carrier credentials.
+DELIVERY_TRACKING = os.environ.get("BOTV2_DELIVERY_TRACKING", "").lower() in ("1", "true", "yes")
+
 # ── Google Sheets (buying sheets) ──────────────────────────────────────────────
 GOOGLE_CREDENTIALS_JSON = os.environ.get("GOOGLE_CREDENTIALS_JSON")
 GOOGLE_CREDENTIALS_FILE = os.environ.get(

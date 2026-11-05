@@ -90,7 +90,11 @@ async def _handle_ship(channel) -> None:
 async def _handle_tracking(channel, tnum) -> None:
     """Customer dropped a tracking number — acknowledge, note it, save to the sheet."""
     uname = tickets.sanitize_channel_name(channel.name) or channel.name
-    await channel.send(f"📦 Got it — tracking `{tnum}` noted. Kevin will keep an eye out! 🙌")
+    ack = f"📦 Got it — tracking `{tnum}` noted. Kevin will keep an eye out! 🙌"
+    if config.DELIVERY_TRACKING:                       # auto-arrival updates are on
+        ack = (f"📦 Got it — tracking `{tnum}` noted. I'll let you know right here the "
+               f"moment it arrives — no need to check it yourself. 🙌")
+    await channel.send(ack)
     tracking.record_tracking(channel.id, tnum)
     sheet_url = _channel_sheet.get(str(channel.id))
     saved = ""
@@ -105,6 +109,31 @@ async def _handle_tracking(channel, tnum) -> None:
                               f"the number is noted below; add it to the sheet by hand.")
     await ping_kevin(f"📦 Tracking from **{uname}** (#{channel.name}): `{tnum}`{saved}"
                      + ("" if sheet_url else " — no sheet cached, add by hand"))
+
+
+async def notify_delivered(channel_id, user: str = "") -> bool:
+    """On a package delivery: ALWAYS DM Kevin a heads-up (his own DM — always safe, and
+    it's how he knows to go verify the lot), and — ONLY if config.DELIVERY_TRACKING is
+    on (the narrow, deliberate exception to 'the bot never messages customers') — post a
+    customer-safe 'arrived!' note in that ticket. Best-effort; never raises into the web
+    handler. Returns True iff the customer note actually posted."""
+    try:
+        number = tracking.delivery_status(int(channel_id)).get("number", "")
+    except Exception:
+        number = ""
+    posted = False
+    if config.DELIVERY_TRACKING:                       # customer-facing: gated exception
+        try:
+            channel = bot.get_channel(int(channel_id)) or await bot.fetch_channel(int(channel_id))
+            await channel.send(tracking.delivery_customer_message(user))
+            posted = True
+        except Exception as e:
+            print(f"[bot] notify_delivered: customer post failed in {channel_id}: {e}")
+            await alert_kevin("delivery_post",
+                              f"⚠️ delivery: couldn't post the 'arrived' note to channel "
+                              f"{channel_id}: {e} — let the customer know by hand if needed.")
+    await ping_kevin(tracking.delivery_kevin_message(user, number))   # always (Kevin's own DM)
+    return posted
 
 
 def _seconds_until_friday_9am_et() -> float:
