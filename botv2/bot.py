@@ -17,9 +17,9 @@ import asyncio
 
 import discord
 
-from . import (certs, commands, config, lots, payout_digest, portal_client,
-               pricing, sheets, shipping, state, tickets, tracking, vip,
-               webserver, welcome)
+from . import (alerts, certs, commands, config, lots, payout_digest,
+               portal_client, pricing, sheets, shipping, state, tickets,
+               tracking, vip, webserver, welcome)
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -53,6 +53,18 @@ async def ping_kevin(text: str) -> bool:
         return False
 
 
+async def alert_kevin(key: str, text: str) -> bool:
+    """A failure alert for Kevin: record it for /status, then DM him — RATE-LIMITED,
+    so an error storm (portal down → every quote errors) can't flood his DMs. The same
+    `key` re-DMs at most once per alerts.ALERT_WINDOW_S; the /status record always
+    updates. Use this (not a bare print) for any fault Kevin would want to know about;
+    the print stays for the container logs."""
+    alerts.record_error(key, text)
+    if alerts.should_alert(key):
+        return await ping_kevin(text)
+    return False
+
+
 # ── events ────────────────────────────────────────────────────────────────────
 async def _handle_ship(channel) -> None:
     """Customer said 'ship'/'proceed' — give the routed address(es) or the hold."""
@@ -65,6 +77,9 @@ async def _handle_ship(channel) -> None:
                                     getattr(channel, "created_at", None))
         except Exception as e:
             print(f"[bot] lot rebuild failed (non-fatal): {e}")
+            await alert_kevin("lot_rebuild",
+                              f"⚠️ lot rebuild failed on ship (#{channel.name}): {e} — "
+                              f"shipping may route to the wrong hub; check this ticket.")
     msg, gave, note = shipping.compose_shipping(channel.id)
     await channel.send(msg)
     if gave:
@@ -85,6 +100,9 @@ async def _handle_tracking(channel, tnum) -> None:
             saved = " (saved to sheet)"
         except Exception as e:
             print(f"[bot] tracking sheet-save failed (non-fatal): {e}")
+            await alert_kevin("tracking_save",
+                              f"⚠️ tracking sheet-save failed (#{channel.name}): {e} — "
+                              f"the number is noted below; add it to the sheet by hand.")
     await ping_kevin(f"📦 Tracking from **{uname}** (#{channel.name}): `{tnum}`{saved}"
                      + ("" if sheet_url else " — no sheet cached, add by hand"))
 
@@ -105,6 +123,20 @@ def _seconds_until_friday_9am_et() -> float:
     return (target - now).total_seconds()
 
 
+def _seconds_until_daily_et(hour: int = 8) -> float:
+    """Seconds until the next HH:00 America/New_York (same tz fallback as the digest)."""
+    from datetime import datetime, timedelta, timezone
+    try:
+        from zoneinfo import ZoneInfo
+        now = datetime.now(ZoneInfo("America/New_York"))
+    except Exception:
+        now = datetime.now(timezone(timedelta(hours=-5)))
+    target = now.replace(hour=hour, minute=0, second=0, microsecond=0)
+    if target <= now:
+        target += timedelta(days=1)
+    return (target - now).total_seconds()
+
+
 async def _payout_digest_loop():
     """DM Kevin the unpaid-owed digest every Friday 9 AM ET (payouts run Fridays).
     The whole body is guarded so no single failure (scheduling, build, or send) can
@@ -118,6 +150,25 @@ async def _payout_digest_loop():
             await asyncio.sleep(90)                # clear the 9:00 minute, no re-fire
         except Exception as e:
             print(f"[bot] payout digest failed (non-fatal): {e}")
+            await alert_kevin("digest", f"⚠️ payout-digest loop failed: {e} — "
+                              f"the Friday owed digest may not fire; check the bot.")
+            await asyncio.sleep(3600)              # back off an hour, then re-arm
+
+
+async def _heartbeat_loop():
+    """Once-daily 'bot alive' DM (8 AM ET) with the key counts, so a silent/dead bot is
+    a *visible* problem rather than an unnoticed one — if this DM stops arriving, Kevin
+    knows to look. Guarded exactly like the digest so no single failure kills the task."""
+    while True:
+        try:
+            await asyncio.sleep(_seconds_until_daily_et(8))
+            c = tracking.counts()
+            await ping_kevin(
+                f"✅ botv2 heartbeat — {c['tickets_open']} open ticket(s), "
+                f"{c['owed_open']} unpaid (${c['owed_total']:,.2f} owed). Still running.")
+            await asyncio.sleep(90)                # clear the minute, no re-fire
+        except Exception as e:
+            print(f"[bot] heartbeat failed (non-fatal): {e}")
             await asyncio.sleep(3600)              # back off an hour, then re-arm
 
 
@@ -138,13 +189,17 @@ async def on_ready():
             _web_runner = await webserver.start()
         except Exception as e:
             print(f"[bot] web server start failed (non-fatal): {e}")
-    if not _digest_started:
+            await alert_kevin("webserver", f"🚨 botv2 web server failed to start: {e} — "
+                              f"/health, /status and the owed tracker are down.")
+    if not _digest_started:                        # start the scheduled loops once
         _digest_started = True
         bot.loop.create_task(_payout_digest_loop())
+        bot.loop.create_task(_heartbeat_loop())
     try:
         await tickets.sweep_overflow(bot)
     except Exception as e:
         print(f"[bot] startup sweep failed (non-fatal): {e}")
+        await alert_kevin("sweep", f"⚠️ startup ticket sweep failed: {e}")
 
 
 @bot.event
@@ -153,6 +208,8 @@ async def on_guild_channel_create(channel):
         await tickets.rename_new_ticket(bot, channel)
     except Exception as e:
         print(f"[bot] ticket rename failed (non-fatal): {e}")
+        await alert_kevin("rename",
+                          f"⚠️ ticket rename failed (#{getattr(channel, 'name', '?')}): {e}")
 
 
 @bot.event
@@ -161,6 +218,8 @@ async def on_message(message):
         await _handle_message(message)
     except Exception as e:
         print(f"[bot] on_message error (non-fatal): {e}")
+        await alert_kevin(f"on_message:{type(e).__name__}",
+                          f"⚠️ botv2 on_message error (non-fatal): {e}")
 
 
 # ── core loop ─────────────────────────────────────────────────────────────────
@@ -222,13 +281,14 @@ async def _handle_message(message) -> None:
             rows = await portal_client.price_certs(cert_list, customer=username,
                                                    rate_override=rate_override)
         except portal_client.PortalAuthError as e:
-            await ping_kevin(f"🚨 **botv2 can't authenticate to pricing** — {e}. "
-                             f"Check BOT_API_KEY / the portal.")
+            await alert_kevin("price_auth",
+                              f"🚨 **botv2 can't authenticate to pricing** — {e}. "
+                              f"Check BOT_API_KEY / the portal.")
             await channel.send("⚠️ Pricing is briefly unavailable — hang tight, I'll "
                                "get your quote shortly.")
             return
         except portal_client.PortalError as e:
-            await ping_kevin(f"🚨 **botv2 pricing error** in #{channel.name}: {e}")
+            await alert_kevin("price_error", f"🚨 **botv2 pricing error** in #{channel.name}: {e}")
             await channel.send("⚠️ Pricing is briefly unavailable — please resend in a minute.")
             return
 
@@ -269,7 +329,8 @@ async def _handle_message(message) -> None:
                     msg += f" | ⚠️ {len(errs)} errored"
                 await ping_kevin(msg)
         except portal_client.PortalError as e:
-            await ping_kevin(f"⚠️ auto-claim error #{channel.name}: {e}")
+            await alert_kevin(f"autoclaim:{type(e).__name__}",
+                              f"⚠️ auto-claim error #{channel.name}: {e}")
 
     # Buying sheet for Kevin — deliberately OFF the customer's critical path (the
     # Apps Script is slow). The customer already has their quote; Kevin gets the
@@ -284,8 +345,9 @@ async def _handle_message(message) -> None:
             await ping_kevin(f"⚠️ {len(missing)} cert(s) didn't land on {username}'s sheet: "
                              + ", ".join(certs.cert_label(c) for c in missing))
     except Exception as e:
-        await ping_kevin(f"⚠️ buying sheet failed for #{channel.name} ({e}) — "
-                         f"summary below, add rows by hand if needed.")
+        await alert_kevin(f"sheet_fail:{type(e).__name__}",
+                          f"⚠️ buying sheet failed for #{channel.name} ({e}) — "
+                          f"summary below, add rows by hand if needed.")
     await ping_kevin(pricing.kevin_summary(quote, username, sheet_url,
                                            ticket_link=f"<#{channel.id}>"))
 

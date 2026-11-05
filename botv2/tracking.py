@@ -100,6 +100,25 @@ def record_quote(channel_id, snapshot: dict, channel_name: str = "",
     })
 
 
+def counts() -> dict:
+    """Quick store counts for the heartbeat DM + /status: how many tickets are still
+    open (not yet paid) and how much is owed. A cheap read of the two stores — a ticket
+    counts as open until its owed entry is marked paid (a quoted-but-not-shipped ticket
+    has no owed entry yet, so it is open too)."""
+    owed = state.load("owed", list)
+    paid_ids = {r.get("id") for r in owed if r.get("paid")}
+    tickets = state.load("tickets", list)
+    open_tickets = sum(1 for t in tickets
+                       if f"owed_{t.get('channel_id')}" not in paid_ids)
+    unpaid = [r for r in owed if not r.get("paid")]
+    return {
+        "tickets_total": len(tickets),
+        "tickets_open": open_tickets,
+        "owed_open": len(unpaid),
+        "owed_total": round(sum(float(r.get("payout", 0) or 0) for r in unpaid), 2),
+    }
+
+
 def record_claim(channel_id, locked: int, total: int) -> None:
     """Record the auto-claim outcome on this ticket (allocation slots locked)."""
     _upsert("tickets", {"id": f"tk_{channel_id}",

@@ -54,6 +54,28 @@ async def _ops(req):
     return _cors(web.json_response({"tickets": tracking.ops_view(detail=detail)}))
 
 
+async def _status(req):
+    """Machine-readable health for monitoring: uptime (from the process-start stamp),
+    live store counts (open tickets / unpaid owed), and the last failure the bot saw.
+    AUTHENTICATED with x-bot-key (same gate as /ops) — it exposes internal counts, so
+    it must not be public. Additive: /health stays the public liveness check."""
+    if not config.BOT_API_KEY or req.headers.get("x-bot-key") != config.BOT_API_KEY:
+        return web.json_response({"error": "unauthorized"}, status=401)
+    from . import tracking, alerts
+    try:
+        started = datetime.datetime.fromisoformat(_STARTED)
+        uptime = int((datetime.datetime.now(datetime.timezone.utc) - started).total_seconds())
+    except Exception:
+        uptime = None
+    return _cors(web.json_response({
+        "ok": True,
+        "started": _STARTED,
+        "uptime_seconds": uptime,
+        "counts": tracking.counts(),
+        "last_error": alerts.last_error(),
+    }))
+
+
 async def start():
     """Start the web server on $PORT. Returns the AppRunner (keep a reference)."""
     app = web.Application()
@@ -65,6 +87,7 @@ async def start():
         web.get("/leaderboard", _leaderboard),
         web.get("/links", _links),
         web.get("/ops", _ops),
+        web.get("/status", _status),
     ])
     runner = web.AppRunner(app)
     await runner.setup()
