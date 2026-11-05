@@ -64,10 +64,17 @@ async def handle(bot, message) -> bool:
             await message.author.send(board)
         except Exception as e:
             print(f"[cmd] !bands DM failed: {e}")
-        try:
-            await channel.send("📊 Allocation board sent to your DMs.")
-        except Exception:
-            pass
+            try:
+                await channel.send("⚠️ Couldn't DM you the board — open your DMs to the bot and retry.")
+            except Exception:
+                pass
+            return True
+        # In a guild channel, note it went to DMs (no numbers leak). In a DM the board's already here.
+        if getattr(channel, "guild", None) is not None:
+            try:
+                await channel.send("📊 Allocation board sent to your DMs.")
+            except Exception:
+                pass
         return True
 
     return False   # unknown command → fall through (normal processing ignores it)

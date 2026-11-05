@@ -168,10 +168,11 @@ async def _handle_message(message) -> None:
     if message.author.bot or message.author == bot.user:
         return
     channel = message.channel
-    if not isinstance(channel, discord.TextChannel):
-        return
-    # Commands first — so !adopt works on a channel the gate doesn't yet know.
+    # Commands FIRST — before the channel-type gate — so admin commands (!bands,
+    # !paid, …) also work in Kevin's DMs with the bot, not only in a guild channel.
     if await commands.handle(bot, message):
+        return
+    if not isinstance(channel, discord.TextChannel):
         return
     if not tickets.is_ticket_channel(channel):
         return
