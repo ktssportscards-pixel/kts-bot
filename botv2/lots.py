@@ -96,6 +96,74 @@ def qualifies(cid) -> bool:
     return False
 
 
+def has_lot(cid) -> bool:
+    """True if this channel has any accepted slabs on record (survives a session,
+    not a redeploy — rebuild_from_sheets restores it after a restart)."""
+    e = _lots.get(cid) or {}
+    return bool(e.get("slab_certs")) or bool(e.get("singles"))
+
+
+def rebuild_from_sheets(cid, username, days=4, created_after=None) -> bool:
+    """A redeploy wipes the in-memory lot, and shipping would then fail open to the
+    VA address — wrong for Sports/One Piece. Rebuild from the customer's recent
+    buying sheet(s): every row with comp>0 AND payout>0 (so Kevin's hand-edits —
+    e.g. zeroing what Triumph won't take — count), with its category. Later sheets
+    win per cert. Returns True if anything was rebuilt."""
+    from datetime import datetime, timedelta, timezone
+    from . import certs, sheets
+    try:
+        since_dt = datetime.utcnow() - timedelta(days=days)
+        if created_after is not None:
+            ca = (created_after.astimezone(timezone.utc).replace(tzinfo=None)
+                  if getattr(created_after, "tzinfo", None) else created_after)
+            since_dt = max(since_dt, ca - timedelta(minutes=10))
+        since = since_dt.strftime("%Y-%m-%dT%H:%M:%S")
+        safe = username.replace("'", "\\'")
+        drive = sheets.get_drive_service()
+        files = drive.files().list(
+            q=(f"name contains '{safe} discord' and '{config.PSA_FOLDER_ID}' in parents "
+               f"and trashed=false and createdTime > '{since}'"),
+            orderBy="createdTime asc", pageSize=50,
+            fields="files(id,name,createdTime)").execute().get("files", [])
+        files = [f for f in files if f["name"].split(" discord")[0].strip() == username]
+        if not files:
+            return False
+        gc = sheets.get_gspread_client()
+        vals, cats = {}, {}
+        for f in files:
+            rows = gc.open_by_key(f["id"]).get_worksheet(0).get_all_values(
+                value_render_option="UNFORMATTED_VALUE")
+            for r in rows[1:]:
+                r = list(r) + [""] * 10
+                cert = str(r[1]).strip()
+                if cert.endswith(".0"):
+                    cert = cert[:-2]
+                if not cert.isdigit():
+                    continue
+                is_cgc = str(r[0]).strip().upper() == "CGC" or str(r[4]).upper().startswith("CGC")
+                tok = certs.cgc_cert(cert) if is_cgc else cert
+                try:
+                    cv, pay = float(r[6] or 0), float(r[8] or 0)   # G=comp, I=payout
+                except (TypeError, ValueError):
+                    continue
+                if cv > 0 and pay > 0:
+                    vals[tok] = cv
+                    cats[tok] = (str(r[5]).lower().strip() or ("pokemon" if is_cgc else ""))
+                else:
+                    vals.pop(tok, None)
+                    cats.pop(tok, None)
+        if not vals:
+            return False
+        e = _entry(cid)
+        e["slab_certs"].update(vals)
+        e["slab_sport"].update(cats)
+        e["rebuilt"] = True
+        return True
+    except Exception as ex:
+        print(f"[lots] rebuild_from_sheets failed (non-fatal): {ex}")
+        return False
+
+
 def proceed_or_hold_tail(cid):
     """None if the lot qualifies (caller shows its normal 'proceed' prompt), else a
     customer-facing message listing exactly what's missing (used instead)."""

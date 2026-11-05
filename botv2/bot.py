@@ -53,6 +53,15 @@ async def ping_kevin(text: str) -> bool:
 # ── events ────────────────────────────────────────────────────────────────────
 async def _handle_ship(channel) -> None:
     """Customer said 'ship'/'proceed' — give the routed address(es) or the hold."""
+    # If a redeploy wiped the in-memory lot, rebuild it from the customer's buying
+    # sheets first so sports/OP route correctly (else shipping fails open to VA).
+    if not lots.has_lot(channel.id):
+        uname = tickets.sanitize_channel_name(channel.name) or channel.name
+        try:
+            await asyncio.to_thread(lots.rebuild_from_sheets, channel.id, uname, 4,
+                                    getattr(channel, "created_at", None))
+        except Exception as e:
+            print(f"[bot] lot rebuild failed (non-fatal): {e}")
     msg, gave, note = shipping.compose_shipping(channel.id)
     await channel.send(msg)
     if gave:
