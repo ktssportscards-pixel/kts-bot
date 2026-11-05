@@ -174,6 +174,86 @@ def test_tracking_digest():
           "ops: ship→accepted + claim recorded + unpaid owed")
 
 
+# ── payout flow: payinfo store + packets + !owe + digest flag ───────────────────
+def test_payout_flow():
+    section("payout flow (payinfo + packets)")
+    tracking.state.save("owed", [])       # deterministic stores for this section
+    tracking.state.save("payinfo", {})
+
+    # payinfo store via the command parser (multi-line, @-stripped, lowercased)
+    r = tracking.payinfo_command("!payinfo set @Topguy Zelle: topguy@example.com\nWire: Chase 1234")
+    check("saved" in r.lower() and "topguy" in r, "payinfo set stores + confirms")
+    stored = tracking.get_payinfo("TOPGUY")
+    check(bool(stored) and "Zelle" in stored["details"] and "Wire: Chase 1234" in stored["details"],
+          "payinfo details incl. continuation line, key case-folded")
+    check("Zelle" in tracking.payinfo_command("!payinfo topguy"), "payinfo view returns details")
+    lst = tracking.payinfo_command("!payinfo list")
+    check("topguy" in lst and "Zelle" not in lst, "payinfo list = names only (no details)")
+    check("Usage" in tracking.payinfo_command("!payinfo set"), "payinfo set w/o args → usage")
+
+    # owed entries drive the packets
+    tracking.record_accepted_ship(301, {"username": "topguy", "comp": 300, "payout": 285, "cards": 2, "certs": {"a": 300}})
+    tracking.record_accepted_ship(302, {"username": "nobody", "comp": 100, "payout": 90, "cards": 1, "certs": {"b": 100}})
+    owed = tracking.state.load("owed", list)
+    pk = tracking.build_payment_packet(next(o for o in owed if o["channel_id"] == 301))
+    check("Payment packet" in pk and "$285.00" in pk and "topguy@example.com" in pk,
+          "packet: amount + stored details")
+    check("double-check before sending" in pk, "packet: flags details changed ≤3 days")
+    check("not payment" in pk, "packet: carries bank-review disclaimer")
+    pk2 = tracking.build_payment_packet(next(o for o in owed if o["channel_id"] == 302))
+    check("No payment details on file" in pk2, "packet: flags missing payinfo")
+
+    # !owe — whole queue, filtered, and empty
+    allp = tracking.build_owe_packets()
+    check("2 to pay" in allp and "topguy" in allp and "nobody" in allp, "!owe packets the whole unpaid queue")
+    one = tracking.build_owe_packets("topguy")
+    check("topguy" in one and "nobody" not in one, "!owe <user> filters to that seller")
+    check("Nothing unpaid" in tracking.build_owe_packets("ghost"), "!owe <unknown> → nothing owed")
+
+    # duplicate-amount flag: a 2nd unpaid entry, same seller + amount
+    tracking.record_accepted_ship(303, {"username": "topguy", "comp": 300, "payout": 285, "cards": 2, "certs": {"c": 300}})
+    dup = tracking.build_payment_packet(next(o for o in tracking.state.load("owed", list) if o["channel_id"] == 303))
+    check("DUPLICATE" in dup, "packet: flags a duplicate unpaid amount")
+
+    # digest flags the entry with no payment info + points at !owe
+    dig = payout_digest.build_digest()
+    check("no payment info" in dig and "missing payment info" in dig, "digest: flags missing payinfo")
+    check("!owe" in dig, "digest: points at !owe for packets")
+
+    # command plumbing — confidential handling
+    class _Chan:
+        def __init__(s, guild): s.guild = guild; s.sent = []
+        async def send(s, t): s.sent.append(t)
+    class _Author:
+        def __init__(s, uid): s.id = uid; s.name = "x"; s.bot = False; s.dms = []
+        async def send(s, t): s.dms.append(t)
+    class _Msg:
+        def __init__(s, content, uid=9, guild=None):
+            s.content = content; s.author = _Author(uid); s.channel = _Chan(guild); s.deleted = False
+        async def delete(s): s.deleted = True
+
+    # non-Kevin !payinfo in a channel → swallowed AND the message is scrubbed
+    m = _Msg("!payinfo set bob secret-wire-info", uid=9, guild=object())
+    check(asyncio.run(commands.handle(None, m)) is True and m.deleted and not m.channel.sent,
+          "cmd: !payinfo in a channel is deleted (details scrubbed), nothing posted")
+
+    # Kevin happy-path: !owe DMs the packet, only a safe note hits the channel
+    import botv2.config as _cfg
+    _old = _cfg.KEVIN_USER_ID
+    try:
+        _cfg.KEVIN_USER_ID = 777
+        km = _Msg("!owe topguy", uid=777, guild=object())
+        check(asyncio.run(commands.handle(None, km)) is True, "cmd: Kevin !owe handled")
+        check(bool(km.author.dms) and "topguy" in km.author.dms[0], "cmd: !owe packet → Kevin's DMs")
+        check(km.deleted and all("topguy@example.com" not in s for s in km.channel.sent),
+              "cmd: !owe leaks no details into the channel")
+    finally:
+        _cfg.KEVIN_USER_ID = _old
+
+    tracking.state.save("owed", [])       # don't pollute later sections
+    tracking.state.save("payinfo", {})
+
+
 # ── vip + commands + portal client ────────────────────────────────────────────
 def test_vip_commands_client():
     section("vip + commands + client")
@@ -294,7 +374,8 @@ def test_analytics():
 def main():
     print("botv2 selftest:")
     for t in (test_certs, test_pricing, test_lots_shipping, test_tracking_digest,
-              test_vip_commands_client, test_psa_folder_guard, test_alerts_status, test_analytics):
+              test_payout_flow, test_vip_commands_client, test_psa_folder_guard,
+              test_alerts_status, test_analytics):
         t()
     if _fails:
         print(f"\nFAILED ({len(_fails)}):")

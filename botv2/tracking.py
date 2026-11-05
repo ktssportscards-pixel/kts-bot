@@ -160,3 +160,138 @@ def ops_view(channel_sheet: dict = None, detail: bool = False) -> list:
     rows.sort(key=lambda r: r.get("updated_at") or "", reverse=True)   # newest first
     rows.sort(key=lambda r: r.get("paid") is True)                     # open/unpaid first (stable)
     return rows
+
+
+# ── payment info ("payinfo" store) ───────────────────────────────────────────
+# A seller's wire/ACH details, keyed by lowercase username: {details, updated}.
+# CONFIDENTIAL — this is Kevin-only, DM-only. It must NEVER reach a customer
+# channel or the ops dashboard. The bot only organizes payouts; it never moves
+# money, so these details are prep for a manual Mercury wire, nothing more.
+
+def _payinfo_key(user) -> str:
+    """Normalize a username to the payinfo store key (strip @, lowercase)."""
+    return (user or "").lstrip("@").strip().lower()
+
+
+def get_payinfo(user):
+    """Return the stored {details, updated} for a seller, or None."""
+    return state.load("payinfo", dict).get(_payinfo_key(user))
+
+
+def set_payinfo(user: str, details: str) -> str:
+    """Store/replace a seller's payment details. Returns the key used."""
+    key = _payinfo_key(user)
+    data = state.load("payinfo", dict)
+    data[key] = {"details": (details or "").strip(), "updated": date.today().isoformat()}
+    state.save("payinfo", data)
+    return key
+
+
+def payinfo_command(content: str) -> str:
+    """Parse a `!payinfo …` command and return the reply text for Kevin's DM.
+    Forms (multi-line details ok on `set`):
+      !payinfo set <user> <wire/ACH details…>   store/replace
+      !payinfo <user>                            view
+      !payinfo remove <user>                     delete
+      !payinfo list                              names + last-updated only
+    The caller DMs the return value — details must never post in a channel."""
+    raw_lines = (content or "").strip().split("\n")
+    toks = raw_lines[0].split()[1:]          # drop the '!payinfo' token
+    sub = (toks[0].lower() if toks else "list")
+    data = state.load("payinfo", dict)
+
+    if sub == "set":
+        if len(toks) < 2:
+            return ("Usage: `!payinfo set <username> <their wire/ACH details…>`\n"
+                    "(details can span multiple lines — paste the whole thing)")
+        key = _payinfo_key(toks[1])
+        details = " ".join(toks[2:])
+        if len(raw_lines) > 1:                # fold in any continuation lines
+            extra = "\n".join(l.rstrip() for l in raw_lines[1:] if l.strip())
+            details = (details + "\n" + extra) if details.strip() else extra
+        if not details.strip():
+            return f"No details given — paste {key}'s wire/ACH info after the username."
+        set_payinfo(key, details)
+        return f"💾 Payment details saved for **{key}** (updated {date.today().isoformat()})."
+
+    if sub in ("remove", "delete", "del", "rm"):
+        key = _payinfo_key(toks[1]) if len(toks) > 1 else ""
+        if key in data:
+            del data[key]
+            state.save("payinfo", data)
+            return f"🗑️ Removed payment details for **{key}**."
+        return f"No payment details on file for **{key or '?'}**."
+
+    if sub == "list":
+        if not data:
+            return "No payment details on file yet. `!payinfo set <username> <details>` to add."
+        return ("💾 **Payment details on file** (names only — `!payinfo <name>` to view):\n"
+                + "\n".join(f"• **{n}** — updated {v.get('updated', '?')}"
+                            for n, v in sorted(data.items())))
+
+    # bare "!payinfo <user>" → view the details
+    key = _payinfo_key(sub)
+    v = data.get(key)
+    if not v:
+        return f"No payment details on file for **{key}**. `!payinfo set {key} <details>` to add."
+    return f"💸 **{key}** — payment details (updated {v.get('updated', '?')}):\n{v.get('details', '')}"
+
+
+def build_payment_packet(entry: dict, all_unpaid: list = None) -> str:
+    """A copy-paste payment packet for ONE unpaid owed entry: amount, memo, and the
+    seller's stored wire/ACH details, with safety flags. DM-only — carries details.
+    Flags mirror v1: duplicate amount (double-logged?), details changed in the last
+    3 days, and no payment info on file. The bot never sends money — this is prep."""
+    user = entry.get("user", "")
+    key = _payinfo_key(user)
+    amount = float(entry.get("payout", 0) or 0)
+    info = state.load("payinfo", dict).get(key)
+    flags = []
+
+    if all_unpaid is None:
+        all_unpaid = [o for o in state.load("owed", list) if not o.get("paid")]
+    dup = [o for o in all_unpaid
+           if _payinfo_key(o.get("user")) == key
+           and abs(float(o.get("payout", 0) or 0) - amount) < 0.005]
+    if len(dup) > 1:
+        flags.append(f"⚠️ DUPLICATE? {len(dup)} unpaid entries for {user} at "
+                     f"${amount:,.2f} — check it isn't logged twice before paying.")
+    if info:
+        try:
+            upd = datetime.strptime(info.get("updated", ""), "%Y-%m-%d").date()
+            if 0 <= (date.today() - upd).days <= 3:
+                flags.append(f"⚠️ Their payment details changed {info['updated']} "
+                             f"(≤3 days ago) — double-check before sending.")
+        except ValueError:
+            pass
+
+    lines = [f"💸 **Payment packet — {user}**",
+             f"Amount: **${amount:,.2f}**",
+             f"Memo: KTS payout — {user} — {entry.get('date', date.today().isoformat())} "
+             f"({entry.get('cards', 0)} cards)"]
+    if info:
+        lines.append(f"── details on file (updated {info.get('updated', '?')}) ──")
+        lines.append(info.get("details", ""))
+    else:
+        flags.append(f"⚠️ No payment details on file for {user} — "
+                     f"`!payinfo set {key} <their wire/ACH info>`.")
+    lines += flags
+    lines.append("_Review at the bank before sending — packets are prep, not payment._")
+    return "\n".join(lines)
+
+
+def build_owe_packets(user: str = None) -> str:
+    """The DM for `!owe [user]`: a payment packet per unpaid owed entry (all sellers,
+    or just the one named), oldest first, with a running total header. DM-only."""
+    unpaid = [o for o in state.load("owed", list) if not o.get("paid")]
+    if user:
+        key = _payinfo_key(user)
+        unpaid = [o for o in unpaid if _payinfo_key(o.get("user")) == key]
+    if not unpaid:
+        who = f" for **{_payinfo_key(user)}**" if user else ""
+        return f"✅ Nothing unpaid{who} right now."
+    unpaid.sort(key=lambda o: o.get("date", ""))
+    total = sum(float(o.get("payout", 0) or 0) for o in unpaid)
+    header = f"💸 **{len(unpaid)} to pay — ${total:,.2f} total** (oldest first):"
+    packets = [build_payment_packet(o, all_unpaid=unpaid) for o in unpaid]
+    return header + "\n\n" + "\n\n".join(packets)

@@ -34,6 +34,8 @@ async def handle(bot, message) -> bool:
                      "• `!paid` — mark this ticket's lot paid\n"
                      "• `!bands` — DM you the live allocation board\n"
                      "• `!stats [days]` — DM you volume + payout analytics\n"
+                     "• `!owe [user]` — DM you copy-paste payment packets for the unpaid queue\n"
+                     "• `!payinfo` — store/view a seller's wire info (use in a DM; I scrub it from channels)\n"
                      "• VIP is managed in the KTS app's VIP section (portal is the source of truth)")
         await channel.send(base)
         return True
@@ -97,6 +99,63 @@ async def handle(bot, message) -> bool:
         if getattr(channel, "guild", None) is not None:
             try:
                 await channel.send("📈 Stats sent to your DMs.")
+            except Exception:
+                pass
+        return True
+
+    if cmd == "payinfo":
+        # Wire/ACH details are CONFIDENTIAL — never leave them sitting in a channel.
+        # If typed in a guild channel, delete the command first (it may carry details
+        # on `!payinfo set`), then DM Kevin. Best used in a DM with the bot.
+        in_guild = getattr(channel, "guild", None) is not None
+        if in_guild:
+            try:
+                await message.delete()
+            except Exception as e:
+                print(f"[cmd] !payinfo couldn't delete in-channel message: {e}")
+        if not is_kevin:
+            return True   # swallow admin command (already scrubbed if it was in a channel)
+        reply = tracking.payinfo_command(message.content)
+        try:
+            await message.author.send(reply)
+        except Exception as e:
+            print(f"[cmd] !payinfo DM failed: {e}")
+            if in_guild:
+                try:   # never echo the details into the channel
+                    await channel.send("⚠️ Couldn't DM you — open your DMs to the bot, then retry `!payinfo` (I deleted the message).")
+                except Exception:
+                    pass
+            return True
+        if in_guild:
+            try:
+                await channel.send("🔒 Handled in your DMs — I deleted the message so details don't sit in the channel.")
+            except Exception:
+                pass
+        return True
+
+    if cmd == "owe":
+        if not is_kevin:
+            return True
+        user = parts[1].lstrip("@") if len(parts) > 1 else None
+        packet = tracking.build_owe_packets(user)
+        # Packets carry wire details → DM only, never a channel.
+        try:
+            await message.author.send(packet)
+        except Exception as e:
+            print(f"[cmd] !owe DM failed: {e}")
+            if getattr(channel, "guild", None) is not None:
+                try:
+                    await channel.send("⚠️ Couldn't DM you — open your DMs to the bot and retry.")
+                except Exception:
+                    pass
+            return True
+        if getattr(channel, "guild", None) is not None:
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            try:
+                await channel.send("💸 Payment packet(s) sent to your DMs.")
             except Exception:
                 pass
         return True
