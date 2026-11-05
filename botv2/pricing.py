@@ -1,0 +1,182 @@
+"""
+pricing — turn PricedRows from the portal into a customer quote + a Kevin summary.
+
+In v1 this was ~500 lines of classify + three band tables + blended-rate math. In
+v2 the portal already returns the BUY/PASS decision AND the per-cert offer (the
+same offer.js the app runs), so this module only PARTITIONS and PRESENTS:
+  - no band logic, no rate blending (payout is just the sum of the portal's offers)
+  - no "final acceptance depends on allocation" disclaimer — the portal's decision
+    already reflects live Triumph allocation, so a BUY here is authoritative.
+"""
+from dataclasses import dataclass, field
+
+from .portal_client import PricedRow
+
+CATEGORY_LABELS = {
+    "pokemon": "Pokémon",
+    "onepiece": "One Piece", "one piece": "One Piece", "tcg": "One Piece",
+    "basketball": "Basketball / NBA",
+    "baseball": "Baseball / MLB", "mlb": "Baseball / MLB",
+    "football": "Football / NFL", "nfl": "Football / NFL",
+}
+
+
+def category_label(cat: str) -> str:
+    return CATEGORY_LABELS.get((cat or "").lower(), (cat or "Other").title())
+
+
+def money(v) -> str:
+    return f"${(v or 0):,.2f}"
+
+
+def reject_reason(r: PricedRow) -> str:
+    """Customer-safe reason a row wasn't taken. Never surfaces buyer identity or
+    payout internals — only the portal's own reason text or a generic fallback."""
+    txt = (r.reason or r.rejection_reason or "").strip()
+    if txt:
+        return txt
+    if not r.priced:
+        return "no comp found for this cert"
+    return "doesn't fit our current buying criteria"
+
+
+# ── the quote model ─────────────────────────────────────────────────────────────
+@dataclass
+class CategoryBreakdown:
+    category: str
+    label: str
+    count: int
+    comp_total: float
+    payout_total: float
+
+    @property
+    def rate(self) -> float:
+        return (self.payout_total / self.comp_total) if self.comp_total else 0.0
+
+
+@dataclass
+class Quote:
+    accepted: list = field(default_factory=list)    # PricedRow, decision BUY
+    rejected: list = field(default_factory=list)     # PricedRow, PASS / no comp
+    unpriced: list = field(default_factory=list)     # transport error → resend
+    breakdown: list = field(default_factory=list)    # CategoryBreakdown (accepted)
+    comp_total: float = 0.0
+    payout_total: float = 0.0
+
+    @property
+    def n_accepted(self) -> int:
+        return len(self.accepted)
+
+    @property
+    def effective_rate(self) -> float:
+        return (self.payout_total / self.comp_total) if self.comp_total else 0.0
+
+
+def build_quote(rows: list[PricedRow]) -> Quote:
+    """Partition portal rows into accepted / rejected / unpriced and total the
+    portal's own per-cert offers. No pricing math happens here."""
+    q = Quote()
+    groups: dict[str, dict] = {}
+    for r in rows:
+        if r.error:                      # transport/portal error for this cert
+            q.unpriced.append(r)
+        elif r.is_buy:
+            q.accepted.append(r)
+            comp = r.market_value or 0.0
+            pay = r.offer if r.offer is not None else 0.0
+            q.comp_total += comp
+            q.payout_total += pay
+            g = groups.setdefault(r.category or "other",
+                                  {"count": 0, "comp": 0.0, "pay": 0.0})
+            g["count"] += 1
+            g["comp"] += comp
+            g["pay"] += pay
+        else:                            # PASS, or priced-but-not-buy, or no match
+            q.rejected.append(r)
+    q.breakdown = [
+        CategoryBreakdown(cat, category_label(cat), g["count"], g["comp"], g["pay"])
+        for cat, g in sorted(groups.items())
+    ]
+    return q
+
+
+# ── presentation ────────────────────────────────────────────────────────────────
+def breakdown_lines(q: Quote) -> list[str]:
+    out = []
+    for b in q.breakdown:
+        cards = "card" if b.count == 1 else "cards"
+        out.append(f"• {b.label}: {b.count} {cards}, {money(b.comp_total)} → "
+                   f"{money(b.payout_total)} ({b.rate * 100:.1f}%)")
+    return out
+
+
+def customer_message(q: Quote, head: str = "✅ All comps loaded!") -> str:
+    parts = [head, ""]
+    if q.n_accepted:
+        parts += [
+            f"**Total comp:** {money(q.comp_total)}",
+            f"**Total payout:** {money(q.payout_total)}",
+            f"**Number of cards:** {q.n_accepted}",
+            "",
+            "**Breakdown:**",
+            *breakdown_lines(q),
+        ]
+    if q.rejected:
+        parts.append("")
+        n = len(q.rejected)
+        if q.n_accepted:
+            parts.append(f"⚠️ {n} card{'s' if n != 1 else ''} "
+                         f"don't fit our current buying criteria:")
+        elif n == 1:
+            parts.append("⚠️ Unfortunately, this card doesn't fit our current "
+                         "buying criteria:")
+        else:
+            parts.append(f"⚠️ Unfortunately, none of these {n} cards fit our "
+                         f"current buying criteria:")
+        parts += [f"• `{r.cert}` — {reject_reason(r)}" for r in q.rejected]
+    if q.unpriced:
+        n = len(q.unpriced)
+        parts += ["",
+                  f"🔄 {n} card{'s' if n != 1 else ''} need{'s' if n == 1 else ''} "
+                  f"a re-check — resend {'it' if n == 1 else 'them'}:",
+                  *[f"• `{r.cert}`" for r in q.unpriced]]
+    if q.n_accepted:
+        parts += ["", _proceed_line(q)]
+    return "\n".join(parts)
+
+
+def _proceed_line(q: Quote) -> str:
+    if q.unpriced:
+        return ("Resend the re-check card(s) if you'd like them included — "
+                "otherwise let me know if you want to proceed with the "
+                f"{q.n_accepted} we can take.")
+    if q.rejected:
+        return f"Let me know if you want to proceed with the {q.n_accepted} we can take."
+    return "Let me know if you'd like to proceed!"
+
+
+def kevin_summary(q: Quote, username: str, sheet_url: str = "") -> str:
+    """Kevin's DM: totals + per-cert detail. Shows comp values only — never the
+    portal's payout rate (it never reaches the bot)."""
+    n = q.n_accepted + len(q.rejected) + len(q.unpriced)
+    header = (f"📋 **{username}** — {n} cert{'s' if n != 1 else ''} | "
+              f"Accepted **{q.n_accepted}** | Comp **{money(q.comp_total)}** | "
+              f"Payout **{money(q.payout_total)}**")
+    if q.rejected:
+        header += f" | {len(q.rejected)} rejected"
+    if q.unpriced:
+        header += f" | {len(q.unpriced)} ⚠️ re-check"
+    lines = [header]
+    if sheet_url:
+        lines.append(sheet_url)
+    lines += breakdown_lines(q)
+    lines.append("")
+    for r in q.accepted:
+        lines.append(f"• `{r.cert}` — **{money(r.market_value)}** → "
+                     f"{money(r.offer)} — {(r.card_name or '')[:50]} "
+                     f"({r.grader} {r.grade})")
+    for r in q.rejected:
+        lines.append(f"• `{r.cert}` — ❌ {reject_reason(r)}")
+    for r in q.unpriced:
+        lines.append(f"• `{r.cert}` — ⚠️ re-check ({r.error})")
+    return "\n".join(lines)
