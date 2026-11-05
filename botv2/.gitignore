@@ -1,0 +1,4 @@
+# runtime/test state stores (DATA_DIR default) and bytecode — never commit
+data/
+__pycache__/
+*.pyc

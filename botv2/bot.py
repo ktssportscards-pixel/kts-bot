@@ -17,7 +17,7 @@ import asyncio
 
 import discord
 
-from . import certs, config, portal_client, pricing, sheets, state, tickets, welcome
+from . import certs, config, portal_client, pricing, sheets, state, tickets, vip, welcome
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -110,7 +110,7 @@ async def _handle_message(message) -> None:
             return
 
     username = tickets.sanitize_channel_name(channel.name) or message.author.name
-    rate_override = None  # VIP override lookup lands here when vip.py is built
+    rate_override = vip.override_for(username)   # None = public rates; portal applies VIP
 
     async with channel.typing():
         try:
