@@ -104,6 +104,8 @@ async def _delivery(req):
         body = await req.json()
     except Exception:
         return web.json_response({"error": "bad json"}, status=400)
+    if not isinstance(body, dict):                   # valid JSON but not an object (e.g. [] / null)
+        return web.json_response({"error": "body must be a JSON object"}, status=400)
     from . import tracking
     status = str(body.get("status", "delivered")).lower()
     channel_id = body.get("channel_id")

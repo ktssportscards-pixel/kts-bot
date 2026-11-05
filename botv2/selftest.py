@@ -384,6 +384,8 @@ def test_delivery():
           and d.get("carrier") == "UPS", "delivery: in_transit sub-record + carrier inferred")
     check(tracking.find_channel_by_tracking("1Z888BB20999888777") == 50,
           "delivery: resolve channel by tracking number")
+    check(tracking.find_channel_by_tracking("1z888bb20999888777") == 50,
+          "delivery: tracking match is case-insensitive")
 
     # Mark delivered BY TRACKING NUMBER (what the webhook carries), then idempotency.
     res = tracking.mark_delivered(tracking_num="1Z888BB20999888777")

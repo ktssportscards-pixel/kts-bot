@@ -86,11 +86,13 @@ def record_tracking(channel_id, tracking_num: str) -> bool:
 def find_channel_by_tracking(tracking_num: str):
     """Resolve a tracking number to its ticket's channel_id (scans the tickets store),
     so the delivery webhook can act on a number alone. None if no ticket matches."""
-    num = (tracking_num or "").strip()
+    num = (tracking_num or "").strip().upper()        # tracking #s are case-insensitive
     if not num:
         return None
     for r in state.load("tickets", list):
-        if r.get("tracking") == num or (r.get("delivery") or {}).get("number") == num:
+        stored = str(r.get("tracking") or "").upper()
+        dnum = str((r.get("delivery") or {}).get("number") or "").upper()
+        if num in (stored, dnum):
             return r.get("channel_id")
     return None
 
