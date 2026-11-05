@@ -70,6 +70,8 @@ def test_pricing():
     check("Total payout" in cm and "VIP rates applied" in cm and "out of band" in cm, "customer msg")
     ks = pricing.kevin_summary(q, "topguy")
     check("✨VIP" in ks and "$285.00" in ks, "kevin summary")
+    ksl = pricing.kevin_summary(q, "topguy", ticket_link="<#555>")
+    check("**Ticket:** <#555>" in ksl, "kevin summary includes ticket jump link")
 
     # CGC priced off lastSale: comp uses the portal's `value` (not marketValue), so
     # the shown comp + rate match the app; marketValue stays supplementary.

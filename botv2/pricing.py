@@ -160,9 +160,10 @@ def _proceed_line(q: Quote) -> str:
     return "Let me know if you'd like to proceed!"
 
 
-def kevin_summary(q: Quote, username: str, sheet_url: str = "") -> str:
+def kevin_summary(q: Quote, username: str, sheet_url: str = "", ticket_link: str = "") -> str:
     """Kevin's DM: totals + per-cert detail. Shows comp values only — never the
-    portal's payout rate (it never reaches the bot)."""
+    portal's payout rate (it never reaches the bot). `ticket_link` is a Discord
+    channel mention ("<#id>") so Kevin can jump straight to the ticket from the DM."""
     n = q.n_accepted + len(q.rejected) + len(q.unpriced)
     header = (f"📋 **{username}**{' ✨VIP' if q.vip else ''} — {n} cert{'s' if n != 1 else ''} | "
               f"Accepted **{q.n_accepted}** | Comp **{money(q.comp_total)}** | "
@@ -172,6 +173,8 @@ def kevin_summary(q: Quote, username: str, sheet_url: str = "") -> str:
     if q.unpriced:
         header += f" | {len(q.unpriced)} ⚠️ re-check"
     lines = [header]
+    if ticket_link:
+        lines.append(f"**Ticket:** {ticket_link}")
     if sheet_url:
         lines.append(sheet_url)
     lines += breakdown_lines(q)

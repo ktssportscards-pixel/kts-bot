@@ -260,7 +260,8 @@ async def _handle_message(message) -> None:
     except Exception as e:
         await ping_kevin(f"⚠️ buying sheet failed for #{channel.name} ({e}) — "
                          f"summary below, add rows by hand if needed.")
-    await ping_kevin(pricing.kevin_summary(quote, username, sheet_url))
+    await ping_kevin(pricing.kevin_summary(quote, username, sheet_url,
+                                           ticket_link=f"<#{channel.id}>"))
 
 
 async def _welcome_if_new(message, channel) -> bool:
