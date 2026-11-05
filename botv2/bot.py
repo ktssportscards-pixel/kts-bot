@@ -17,8 +17,8 @@ import asyncio
 
 import discord
 
-from . import (certs, config, lots, portal_client, pricing, sheets, shipping,
-               state, tickets, vip, webserver, welcome)
+from . import (certs, commands, config, lots, portal_client, pricing, sheets,
+               shipping, state, tickets, vip, webserver, welcome)
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -97,6 +97,9 @@ async def _handle_message(message) -> None:
     channel = message.channel
     if not isinstance(channel, discord.TextChannel):
         return
+    # Commands first — so !adopt works on a channel the gate doesn't yet know.
+    if await commands.handle(bot, message):
+        return
     if not tickets.is_ticket_channel(channel):
         return
 
@@ -129,10 +132,12 @@ async def _handle_message(message) -> None:
             return
 
     username = tickets.sanitize_channel_name(channel.name) or message.author.name
-    # VIP is portal-sourced: pass the username and the portal applies that seller's
-    # VIP rates from its own VIP section (single source). rate_override is only a
-    # rare manual bot-side override for a one-off non-portal customer (usually None).
-    rate_override = vip.override_for(username)
+    # VIP is portal-sourced. Kevin requires every KTS-app user to enter their Discord
+    # username, so the portal's VIP section is keyed by it — send the RAW Discord
+    # username (message.author.name) as the match key (the sanitized channel name
+    # strips dots and could miss). `username` stays the sheet/display identity.
+    customer = message.author.name or username
+    rate_override = vip.override_for(username)   # rare manual one-off; usually None
 
     async with channel.typing():
         try:

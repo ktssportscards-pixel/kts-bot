@@ -70,7 +70,8 @@ class PricedRow:
     offer: Optional[float] = None            # dollars (from the portal's offer.js)
     reason: str = ""               # PASS reason / note
     error: str = ""                # transport/portal error for THIS cert, if any
-    vip: bool = False              # portal applied this customer's VIP rate
+    vip: bool = False              # portal applied this customer's VIP rate to THIS card
+    customer_matched: bool = False  # the `customer` matched a portal seller row at all
 
     @property
     def priced(self) -> bool:
@@ -190,7 +191,11 @@ async def _price_chunk(session: aiohttp.ClientSession, chunk: list[str],
             if not isinstance(rows, list):
                 raise PortalUnavailable(f"portal returned no rows array: {str(data)[:200]}")
             # Map in input order; tolerate a short/misaligned array by cert matching.
-            return _align_rows(chunk, rows)
+            matched = bool(data.get("customerMatched"))
+            out = _align_rows(chunk, rows)
+            for r in out:
+                r.customer_matched = matched
+            return out
         except (PortalAuthError, PortalBadRequest):
             raise
         except (aiohttp.ClientError, asyncio.TimeoutError, PortalUnavailable) as e:
