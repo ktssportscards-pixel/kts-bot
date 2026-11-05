@@ -254,10 +254,47 @@ def test_alerts_status():
           "counts values sane (open ≤ total, owed_total numeric)")
 
 
+# ── analytics (volume + payout only; NO margin) ──────────────────────────────────
+def test_analytics():
+    section("analytics")
+    import json
+    import botv2.analytics as analytics
+    # Unique usernames/channels so we don't collide with other tests' seeded tickets.
+    tracking.record_quote(30, {"username": "alice_a", "comp": 300, "payout": 270,
+                               "cards": 2, "certs": {}}, channel_name="alice_a",
+                          card_detail=[{"cert": "a", "value": 200, "offer": 180, "category": "baseball"},
+                                       {"cert": "b", "value": 100, "offer": 90, "category": "basketball"}])
+    tracking.record_quote(31, {"username": "bob_b", "comp": 500, "payout": 455,
+                               "cards": 1, "certs": {}}, channel_name="bob_b",
+                          card_detail=[{"cert": "c", "value": 500, "offer": 455, "category": "baseball"}])
+    tracking.record_accepted_ship(31, {"username": "bob_b", "comp": 500, "payout": 455,
+                                       "cards": 1, "certs": {}})
+    tracking.mark_paid(31)
+
+    s = analytics.summary()
+    check(s["totals"]["tickets"] >= 2 and s["totals"]["cards"] >= 3 and s["totals"]["payout"] > 0,
+          "analytics: totals aggregate")
+    bob = next((c for c in s["top_customers_by_payout"] if c["user"] == "bob_b"), None)
+    check(bob is not None and abs(bob["payout"] - 455) < 0.01 and bob["cards"] == 1 and bob["tickets"] == 1,
+          "analytics: per-customer aggregate (bob_b)")
+    check(s["status"]["paid"] >= 1 and s["status"]["shipped"] >= 1, "analytics: lifecycle status counts")
+    check("baseball" in s["by_category"] and s["by_category"]["baseball"]["cards"] >= 2,
+          "analytics: by-category from card_detail")
+
+    # CONFIDENTIAL BOUNDARY: margin is portal-side; it must never appear in the bot's output.
+    check("margin" not in json.dumps(s).lower(), "analytics: no confidential margin field")
+
+    sw = analytics.summary(days=7)
+    check(sw["window_days"] == 7 and "totals" in sw, "analytics: windowed summary")
+
+    txt = analytics.summary_text()
+    check("Stats" in txt and "payout" in txt, "analytics: !stats summary text")
+
+
 def main():
     print("botv2 selftest:")
     for t in (test_certs, test_pricing, test_lots_shipping, test_tracking_digest,
-              test_vip_commands_client, test_psa_folder_guard, test_alerts_status):
+              test_vip_commands_client, test_psa_folder_guard, test_alerts_status, test_analytics):
         t()
     if _fails:
         print(f"\nFAILED ({len(_fails)}):")

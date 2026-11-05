@@ -33,6 +33,7 @@ async def handle(bot, message) -> bool:
                      "• `!adopt` — treat this channel as a ticket\n"
                      "• `!paid` — mark this ticket's lot paid\n"
                      "• `!bands` — DM you the live allocation board\n"
+                     "• `!stats [days]` — DM you volume + payout analytics\n"
                      "• VIP is managed in the KTS app's VIP section (portal is the source of truth)")
         await channel.send(base)
         return True
@@ -73,6 +74,29 @@ async def handle(bot, message) -> bool:
         if getattr(channel, "guild", None) is not None:
             try:
                 await channel.send("📊 Allocation board sent to your DMs.")
+            except Exception:
+                pass
+        return True
+
+    if cmd == "stats":
+        if not is_kevin:
+            return True
+        from . import analytics
+        days = int(parts[1]) if (len(parts) > 1 and parts[1].isdigit()) else None
+        txt = analytics.summary_text(days)
+        # DM Kevin the figures — payout/customer numbers NEVER go into a (customer) channel.
+        try:
+            await message.author.send(txt)
+        except Exception as e:
+            print(f"[cmd] !stats DM failed: {e}")
+            try:
+                await channel.send("⚠️ Couldn't DM you the stats — open your DMs to the bot and retry.")
+            except Exception:
+                pass
+            return True
+        if getattr(channel, "guild", None) is not None:
+            try:
+                await channel.send("📈 Stats sent to your DMs.")
             except Exception:
                 pass
         return True
