@@ -42,6 +42,12 @@ AUTO_CLAIM = os.environ.get("BOTV2_AUTO_CLAIM", "").lower() in ("1", "true", "ye
 CLAIM_ENDPOINT = PORTAL_BASE_URL.rstrip("/") + "/bot/claim"
 UNCLAIM_ENDPOINT = PORTAL_BASE_URL.rstrip("/") + "/bot/unclaim"
 
+# ── Allocation awareness (read-only "band getting full" heads-up) ──────────────
+# Threshold for a near-full nudge. The portal also flags per-card nearFull on
+# /bot/price rows at this same %; the board read gives the fuller picture.
+ALLOCATION_ENDPOINT = PORTAL_BASE_URL.rstrip("/") + "/bot/allocation"
+NEAR_FULL_PCT = int(os.environ.get("NEAR_FULL_PCT", "85"))
+
 # ── Google Sheets (buying sheets) ──────────────────────────────────────────────
 GOOGLE_CREDENTIALS_JSON = os.environ.get("GOOGLE_CREDENTIALS_JSON")
 GOOGLE_CREDENTIALS_FILE = os.environ.get(

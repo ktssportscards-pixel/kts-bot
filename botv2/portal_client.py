@@ -82,6 +82,8 @@ class PricedRow:
     error: str = ""                # transport/portal error for THIS cert, if any
     vip: bool = False              # portal applied this customer's VIP rate to THIS card
     customer_matched: bool = False  # the `customer` matched a portal seller row at all
+    near_full: bool = False        # allocation: this card's band is ≥ the near-full % (soft urgency)
+    pct_full: Optional[float] = None  # allocation: this card's band %-full (None if spendHidden)
 
     @property
     def comp_value(self) -> Optional[float]:
@@ -140,6 +142,8 @@ class PricedRow:
             reason=str(row.get("reason") or ""),
             error=str(row.get("error") or ""),
             vip=bool(row.get("vip", False)),
+            near_full=bool(row.get("nearFull", False)),
+            pct_full=num(row.get("pctFull")),
         )
 
 
@@ -405,3 +409,50 @@ async def _claim_chunk(session, endpoint, chunk, idempotency_key):
 def _mock_claim(cert: str) -> "ClaimResult":
     # Offline/selftest: mirror the kill-switch-off default (nothing claims).
     return ClaimResult(cert_id=_digits(cert), skipped="[mock] auto-claim off")
+
+
+# ── allocation board (read-only "band getting full" data) ───────────────────────
+async def fetch_allocation(session: Optional[aiohttp.ClientSession] = None) -> dict:
+    """Read the team allocation board via GET /bot/allocation (read-only, x-bot-key).
+    Returns the raw board {period, spendHidden, categories:[{category, categoryLabel,
+    leftCents, pctFull?, ranges:[{minCents,maxCents,leftCents,pctFull?}]}], reliability}.
+    Values are draftCents-correct per sub-range (not the overestimating band total) but
+    are still Triumph's own figures — use only as a conservative near-full signal."""
+    if config.PRICE_MOCK:
+        return _mock_allocation()
+    headers = {"x-bot-key": config.BOT_API_KEY, "accept": "application/json",
+               "accept-encoding": "gzip, deflate"}
+    own = session is None
+    if own:
+        session = aiohttp.ClientSession()
+    try:
+        async with session.get(config.ALLOCATION_ENDPOINT, headers=headers,
+                               timeout=aiohttp.ClientTimeout(total=30)) as resp:
+            if resp.status == 401:
+                raise PortalAuthError("portal rejected x-bot-key on allocation (401)")
+            if resp.status != 200:
+                raise PortalUnavailable(f"allocation {resp.status}")
+            try:
+                data = await resp.json(content_type=None)
+            except (aiohttp.ClientError, ValueError) as e:
+                raise PortalUnavailable(f"allocation non-JSON body ({e})")
+        return data if isinstance(data, dict) else {}
+    finally:
+        if own:
+            await session.close()
+
+
+def _mock_allocation() -> dict:
+    return {
+        "period": {"name": "[mock] weekend"},
+        "spendHidden": False,
+        "categories": [
+            {"category": "onepiece", "categoryLabel": "One Piece", "leftCents": 45000,
+             "pctFull": 66.0, "ranges": [
+                 {"minCents": 10000, "maxCents": 100000, "leftCents": 45000, "pctFull": 66.0}]},
+            {"category": "basketball", "categoryLabel": "Basketball / NBA", "leftCents": 900000,
+             "pctFull": 20.0, "ranges": [
+                 {"minCents": 0, "maxCents": 100000, "leftCents": 900000, "pctFull": 20.0}]},
+        ],
+        "reliability": "approximate — Triumph's figures can be off; treat as a near-full signal, not exact.",
+    }

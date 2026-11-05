@@ -32,6 +32,7 @@ async def handle(bot, message) -> bool:
             base += ("\n\n**Admin (you):**\n"
                      "• `!adopt` — treat this channel as a ticket\n"
                      "• `!paid` — mark this ticket's lot paid\n"
+                     "• `!bands` — DM you the live allocation board\n"
                      "• VIP is managed in the KTS app's VIP section (portal is the source of truth)")
         await channel.send(base)
         return True
@@ -48,6 +49,25 @@ async def handle(bot, message) -> bool:
             return True
         ok = tracking.mark_paid(channel.id)
         await channel.send("✅ Marked paid." if ok else "⚠️ No owed entry for this channel.")
+        return True
+
+    if cmd == "bands":
+        if not is_kevin:
+            return True
+        from . import pricing, portal_client
+        try:
+            board = pricing.allocation_board(await portal_client.fetch_allocation())
+        except portal_client.PortalError as e:
+            board = f"⚠️ Couldn't load the allocation board: {e}"
+        # DM Kevin the figures — NEVER post the real numbers into a (customer) channel.
+        try:
+            await message.author.send(board)
+        except Exception as e:
+            print(f"[cmd] !bands DM failed: {e}")
+        try:
+            await channel.send("📊 Allocation board sent to your DMs.")
+        except Exception:
+            pass
         return True
 
     return False   # unknown command → fall through (normal processing ignores it)

@@ -98,6 +98,16 @@ def test_pricing():
           "customer msg scrubs the 'allocation' reason")
     check("Allocation Exceeded" in pricing.kevin_summary(qa, "someone"),
           "kevin DM keeps the real allocation reason")
+    # near-full allocation nudge: soft customer line (no backend word) + Kevin per-card tag
+    nf = PricedRow(cert="n1", cert_id="n1", category="onepiece", decision="BUY",
+                   offer=90, market_value=100, value=100, near_full=True, pct_full=88.0)
+    qn = pricing.build_quote([nf])
+    cmn = pricing.customer_message(qn)
+    check("filling up" in cmn.lower() and "allocation" not in cmn.lower(),
+          "customer near-full nudge (soft, no backend word)")
+    check("88% full" in pricing.kevin_summary(qn, "x"), "kevin per-card near-full tag")
+    brd = pricing.allocation_board(asyncio.run(portal_client.fetch_allocation()))
+    check("Allocation board" in brd and "One Piece" in brd, "allocation board renders")
 
 
 # ── lots + shipping ───────────────────────────────────────────────────────────

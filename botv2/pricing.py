@@ -141,6 +141,9 @@ def customer_message(q: Quote, head: str = "✅ All comps loaded!",
         ]
         if q.vip:
             parts += ["", "✨ *VIP rates applied — thanks for being a top supporter!*"]
+        if any(r.near_full for r in q.accepted):
+            parts += ["", "⏳ *Heads up — a few of these are in ranges filling up fast; "
+                          "get them submitted soon to lock them in!*"]
     if q.rejected:
         parts.append("")
         n = len(q.rejected)
@@ -196,11 +199,46 @@ def kevin_summary(q: Quote, username: str, sheet_url: str = "", ticket_link: str
     lines.append("")
     for r in q.accepted:
         basis = " _(last sold)_" if r.value_basis == "lastSold" else ""
+        full = (f" ⚡{r.pct_full:.0f}% full" if (r.near_full and r.pct_full is not None)
+                else (" ⚡near full" if r.near_full else ""))
         lines.append(f"• `{r.cert}` — **{money(r.comp_value)}**{basis} → "
                      f"{money(r.offer)} — {(r.card_name or '')[:50]} "
-                     f"({r.grader} {r.grade})")
+                     f"({r.grader} {r.grade}){full}")
     for r in q.rejected:
         lines.append(f"• `{r.cert}` — ❌ {kevin_reason(r)}")
     for r in q.unpriced:
         lines.append(f"• `{r.cert}` — ⚠️ re-check ({r.error})")
     return "\n".join(lines)
+
+
+def allocation_board(data: dict) -> str:
+    """Kevin-facing allocation board (he may see the real figures). Sorted by the
+    fullest sub-range; flags ranges at/over the near-full threshold. Category-level
+    %-full is often absent, so per-range %-full drives the ⚠️ marks."""
+    cats = data.get("categories") or []
+    if not cats:
+        return "📊 No allocation data available right now."
+    hidden = data.get("spendHidden")
+    period = (data.get("period") or {}).get("name") or ""
+    out = [f"📊 **Allocation board**{(' · ' + period) if period else ''}"
+           + (" _(spend hidden — room left only)_" if hidden else "")]
+
+    def mark(p):
+        if p is None:
+            return ""
+        return f" — {p:.0f}% full" + (" ⚠️" if p >= config.NEAR_FULL_PCT else "")
+
+    def peak(c):
+        return max([(r.get("pctFull") or 0) for r in (c.get("ranges") or [])] or [0])
+
+    for c in sorted(cats, key=peak, reverse=True):
+        label = c.get("categoryLabel") or c.get("category") or "?"
+        out.append(f"**{label}** — {money((c.get('leftCents') or 0) / 100)} left{mark(c.get('pctFull'))}")
+        for r in c.get("ranges") or []:
+            lo = money((r.get("minCents") or 0) / 100)
+            hi = money((r.get("maxCents") or 0) / 100)
+            out.append(f"  {lo}–{hi}: {money((r.get('leftCents') or 0) / 100)} left{mark(r.get('pctFull'))}")
+    note = data.get("reliability")
+    if note:
+        out.append(f"_{note}_")
+    return "\n".join(out)
