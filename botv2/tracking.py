@@ -70,10 +70,14 @@ def mark_paid(channel_id) -> bool:
     return hit
 
 
-def record_quote(channel_id, snapshot: dict, channel_name: str = "") -> None:
+def record_quote(channel_id, snapshot: dict, channel_name: str = "",
+                 card_detail: list = None) -> None:
     """Record/refresh a ticket at QUOTE time (status 'quoted') so OPEN tickets show on
     the ops dashboard before they ship. Upserts the same id ship uses, so a later ship
-    just flips it to 'accepted'; never downgrades an already-accepted ticket."""
+    just flips it to 'accepted'; never downgrades an already-accepted ticket.
+    `card_detail` = per-cert [{cert,value,offer,offer_pct,category,grader,grade,name}]
+    (the quote value + what was paid, per card) — feeds the dashboard drill-down AND
+    the Triumph-value reconciliation (portal diffs each against the approved value)."""
     if not snapshot:
         return
     cur = next((r for r in state.load("tickets", list)
@@ -86,6 +90,7 @@ def record_quote(channel_id, snapshot: dict, channel_name: str = "") -> None:
         "user": snapshot.get("username", ""),
         "date": (cur or {}).get("date") or date.today().isoformat(),
         "certs": snapshot.get("certs", {}),
+        "card_detail": card_detail if card_detail is not None else (cur or {}).get("card_detail", []),
         "comp": round(float(snapshot.get("comp", 0) or 0), 2),
         "payout": round(float(snapshot.get("payout", 0) or 0), 2),
         "cards": int(snapshot.get("cards", 0) or 0),
@@ -102,17 +107,19 @@ def record_claim(channel_id, locked: int, total: int) -> None:
                                     "at": datetime.now().isoformat(timespec="seconds")}})
 
 
-def ops_view(channel_sheet: dict = None) -> list:
+def ops_view(channel_sheet: dict = None, detail: bool = False) -> list:
     """Consolidated per-ticket rows for the ops dashboard: merges the tickets store
     (quoted→accepted lifecycle + claim) with the owed store (paid status) and the
-    channel→sheet map. One row per ticket; open/unpaid first, newest first."""
+    channel→sheet map. One row per ticket; open/unpaid first, newest first.
+    detail=True adds `card_detail` (the per-cert quote value + offer) for the dashboard
+    drill-down + the Triumph-value reconciliation; default off keeps the summary light."""
     channel_sheet = channel_sheet if channel_sheet is not None else state.load("channel_sheet", dict)
     owed = {r.get("id"): r for r in state.load("owed", list)}
     rows = []
     for t in state.load("tickets", list):
         cid = t.get("channel_id")
         o = owed.get(f"owed_{cid}", {})
-        rows.append({
+        row = {
             "channel_id": cid,
             "name": t.get("channel_name") or t.get("user") or "",
             "user": t.get("user", ""),
@@ -127,7 +134,10 @@ def ops_view(channel_sheet: dict = None) -> list:
             "paid_date": o.get("paid_date"),
             "quoted_at": t.get("quoted_at"),
             "updated_at": t.get("updated_at") or t.get("quoted_at"),
-        })
+        }
+        if detail:
+            row["card_detail"] = t.get("card_detail", [])
+        rows.append(row)
     rows.sort(key=lambda r: r.get("updated_at") or "", reverse=True)   # newest first
     rows.sort(key=lambda r: r.get("paid") is True)                     # open/unpaid first (stable)
     return rows

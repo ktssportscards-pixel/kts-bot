@@ -50,7 +50,8 @@ async def _ops(req):
     if not config.BOT_API_KEY or req.headers.get("x-bot-key") != config.BOT_API_KEY:
         return web.json_response({"error": "unauthorized"}, status=401)
     from . import tracking
-    return _cors(web.json_response({"tickets": tracking.ops_view()}))
+    detail = req.query.get("cards", "").lower() in ("1", "true", "yes")   # ?cards=1 → per-cert
+    return _cors(web.json_response({"tickets": tracking.ops_view(detail=detail)}))
 
 
 async def start():

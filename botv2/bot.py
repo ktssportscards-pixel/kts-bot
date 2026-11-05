@@ -243,7 +243,12 @@ async def _handle_message(message) -> None:
         "cards": quote.n_accepted,
         "certs": {r.cert: r.market_value for r in quote.accepted if r.market_value is not None},
     }
-    tracking.record_quote(channel.id, _last_quote[channel.id], channel_name=channel.name)
+    tracking.record_quote(
+        channel.id, _last_quote[channel.id], channel_name=channel.name,
+        card_detail=[{"cert": r.cert, "value": r.comp_value, "offer": r.offer,
+                      "offer_pct": r.offer_pct, "category": r.category,
+                      "grader": r.grader, "grade": r.grade, "name": (r.card_name or "")[:60]}
+                     for r in quote.accepted])
     proceed = lots.proceed_or_hold_tail(channel.id)
     await channel.send(pricing.customer_message(quote, proceed_override=proceed))  # instant
 

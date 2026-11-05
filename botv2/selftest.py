@@ -157,10 +157,14 @@ def test_tracking_digest():
 
     # ops dashboard view: quote → ship → claim → paid lifecycle
     tracking.record_quote(20, {"username": "dashguy", "comp": 500, "payout": 455,
-                               "cards": 9, "certs": {"a": 500}}, channel_name="ticket-99")
+                               "cards": 9, "certs": {"a": 500}}, channel_name="ticket-99",
+                          card_detail=[{"cert": "a", "value": 500, "offer": 455, "category": "baseball"}])
     row = next((r for r in tracking.ops_view({}) if r["channel_id"] == 20), None)
-    check(row and row["status"] == "quoted" and row["payout"] == 455 and not row["shipped"],
-          "ops: quoted ticket shows (open, unshipped)")
+    check(row and row["status"] == "quoted" and row["payout"] == 455 and not row["shipped"]
+          and "card_detail" not in row, "ops: quoted ticket shows (summary omits per-cert)")
+    drow = next((r for r in tracking.ops_view({}, detail=True) if r["channel_id"] == 20), None)
+    check(drow and drow.get("card_detail") and drow["card_detail"][0]["offer"] == 455,
+          "ops: detail mode includes per-cert card_detail (value+offer for reconcile)")
     tracking.record_accepted_ship(20, {"username": "dashguy", "comp": 500, "payout": 455,
                                        "cards": 9, "certs": {"a": 500}})
     tracking.record_claim(20, 8, 9)
