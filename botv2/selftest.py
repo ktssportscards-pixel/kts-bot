@@ -71,6 +71,23 @@ def test_pricing():
     ks = pricing.kevin_summary(q, "topguy")
     check("✨VIP" in ks and "$285.00" in ks, "kevin summary")
 
+    # CGC priced off lastSale: comp uses the portal's `value` (not marketValue), so
+    # the shown comp + rate match the app; marketValue stays supplementary.
+    cgc = PricedRow(cert="cgc:9", cert_id="9", grader="CGC", grade="9.5",
+                    category="pokemon", market_value=100, last_sale=80,
+                    value=80, value_basis="lastSold", offer_pct=90,
+                    decision="BUY", offer=72)
+    check(cgc.comp_value == 80 and cgc.priced, "comp_value prefers portal value")
+    qc = pricing.build_quote([cgc])
+    check(abs(qc.comp_total - 80) < 0.01, "quote comp_total uses value, not marketValue")
+    kc = pricing.kevin_summary(qc, "cgcguy")
+    check("$80.00" in kc and "last sold" in kc, "kevin summary shows value + basis")
+    # a CGC with only a lastSale-based value and no marketValue is still priced
+    # (used to be dropped as 'not found' when priced keyed off marketValue).
+    novm = PricedRow(cert="cgc:8", cert_id="8", value=60, value_basis="lastSold",
+                     decision="BUY", offer=54)
+    check(novm.priced and novm.comp_value == 60, "value-only CGC not dropped")
+
 
 # ── lots + shipping ───────────────────────────────────────────────────────────
 def test_lots_shipping():

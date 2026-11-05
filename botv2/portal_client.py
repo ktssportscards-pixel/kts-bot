@@ -12,9 +12,14 @@ Contract (agreed with the portal side):
   headers: x-bot-key: <BOT_API_KEY>, content-type: application/json
   body:    {"certs": ["123", "cgc:456", ...]}   (or {"cert": "123"})
   cap:     200 certs / request (over -> HTTP 400)
-  resp:    {"rows": [ <row>, ... ]}  -- one row per input cert, IN INPUT ORDER
-  row:     {certId, grader, grade, cardTitle, imageUrl, category, marketValue,
-            lastSale, status, rejectionReason, clConfidence, decision, offer, reason}
+  resp:    {"rows": [ <row>, ... ], "customerMatched": bool}  -- one row per input
+           cert, IN INPUT ORDER
+  row:     {certId, grader, grade, cardTitle, imageUrl, category, categoryLabel,
+            marketValue, lastSale, value, valueBasis, clConfidence, status,
+            rejectionReason, decision, offer, offerPct, reason, band, vip, error}
+           `value` is the base the offer was priced against (lastSale for a CGC with
+           a sale, else marketValue); `offerPct` = round(offer/value*100). The app
+           shows `value` + `valueBasis`, so the bot's comp/rate use `value` too.
   Kevin's payout rate (payoutCents / memberMultiplier) is dropped at the source.
   Idempotent; safe to retry on 5xx. Per-row `status` lets us retry only misses.
 """
@@ -61,8 +66,13 @@ class PricedRow:
     card_name: str = ""
     image_url: str = ""
     category: str = ""             # raw portal category, e.g. "pokemon", "basketball"
-    market_value: Optional[float] = None   # dollars (CardLadder comp)
-    last_sale: Optional[float] = None       # dollars (CGC valued off this)
+    market_value: Optional[float] = None   # dollars (CardLadder market value)
+    last_sale: Optional[float] = None       # dollars (last sold; CGC valued off this)
+    value: Optional[float] = None           # dollars — the base the offer was priced
+                                            # against (lastSale for a CGC w/ a sale,
+                                            # else marketValue). What the app shows.
+    value_basis: str = ""          # "lastSold" | "market" — which basis `value` used
+    offer_pct: Optional[float] = None       # portal offer %, 0-100 (round(offer/value*100))
     status: str = ""               # portal status: accepted|rejected|priced|no match|error|...
     rejection_reason: str = ""
     confidence: Optional[float] = None       # CardLadder match confidence (clConfidence)
@@ -74,9 +84,18 @@ class PricedRow:
     customer_matched: bool = False  # the `customer` matched a portal seller row at all
 
     @property
+    def comp_value(self) -> Optional[float]:
+        """The figure the offer is priced against and the app displays: the portal's
+        `value` (lastSale basis for a CGC with a sale, market otherwise), falling back
+        to marketValue when the portal didn't send `value` (older portal / mock). The
+        sheet's comp column and the shown rate are both built from this, so CGC cards
+        valued off a last sale read the same way they do in the app."""
+        return self.value if self.value is not None else self.market_value
+
+    @property
     def priced(self) -> bool:
         """True when the portal returned a usable comp value for this cert."""
-        return self.market_value is not None and not self.error
+        return self.comp_value is not None and not self.error
 
     @property
     def is_buy(self) -> bool:
@@ -110,6 +129,9 @@ class PricedRow:
             category=str(row.get("category") or "").lower(),
             market_value=num(row.get("marketValue")),
             last_sale=num(row.get("lastSale")),
+            value=num(row.get("value")),
+            value_basis=str(row.get("valueBasis") or ""),
+            offer_pct=num(row.get("offerPct")),
             status=str(row.get("status") or ""),
             rejection_reason=str(row.get("rejectionReason") or ""),
             confidence=num(row.get("clConfidence")),
@@ -186,7 +208,19 @@ async def _price_chunk(session: aiohttp.ClientSession, chunk: list[str],
                     raise PortalBadRequest(f"portal 400: {body}")
                 if resp.status >= 500:
                     raise PortalUnavailable(f"portal {resp.status}")
-                data = await resp.json(content_type=None)
+                if resp.status != 200:
+                    # 403/404/405/429/… — endpoint not live yet, rate-limited, or an
+                    # edge/CDN interstitial. Transient-shaped: retry, then the caller
+                    # gets the graceful "briefly unavailable" path (never a silent drop).
+                    body = (await resp.text())[:200]
+                    raise PortalUnavailable(f"portal {resp.status}: {body}")
+                try:
+                    data = await resp.json(content_type=None)
+                except (aiohttp.ClientError, ValueError) as e:
+                    # 200 with a non-JSON body (HTML page, truncated proxy response).
+                    # json.JSONDecodeError is a ValueError. Funnel into the retry/
+                    # unavailable path instead of leaking an unhandled parse error.
+                    raise PortalUnavailable(f"portal returned a non-JSON body ({e})")
             rows = data.get("rows") if isinstance(data, dict) else None
             if not isinstance(rows, list):
                 raise PortalUnavailable(f"portal returned no rows array: {str(data)[:200]}")
@@ -231,18 +265,22 @@ _MOCK_CATS = ["basketball", "baseball", "football", "one piece", "pokemon"]
 def _mock_row(cert: str) -> PricedRow:
     h = int(hashlib.sha1(_digits(cert).encode() or b"0").hexdigest(), 16)
     cat = _MOCK_CATS[h % len(_MOCK_CATS)]
-    value = round(((h >> 8) % 120000) / 100.0 + 1, 2)        # ~$1..$1200
+    market = round(((h >> 8) % 120000) / 100.0 + 1, 2)       # ~$1..$1200
     is_cgc = cert.lower().startswith("cgc:") or len(_digits(cert)) >= 10
-    buy = (value <= 1000) and (h % 7 != 0)
+    last_sale = round(market * 0.95, 2) if is_cgc else None
+    basis = last_sale if (is_cgc and last_sale) else market  # mirror offer.js `value`
+    buy = (basis <= 1000) and (h % 7 != 0)
+    offer = round(basis * 0.9, 2) if buy else None
     return PricedRow(
         cert=cert, cert_id=_digits(cert),
         grader="CGC" if is_cgc else "PSA", grade=str(7 + (h % 4)),
         card_name=f"[MOCK] {cat.title()} Card {_digits(cert)[-4:]}",
-        category=cat, market_value=value,
-        last_sale=round(value * 0.95, 2) if is_cgc else None,
+        category=cat, market_value=market, last_sale=last_sale,
+        value=basis, value_basis="lastSold" if (is_cgc and last_sale) else "market",
+        offer_pct=round(offer / basis * 100) if (buy and basis) else None,
         status="priced" if buy else "rejected",
         confidence=1 + (h % 5),
         decision="BUY" if buy else "PASS",
-        offer=round(value * 0.9, 2) if buy else None,
+        offer=offer,
         reason="" if buy else "[mock] out of band",
     )

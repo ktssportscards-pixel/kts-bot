@@ -90,9 +90,14 @@ async def _handle_tracking(channel, tnum) -> None:
 
 
 def _seconds_until_friday_9am_et() -> float:
-    from zoneinfo import ZoneInfo
-    from datetime import datetime, timedelta
-    now = datetime.now(ZoneInfo("America/New_York"))
+    from datetime import datetime, timedelta, timezone
+    try:
+        from zoneinfo import ZoneInfo
+        now = datetime.now(ZoneInfo("America/New_York"))
+    except Exception:
+        # no tz database on the image (tzdata should prevent this) — fall back to a
+        # fixed -5h offset so the digest still fires ~Friday morning rather than dying.
+        now = datetime.now(timezone(timedelta(hours=-5)))
     target = now.replace(hour=9, minute=0, second=0, microsecond=0) + timedelta(
         days=(4 - now.weekday()) % 7)             # Friday = weekday 4
     if target <= now:
@@ -101,16 +106,19 @@ def _seconds_until_friday_9am_et() -> float:
 
 
 async def _payout_digest_loop():
-    """DM Kevin the unpaid-owed digest every Friday 9 AM ET (payouts run Fridays)."""
+    """DM Kevin the unpaid-owed digest every Friday 9 AM ET (payouts run Fridays).
+    The whole body is guarded so no single failure (scheduling, build, or send) can
+    permanently kill the task — it logs, backs off, and re-arms."""
     while True:
-        await asyncio.sleep(_seconds_until_friday_9am_et())
         try:
+            await asyncio.sleep(_seconds_until_friday_9am_et())
             digest = payout_digest.build_digest()
             if digest:
                 await ping_kevin(digest)
+            await asyncio.sleep(90)                # clear the 9:00 minute, no re-fire
         except Exception as e:
             print(f"[bot] payout digest failed (non-fatal): {e}")
-        await asyncio.sleep(90)                    # clear the 9:00 minute, no re-fire
+            await asyncio.sleep(3600)              # back off an hour, then re-arm
 
 
 _web_runner = None

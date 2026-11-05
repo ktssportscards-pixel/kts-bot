@@ -83,7 +83,7 @@ def build_quote(rows: list[PricedRow]) -> Quote:
             q.unpriced.append(r)
         elif r.is_buy:
             q.accepted.append(r)
-            comp = r.market_value or 0.0
+            comp = r.comp_value or 0.0       # portal's `value` (the offer basis)
             pay = r.offer if r.offer is not None else 0.0
             q.comp_total += comp
             q.payout_total += pay
@@ -177,7 +177,8 @@ def kevin_summary(q: Quote, username: str, sheet_url: str = "") -> str:
     lines += breakdown_lines(q)
     lines.append("")
     for r in q.accepted:
-        lines.append(f"• `{r.cert}` — **{money(r.market_value)}** → "
+        basis = " _(last sold)_" if r.value_basis == "lastSold" else ""
+        lines.append(f"• `{r.cert}` — **{money(r.comp_value)}**{basis} → "
                      f"{money(r.offer)} — {(r.card_name or '')[:50]} "
                      f"({r.grader} {r.grade})")
     for r in q.rejected:

@@ -2,3 +2,9 @@
 data/
 __pycache__/
 *.pyc
+
+# real env files hold secrets (token, BOT_API_KEY, google creds) — never commit;
+# the committed template is .env.example
+.env
+*.env
+!.env.example

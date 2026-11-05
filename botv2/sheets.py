@@ -125,7 +125,9 @@ def save_tracking(sheet_url: str, tracking: str) -> None:
 def fill_buying_sheet(sheet_id: str, rows, sheet_name: str = None) -> list:
     """Write portal rows into the buying sheet the Apps Script just made. Columns:
       A = PSA/CGC   C = CardLadder link   D = name   E = grade   F = category
-      G = comp value   H = offer RATE (number, portal-sourced; template I=G*H → payout)
+      G = value the offer was priced against (lastSale basis for CGC, else market —
+          matches the app); H = offer rate = offer/value (number; template I=G*H →
+          payout, which equals the portal's offer exactly).
     Returns cert tokens that had no row in column B (caller alerts Kevin)."""
     if not rows:
         return []
@@ -178,9 +180,10 @@ def fill_buying_sheet(sheet_id: str, rows, sheet_name: str = None) -> list:
         if r.error:
             updates.append({"range": f"G{row}", "values": [[config.SHEET_NOT_LOADED_MARK]]})
             updates.append({"range": f"H{row}", "values": [[0]]})
-        elif r.market_value is not None:
-            updates.append({"range": f"G{row}", "values": [[r.market_value]]})
-            rate = round(r.offer / r.market_value, 6) if (r.is_buy and r.offer and r.market_value) else 0
+        elif r.comp_value is not None:
+            comp = r.comp_value            # portal's `value` (lastSale basis for CGC)
+            updates.append({"range": f"G{row}", "values": [[comp]]})
+            rate = round(r.offer / comp, 6) if (r.is_buy and r.offer and comp) else 0
             updates.append({"range": f"H{row}", "values": [[rate]]})
         else:
             updates.append({"range": f"G{row}", "values": [["not found"]]})

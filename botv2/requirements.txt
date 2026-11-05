@@ -1,0 +1,18 @@
+# botv2 runtime dependencies — KTS Collectr Discord bot (Triumph-via-portal rebuild).
+#
+# v2 prices through the portal's POST /bot/price (no CardLadder, no vision model),
+# so unlike v1 (../requirements.txt) it has NO `anthropic` and NO `pandas`.
+# `aiohttp` is a direct dependency here (portal HTTP client + the /health web
+# server); it is also pulled in transitively by discord.py.
+#
+# Floors chosen to match v1's proven, unpinned resolution (latest 2.x discord.py,
+# etc.) while blocking known-breaking majors (discord.py 3, aiohttp 4).
+discord.py>=2.3,<3
+aiohttp>=3.8,<4
+gspread>=5.12,<7
+google-auth>=2.23,<3
+google-api-python-client>=2.100,<3
+# IANA tz database as a package, so zoneinfo.ZoneInfo("America/New_York") (the
+# Friday payout-digest schedule) resolves even if the base image ships no system
+# tzdata. Harmless where the OS already has it.
+tzdata>=2024.1
