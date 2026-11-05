@@ -1564,8 +1564,13 @@ def fill_buying_sheet(sheet_id, comps, sheet_name="Form. Put Date Here."):
             updates.append({'range': f'G{row}', 'values': [[SHEET_NOT_LOADED_MARK]]})
         else:
             updates.append({'range': f'G{row}', 'values': [["not found"]]})
-        if cgc:
-            updates.append({'range': f'H{row}', 'values': [[build_sheet_h_formula(row)]]})
+        # Nov 4: write the Bucket/rate cell (H) for EVERY row, not just CGC, from
+        # the bot's own verified Nov 4 formula — so the sheet payout matches the
+        # quote and never depends on the "Buying Form KTS Collectibles" template's
+        # weekly-maintained band formula (which was last updated Oct 25). The
+        # formula self-guards on a non-numeric G (review / not-found / didn't-load
+        # rows return "" so Payout=G*H stays blank), so this is safe for all rows.
+        updates.append({'range': f'H{row}', 'values': [[build_sheet_h_formula(row)]]})
         if c.get('lastSaleDate'):
             updates.append({'range': f'J{row}', 'values': [[c['lastSaleDate']]]})
         # SELECT-list stamp (Oct 2): column L carries "Y" when the card's
