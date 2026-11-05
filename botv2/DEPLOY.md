@@ -19,8 +19,12 @@ cross-effects must be handled before v1 and v2 ever run at the same time:**
    → **Fix (required before concurrent run):** give v2 its **own** `PSA_FOLDER_ID`
    (a new Drive folder, shared with the same service-account email). The bot passes
    `folder_id` to the Apps Script per call, so this env override alone fully isolates
-   v2's output — no Apps Script change needed. (If instead you turn v1 **off** before
-   v2 goes live and never roll back, a shared folder is fine — your call.)
+   v2's output — no Apps Script change needed. **Safety net:** if `PSA_FOLDER_ID` is
+   left at v1's folder, v2 **refuses** to create buying sheets (quoting still works)
+   rather than contaminating v1 — so a forgotten env can't cause the corruption, it
+   just disables sheets until you set it. (If instead you turn v1 **off** before v2
+   goes live and never roll back, set `ALLOW_SHARED_PSA_FOLDER=1` to share v1's folder
+   — your call.)
 
 2. **Merging `bot-v2-triumph` → `main` force-redeploys the LIVE v1 service.** Both
    services deploy from `main`, and Railway redeploys every service on any push to
@@ -87,7 +91,7 @@ build still happens from the root.
 | `DISCORD_TOKEN` | v2's **own** bot token — a different Discord application than v1. |
 | `KEVIN_USER_ID` | Your numeric Discord user id (DMs + ticket detection; 0 → all Kevin DMs silently no-op). |
 | `BOT_API_KEY` | `x-bot-key` secret for the portal's `/bot/price`. Must match the portal's value. Not the Triumph token. |
-| `PSA_FOLDER_ID` | **Set to v2's OWN Drive folder** (see isolation note #1) unless v1 is retired first. |
+| `PSA_FOLDER_ID` | **Set to v2's OWN Drive folder** (see isolation note #1). If left at v1's folder, v2 refuses to create sheets (tripwire) rather than corrupting v1. |
 
 **Required for buying-sheet creation** (the bot still boots + quotes without it; only
 sheet output degrades, and it DMs you on failure):
@@ -106,8 +110,9 @@ sheet output degrades, and it DMs you on failure):
 `PORTAL_BASE_URL` (defaults to `https://portal.ktscollectibles.com`),
 `GOOGLE_CREDENTIALS_FILE` (local-dev creds path), `APPS_SCRIPT_URL`,
 `TEMPLATE_SHEET_ID`, `SPORTS_OP_MIN_LOT`, `POKEMON_SINGLES_MIN_LOT`, `MIN_LOT_VALUE`,
-`MIN_SLAB_COUNT`, `POKEMON_LANE_OPEN`, `BOTV2_PRICE_MOCK`. **`PORT` is injected by
-Railway — never set it.**
+`MIN_SLAB_COUNT`, `POKEMON_LANE_OPEN`, `BOTV2_PRICE_MOCK`, `ALLOW_SHARED_PSA_FOLDER`
+(set to `1` only to intentionally share v1's folder once v1 is retired). **`PORT` is
+injected by Railway — never set it.**
 
 ---
 

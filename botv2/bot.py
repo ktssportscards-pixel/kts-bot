@@ -129,6 +129,10 @@ _digest_started = False
 async def on_ready():
     global _web_runner, _digest_started
     print(f"[bot] logged in as {bot.user} (botv2)")
+    if config.psa_folder_unsafe():
+        print("[bot] ⚠️ PSA_FOLDER_ID is still v1's shared folder — buying-sheet "
+              "creation will be REFUSED (it would corrupt v1). Set PSA_FOLDER_ID to "
+              "v2's own folder before taking cards (or ALLOW_SHARED_PSA_FOLDER=1).")
     if _web_runner is None:                       # start once; on_ready re-fires on reconnect
         try:
             _web_runner = await webserver.start()

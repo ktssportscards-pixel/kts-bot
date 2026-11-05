@@ -41,7 +41,17 @@ GOOGLE_CREDENTIALS_FILE = os.environ.get(
 APPS_SCRIPT_URL = os.environ.get(
     "APPS_SCRIPT_URL",
     "https://script.google.com/macros/s/AKfycbxPenrARSCnPZ6Ddwaokcz24Fwvcobgp0ybvvzJR49cCJ_DUcNoprRXDPpyTJA0rJ71Cg/exec")
-PSA_FOLDER_ID = os.environ.get("PSA_FOLDER_ID", "1ayHilGpXqNQA8RDRSw1igTsCxBEI4hvm")
+# v1's shared PSA buying-sheet folder. v2 must NOT create sheets here while v1 is
+# live: v1's folder-wide sweeps (boss CSV, customer lookup, stalled requote) have no
+# owner filter and would ingest v2's sheets.
+V1_PSA_FOLDER_ID = "1ayHilGpXqNQA8RDRSw1igTsCxBEI4hvm"
+# v2's buying-sheet output folder. The default is v1's folder ONLY as a tripwire —
+# if it's still this at sheet-creation time, create_psa_sheet() refuses (so v2 can't
+# silently corrupt v1). Set this to v2's OWN Drive folder id (shared with the
+# service-account email) before taking cards. To intentionally share v1's folder
+# (only safe once v1 is retired), set ALLOW_SHARED_PSA_FOLDER=1.
+PSA_FOLDER_ID = os.environ.get("PSA_FOLDER_ID", V1_PSA_FOLDER_ID)
+ALLOW_SHARED_PSA_FOLDER = os.environ.get("ALLOW_SHARED_PSA_FOLDER", "").lower() in ("1", "true", "yes")
 TEMPLATE_SHEET_ID = os.environ.get("TEMPLATE_SHEET_ID", "1y_jis_knml_UIVWxxtEHrKs_vjkuX97x8Q7u3pVsQVM")
 SHEET_FORM_NAME = "Form. Put Date Here."   # the worksheet tab the template ships with
 SHEET_NOT_LOADED_MARK = "didn't load — resend"
@@ -72,3 +82,10 @@ CONFIDENTIAL_ROW_FIELDS = ("payout", "payoutCents", "memberMultiplier", "source"
 
 # Words that must never appear on customer-facing surfaces (buyer identities).
 CUSTOMER_FORBIDDEN_WORDS = ("triumph", "poketrader", "pixel", "allocation", "doral")
+
+
+def psa_folder_unsafe() -> bool:
+    """True when v2 would write buying sheets into v1's shared folder without the
+    explicit ALLOW_SHARED_PSA_FOLDER opt-in — i.e. PSA_FOLDER_ID hasn't been pointed
+    at v2's own folder yet. Used to disable sheet creation and warn at startup."""
+    return PSA_FOLDER_ID == V1_PSA_FOLDER_ID and not ALLOW_SHARED_PSA_FOLDER

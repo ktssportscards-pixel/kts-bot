@@ -75,6 +75,14 @@ def create_psa_sheet(username: str, cert_tokens: list, folder_id: str = None):
     poll Drive for the sheet Google may have finished anyway (no duplicate), then
     retry the call once."""
     folder_id = folder_id or config.PSA_FOLDER_ID
+    if folder_id == config.V1_PSA_FOLDER_ID and not config.ALLOW_SHARED_PSA_FOLDER:
+        # Tripwire: refuse to create a sheet in v1's shared folder (it would corrupt
+        # v1's folder-wide sweeps). Raised before any network call. Caller's handler
+        # turns this into a "sheet failed — add by hand" DM; the fix is one env var.
+        raise RuntimeError(
+            "Refusing to create a buying sheet in v1's shared Drive folder. Set "
+            "PSA_FOLDER_ID to v2's own folder (shared with the service account), or "
+            "set ALLOW_SHARED_PSA_FOLDER=1 to intentionally share v1's folder.")
     certs_str = ",".join(certs.cert_digits(c) for c in cert_tokens)   # column B = bare digits
     params = urllib.parse.urlencode({"username": username, "certs": certs_str, "folder_id": folder_id})
     url = f"{config.APPS_SCRIPT_URL}?{params}"

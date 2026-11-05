@@ -157,9 +157,35 @@ def test_vip_commands_client():
     check(len(rows) == 2 and all(r.cert for r in rows), "mock client w/ customer+override")
 
 
+# ── PSA folder isolation guard ──────────────────────────────────────────────────
+def test_psa_folder_guard():
+    section("psa folder guard")
+    import botv2.config as cfg
+    import botv2.sheets as sheets_mod
+    old = (cfg.PSA_FOLDER_ID, cfg.ALLOW_SHARED_PSA_FOLDER)
+    try:
+        cfg.PSA_FOLDER_ID, cfg.ALLOW_SHARED_PSA_FOLDER = cfg.V1_PSA_FOLDER_ID, False
+        check(cfg.psa_folder_unsafe(), "v1 folder + no flag -> unsafe")
+        # create_psa_sheet must refuse BEFORE any network/Google call
+        try:
+            sheets_mod.create_psa_sheet("x", ["12345678"])
+            check(False, "create_psa_sheet should refuse v1 folder")
+        except RuntimeError:
+            check(True, "create_psa_sheet refuses v1 folder (no network)")
+        except Exception as e:
+            check(False, f"wrong error type from guard: {e!r}")
+        cfg.ALLOW_SHARED_PSA_FOLDER = True
+        check(not cfg.psa_folder_unsafe(), "explicit allow -> safe")
+        cfg.PSA_FOLDER_ID, cfg.ALLOW_SHARED_PSA_FOLDER = "v2-own-folder-id", False
+        check(not cfg.psa_folder_unsafe(), "v2's own folder -> safe")
+    finally:
+        cfg.PSA_FOLDER_ID, cfg.ALLOW_SHARED_PSA_FOLDER = old
+
+
 def main():
     print("botv2 selftest:")
-    for t in (test_certs, test_pricing, test_lots_shipping, test_tracking_digest, test_vip_commands_client):
+    for t in (test_certs, test_pricing, test_lots_shipping, test_tracking_digest,
+              test_vip_commands_client, test_psa_folder_guard):
         t()
     if _fails:
         print(f"\nFAILED ({len(_fails)}):")
