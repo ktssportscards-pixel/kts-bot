@@ -41,6 +41,21 @@ def record_accepted_ship(channel_id, snapshot: dict):
     return base
 
 
+def record_tracking(channel_id, tracking_num: str) -> bool:
+    """Attach a tracking number to this channel's ticket + owed entries (if any)."""
+    hit = False
+    for store, key in (("tickets", f"tk_{channel_id}"), ("owed", f"owed_{channel_id}")):
+        data = state.load(store, list)
+        changed = False
+        for r in data:
+            if r.get("id") == key:
+                r["tracking"] = tracking_num
+                changed = hit = True
+        if changed:
+            state.save(store, data)
+    return hit
+
+
 def mark_paid(channel_id) -> bool:
     """Flip the owed entry for a channel to paid. Returns True if found."""
     data = state.load("owed", list)

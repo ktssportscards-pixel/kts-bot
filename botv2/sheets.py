@@ -111,6 +111,17 @@ def _sheet_id_from_url(sheet_url: str) -> str:
         return sheet_url
 
 
+def save_tracking(sheet_url: str, tracking: str) -> None:
+    """Write a tracking number onto the buying sheet via the Apps Script."""
+    sid = _sheet_id_from_url(sheet_url) if "/d/" in str(sheet_url) else sheet_url
+    data = json.dumps({"action": "update_tracking", "sheet_id": sid,
+                       "tracking": tracking}).encode()
+    req = urllib.request.Request(config.APPS_SCRIPT_URL, data=data,
+                                 headers={"Content-Type": "application/json",
+                                          "User-Agent": "KTS-Bot/2.0"})
+    urllib.request.urlopen(req, timeout=15)
+
+
 def fill_buying_sheet(sheet_id: str, rows, sheet_name: str = None) -> list:
     """Write portal rows into the buying sheet the Apps Script just made. Columns:
       A = PSA/CGC   C = CardLadder link   D = name   E = grade   F = category

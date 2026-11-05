@@ -17,8 +17,9 @@ import asyncio
 
 import discord
 
-from . import (certs, commands, config, lots, portal_client, pricing, sheets,
-               shipping, state, tickets, tracking, vip, webserver, welcome)
+from . import (certs, commands, config, lots, payout_digest, portal_client,
+               pricing, sheets, shipping, state, tickets, tracking, vip,
+               webserver, welcome)
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -29,6 +30,8 @@ bot = discord.Client(intents=intents)
 _welcomed: set = set(int(x) for x in state.load("welcomed", list))
 # Per-channel snapshot of the latest accepted quote, used to record the lot on ship.
 _last_quote: dict = {}
+# Per-channel buying-sheet URL (persisted) — used to save a tracking number later.
+_channel_sheet: dict = state.load("channel_sheet", dict)
 
 
 def _remember_welcomed(cid: int) -> None:
@@ -69,18 +72,63 @@ async def _handle_ship(channel) -> None:
     await ping_kevin(f"🚚 #{channel.name} — ship: {note}")
 
 
+async def _handle_tracking(channel, tnum) -> None:
+    """Customer dropped a tracking number — acknowledge, note it, save to the sheet."""
+    uname = tickets.sanitize_channel_name(channel.name) or channel.name
+    await channel.send(f"📦 Got it — tracking `{tnum}` noted. Kevin will keep an eye out! 🙌")
+    tracking.record_tracking(channel.id, tnum)
+    sheet_url = _channel_sheet.get(str(channel.id))
+    saved = ""
+    if sheet_url:
+        try:
+            await asyncio.to_thread(sheets.save_tracking, sheet_url, tnum)
+            saved = " (saved to sheet)"
+        except Exception as e:
+            print(f"[bot] tracking sheet-save failed (non-fatal): {e}")
+    await ping_kevin(f"📦 Tracking from **{uname}** (#{channel.name}): `{tnum}`{saved}"
+                     + ("" if sheet_url else " — no sheet cached, add by hand"))
+
+
+def _seconds_until_friday_9am_et() -> float:
+    from zoneinfo import ZoneInfo
+    from datetime import datetime, timedelta
+    now = datetime.now(ZoneInfo("America/New_York"))
+    target = now.replace(hour=9, minute=0, second=0, microsecond=0) + timedelta(
+        days=(4 - now.weekday()) % 7)             # Friday = weekday 4
+    if target <= now:
+        target += timedelta(days=7)
+    return (target - now).total_seconds()
+
+
+async def _payout_digest_loop():
+    """DM Kevin the unpaid-owed digest every Friday 9 AM ET (payouts run Fridays)."""
+    while True:
+        await asyncio.sleep(_seconds_until_friday_9am_et())
+        try:
+            digest = payout_digest.build_digest()
+            if digest:
+                await ping_kevin(digest)
+        except Exception as e:
+            print(f"[bot] payout digest failed (non-fatal): {e}")
+        await asyncio.sleep(90)                    # clear the 9:00 minute, no re-fire
+
+
 _web_runner = None
+_digest_started = False
 
 
 @bot.event
 async def on_ready():
-    global _web_runner
+    global _web_runner, _digest_started
     print(f"[bot] logged in as {bot.user} (botv2)")
     if _web_runner is None:                       # start once; on_ready re-fires on reconnect
         try:
             _web_runner = await webserver.start()
         except Exception as e:
             print(f"[bot] web server start failed (non-fatal): {e}")
+    if not _digest_started:
+        _digest_started = True
+        bot.loop.create_task(_payout_digest_loop())
     try:
         await tickets.sweep_overflow(bot)
     except Exception as e:
@@ -128,7 +176,11 @@ async def _handle_message(message) -> None:
     if not cert_list:
         if shipping.looks_like_agree(text):
             await _handle_ship(channel)
-        return  # CSV / tracking / commands handled by later modules
+        else:
+            tnum = certs.extract_tracking(text)
+            if tnum:
+                await _handle_tracking(channel, tnum)
+        return
 
     # A lone bare 10-digit CGC candidate might be a phone/payment number — confirm
     # it resolves to a real slab on the portal before quoting (v1 behavior).
@@ -187,6 +239,8 @@ async def _handle_message(message) -> None:
     sheet_url = ""
     try:
         sheet_url, _name, _ = await asyncio.to_thread(sheets.create_psa_sheet, username, cert_list)
+        _channel_sheet[str(channel.id)] = sheet_url          # cache for later tracking-save
+        state.save("channel_sheet", _channel_sheet)
         missing = await asyncio.to_thread(sheets.fill_buying_sheet, sheet_url, rows)
         if missing:
             await ping_kevin(f"⚠️ {len(missing)} cert(s) didn't land on {username}'s sheet: "

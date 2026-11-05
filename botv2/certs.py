@@ -116,6 +116,21 @@ def extract_certs(text: str) -> list:
     return unique
 
 
+_TRACKING_RE = re.compile(r'\b([0-9]{20,22}|1Z[A-Z0-9]{16}|[0-9]{12,15})\b', re.I)
+
+
+def extract_tracking(text: str) -> str:
+    """The first tracking-number-shaped token (UPS 1Z…, USPS 20-22 digit,
+    FedEx/other 12-15 digit), skipping a 14… 13-digit CGC cert. '' if none."""
+    if not text:
+        return ""
+    for m in _TRACKING_RE.finditer(_strip_links(text)):
+        tok = m.group(1)
+        if not (len(tok) == 13 and tok.startswith("14")):   # not a CGC cert
+            return tok
+    return ""
+
+
 def cgc_needs_confirm(text: str, certs: list) -> bool:
     """True when a message's ONLY cert is one bare 10-digit number and nothing in
     it says CGC — as likely a phone number as a slab. The bot should look it up on
