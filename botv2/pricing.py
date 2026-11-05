@@ -110,7 +110,8 @@ def breakdown_lines(q: Quote) -> list[str]:
     return out
 
 
-def customer_message(q: Quote, head: str = "✅ All comps loaded!") -> str:
+def customer_message(q: Quote, head: str = "✅ All comps loaded!",
+                     proceed_override: str = None) -> str:
     parts = [head, ""]
     if q.n_accepted:
         parts += [
@@ -141,7 +142,7 @@ def customer_message(q: Quote, head: str = "✅ All comps loaded!") -> str:
                   f"a re-check — resend {'it' if n == 1 else 'them'}:",
                   *[f"• `{r.cert}`" for r in q.unpriced]]
     if q.n_accepted:
-        parts += ["", _proceed_line(q)]
+        parts += ["", proceed_override or _proceed_line(q)]
     return "\n".join(parts)
 
 

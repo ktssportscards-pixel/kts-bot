@@ -17,7 +17,8 @@ import asyncio
 
 import discord
 
-from . import certs, config, portal_client, pricing, sheets, state, tickets, vip, welcome
+from . import (certs, config, lots, portal_client, pricing, sheets, shipping,
+               state, tickets, vip, welcome)
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -48,6 +49,13 @@ async def ping_kevin(text: str) -> bool:
 
 
 # ── events ────────────────────────────────────────────────────────────────────
+async def _handle_ship(channel) -> None:
+    """Customer said 'ship'/'proceed' — give the routed address(es) or the hold."""
+    msg, _gave, note = shipping.compose_shipping(channel.id)
+    await channel.send(msg)
+    await ping_kevin(f"🚚 #{channel.name} — ship: {note}")
+
+
 @bot.event
 async def on_ready():
     print(f"[bot] logged in as {bot.user} (botv2 {config.__name__.split('.')[0]})")
@@ -93,7 +101,9 @@ async def _handle_message(message) -> None:
             return
 
     if not cert_list:
-        return  # CSV / ship / tracking / commands handled by later modules
+        if shipping.looks_like_agree(text):
+            await _handle_ship(channel)
+        return  # CSV / tracking / commands handled by later modules
 
     # A lone bare 10-digit CGC candidate might be a phone/payment number — confirm
     # it resolves to a real slab on the portal before quoting (v1 behavior).
@@ -127,7 +137,13 @@ async def _handle_message(message) -> None:
             return
 
     quote = pricing.build_quote(rows)
-    await channel.send(pricing.customer_message(quote))   # instant — pricing is fast now
+    # Track accepted slabs for the ship/minimum gate, then tailor the proceed line.
+    lots.add_slab_values(
+        channel.id,
+        {r.cert: r.market_value for r in quote.accepted if r.market_value is not None},
+        {r.cert: r.category for r in quote.accepted})
+    proceed = lots.proceed_or_hold_tail(channel.id)
+    await channel.send(pricing.customer_message(quote, proceed_override=proceed))  # instant
 
     # Buying sheet for Kevin — deliberately OFF the customer's critical path (the
     # Apps Script is slow). The customer already has their quote; Kevin gets the
