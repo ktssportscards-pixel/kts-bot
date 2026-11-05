@@ -54,6 +54,19 @@ async def _ops(req):
     return _cors(web.json_response({"tickets": tracking.ops_view(detail=detail)}))
 
 
+async def _analytics(req):
+    """Volume + payout aggregates for the portal's analytics view. AUTHENTICATED with
+    x-bot-key. VOLUME + PAYOUT ONLY — margin stays portal-side. Optional ?days=N window."""
+    if not config.BOT_API_KEY or req.headers.get("x-bot-key") != config.BOT_API_KEY:
+        return web.json_response({"error": "unauthorized"}, status=401)
+    from . import analytics
+    try:
+        days = int(req.query["days"]) if req.query.get("days") else None
+    except ValueError:
+        days = None
+    return _cors(web.json_response(analytics.summary(days)))
+
+
 async def start():
     """Start the web server on $PORT. Returns the AppRunner (keep a reference)."""
     app = web.Application()
@@ -65,6 +78,7 @@ async def start():
         web.get("/leaderboard", _leaderboard),
         web.get("/links", _links),
         web.get("/ops", _ops),
+        web.get("/analytics", _analytics),
     ])
     runner = web.AppRunner(app)
     await runner.setup()
