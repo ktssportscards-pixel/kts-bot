@@ -5,7 +5,7 @@ Feeds the web server's /tickets + /owed (the local tracker on Kevin's Mac) and s
 up the payout flow. Writes are keyed by channel so a re-ship updates in place rather
 than duplicating. State-store backed, so it survives redeploys with a DATA_DIR volume.
 """
-from datetime import date
+from datetime import date, datetime
 
 from . import state
 
@@ -68,3 +68,66 @@ def mark_paid(channel_id) -> bool:
     if hit:
         state.save("owed", data)
     return hit
+
+
+def record_quote(channel_id, snapshot: dict, channel_name: str = "") -> None:
+    """Record/refresh a ticket at QUOTE time (status 'quoted') so OPEN tickets show on
+    the ops dashboard before they ship. Upserts the same id ship uses, so a later ship
+    just flips it to 'accepted'; never downgrades an already-accepted ticket."""
+    if not snapshot:
+        return
+    cur = next((r for r in state.load("tickets", list)
+                if r.get("id") == f"tk_{channel_id}"), None)
+    status = "accepted" if (cur and cur.get("status") == "accepted") else "quoted"
+    _upsert("tickets", {
+        "id": f"tk_{channel_id}",
+        "channel_id": channel_id,
+        "channel_name": channel_name or (cur or {}).get("channel_name", ""),
+        "user": snapshot.get("username", ""),
+        "date": (cur or {}).get("date") or date.today().isoformat(),
+        "certs": snapshot.get("certs", {}),
+        "comp": round(float(snapshot.get("comp", 0) or 0), 2),
+        "payout": round(float(snapshot.get("payout", 0) or 0), 2),
+        "cards": int(snapshot.get("cards", 0) or 0),
+        "status": status,
+        "quoted_at": (cur or {}).get("quoted_at") or datetime.now().isoformat(timespec="seconds"),
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+    })
+
+
+def record_claim(channel_id, locked: int, total: int) -> None:
+    """Record the auto-claim outcome on this ticket (allocation slots locked)."""
+    _upsert("tickets", {"id": f"tk_{channel_id}",
+                        "claimed": {"locked": int(locked), "total": int(total),
+                                    "at": datetime.now().isoformat(timespec="seconds")}})
+
+
+def ops_view(channel_sheet: dict = None) -> list:
+    """Consolidated per-ticket rows for the ops dashboard: merges the tickets store
+    (quoted→accepted lifecycle + claim) with the owed store (paid status) and the
+    channel→sheet map. One row per ticket; open/unpaid first, newest first."""
+    channel_sheet = channel_sheet if channel_sheet is not None else state.load("channel_sheet", dict)
+    owed = {r.get("id"): r for r in state.load("owed", list)}
+    rows = []
+    for t in state.load("tickets", list):
+        cid = t.get("channel_id")
+        o = owed.get(f"owed_{cid}", {})
+        rows.append({
+            "channel_id": cid,
+            "name": t.get("channel_name") or t.get("user") or "",
+            "user": t.get("user", ""),
+            "status": t.get("status", "quoted"),
+            "comp": t.get("comp"), "payout": t.get("payout"), "cards": t.get("cards"),
+            "sheet_url": channel_sheet.get(str(cid), ""),
+            "claimed": t.get("claimed"),
+            "shipped": bool(o),
+            "tracking": t.get("tracking") or o.get("tracking") or "",
+            "owed": o.get("payout") if o else None,
+            "paid": bool(o.get("paid")) if o else None,
+            "paid_date": o.get("paid_date"),
+            "quoted_at": t.get("quoted_at"),
+            "updated_at": t.get("updated_at") or t.get("quoted_at"),
+        })
+    rows.sort(key=lambda r: r.get("updated_at") or "", reverse=True)   # newest first
+    rows.sort(key=lambda r: r.get("paid") is True)                     # open/unpaid first (stable)
+    return rows

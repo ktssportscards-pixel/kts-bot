@@ -155,6 +155,20 @@ def test_tracking_digest():
     check(len(tracking.state.load("tickets", list)) == 2, "re-ship updates in place")
     check(tracking.mark_paid(10) and "topguy" not in payout_digest.build_digest(), "mark_paid drops from digest")
 
+    # ops dashboard view: quote → ship → claim → paid lifecycle
+    tracking.record_quote(20, {"username": "dashguy", "comp": 500, "payout": 455,
+                               "cards": 9, "certs": {"a": 500}}, channel_name="ticket-99")
+    row = next((r for r in tracking.ops_view({}) if r["channel_id"] == 20), None)
+    check(row and row["status"] == "quoted" and row["payout"] == 455 and not row["shipped"],
+          "ops: quoted ticket shows (open, unshipped)")
+    tracking.record_accepted_ship(20, {"username": "dashguy", "comp": 500, "payout": 455,
+                                       "cards": 9, "certs": {"a": 500}})
+    tracking.record_claim(20, 8, 9)
+    row2 = next((r for r in tracking.ops_view({}) if r["channel_id"] == 20), None)
+    check(row2["status"] == "accepted" and row2["claimed"]["locked"] == 8
+          and row2["shipped"] and row2["paid"] is False,
+          "ops: ship→accepted + claim recorded + unpaid owed")
+
 
 # ── vip + commands + portal client ────────────────────────────────────────────
 def test_vip_commands_client():

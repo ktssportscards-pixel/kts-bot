@@ -243,6 +243,7 @@ async def _handle_message(message) -> None:
         "cards": quote.n_accepted,
         "certs": {r.cert: r.market_value for r in quote.accepted if r.market_value is not None},
     }
+    tracking.record_quote(channel.id, _last_quote[channel.id], channel_name=channel.name)
     proceed = lots.proceed_or_hold_tail(channel.id)
     await channel.send(pricing.customer_message(quote, proceed_override=proceed))  # instant
 
@@ -256,6 +257,7 @@ async def _handle_message(message) -> None:
                 [r.cert for r in quote.accepted], idempotency_key=str(channel.id))
             locked = [r for r in results if r.claimed or r.already_claimed]
             errs = [r for r in results if r.error]
+            tracking.record_claim(channel.id, len(locked), len(results))
             if locked or errs:
                 msg = f"🔒 Auto-claim #{channel.name}: **{len(locked)}** locked of {len(results)}"
                 if errs:

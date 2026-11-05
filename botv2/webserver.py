@@ -43,6 +43,16 @@ async def _links(_req):
     return _cors(web.json_response(state.load("supplier_links", dict)))
 
 
+async def _ops(req):
+    """Consolidated per-ticket lifecycle (quote → claim → ship → owed) for the portal's
+    ops dashboard. AUTHENTICATED with x-bot-key — unlike the local-tracker reads above,
+    this is the full picture and must not be public."""
+    if not config.BOT_API_KEY or req.headers.get("x-bot-key") != config.BOT_API_KEY:
+        return web.json_response({"error": "unauthorized"}, status=401)
+    from . import tracking
+    return _cors(web.json_response({"tickets": tracking.ops_view()}))
+
+
 async def start():
     """Start the web server on $PORT. Returns the AppRunner (keep a reference)."""
     app = web.Application()
@@ -53,6 +63,7 @@ async def start():
         web.get("/tickets", _tickets),
         web.get("/leaderboard", _leaderboard),
         web.get("/links", _links),
+        web.get("/ops", _ops),
     ])
     runner = web.AppRunner(app)
     await runner.setup()
