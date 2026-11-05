@@ -12,6 +12,9 @@ import os
 
 # ── Discord ───────────────────────────────────────────────────────────────────
 DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN", "")
+# Kevin's Discord user id — used to DM him quote summaries and to detect an
+# in-flight ticket (if he's already talking in a channel, skip the welcome).
+KEVIN_USER_ID = int(os.environ.get("KEVIN_USER_ID", "0") or "0")
 
 # ── Price source: KTS Portal /bot/price proxy (Triumph lives behind it) ────────
 # BOT_API_KEY is a NEW shared secret for the x-bot-key header — it is NOT the
