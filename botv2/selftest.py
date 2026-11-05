@@ -227,10 +227,37 @@ def test_psa_folder_guard():
         cfg.PSA_FOLDER_ID, cfg.ALLOW_SHARED_PSA_FOLDER = old
 
 
+# ── alerts (rate limiter) + /status counts ──────────────────────────────────────
+def test_alerts_status():
+    section("alerts + status")
+    from botv2 import alerts
+    alerts.reset()
+    # A key fires once, is suppressed for the window, then fires again past it — so an
+    # error storm DMs Kevin once, not hundreds of times.
+    check(alerts.should_alert("k", now=0.0), "first alert for a key fires")
+    check(not alerts.should_alert("k", now=10.0), "same key within window suppressed")
+    check(alerts.should_alert("other", now=10.0), "a different key still fires")
+    check(not alerts.should_alert("k", now=alerts.ALERT_WINDOW_S - 1), "still suppressed at window edge")
+    check(alerts.should_alert("k", now=alerts.ALERT_WINDOW_S + 1), "same key fires again past the window")
+    # last_error feeds /status and updates even when the DM itself was rate-limited.
+    alerts.record_error("boom", "it broke in a big way")
+    le = alerts.last_error()
+    check(le and le["key"] == "boom" and "broke" in le["text"] and le.get("at"),
+          "last_error recorded with a timestamp")
+    alerts.reset()
+    check(alerts.last_error() is None, "reset clears last_error")
+    # counts() shape — what the heartbeat DM + /status read.
+    c = tracking.counts()
+    check({"tickets_total", "tickets_open", "owed_open", "owed_total"} <= set(c),
+          "counts has the expected keys")
+    check(isinstance(c["owed_total"], (int, float)) and c["tickets_open"] <= c["tickets_total"],
+          "counts values sane (open ≤ total, owed_total numeric)")
+
+
 def main():
     print("botv2 selftest:")
     for t in (test_certs, test_pricing, test_lots_shipping, test_tracking_digest,
-              test_vip_commands_client, test_psa_folder_guard):
+              test_vip_commands_client, test_psa_folder_guard, test_alerts_status):
         t()
     if _fails:
         print(f"\nFAILED ({len(_fails)}):")
