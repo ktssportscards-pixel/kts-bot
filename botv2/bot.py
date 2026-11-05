@@ -17,7 +17,7 @@ import asyncio
 
 import discord
 
-from . import certs, config, portal_client, pricing, state, tickets, welcome
+from . import certs, config, portal_client, pricing, sheets, state, tickets, welcome
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -127,8 +127,22 @@ async def _handle_message(message) -> None:
             return
 
     quote = pricing.build_quote(rows)
-    await channel.send(pricing.customer_message(quote))
-    await ping_kevin(pricing.kevin_summary(quote, username))
+    await channel.send(pricing.customer_message(quote))   # instant — pricing is fast now
+
+    # Buying sheet for Kevin — deliberately OFF the customer's critical path (the
+    # Apps Script is slow). The customer already has their quote; Kevin gets the
+    # sheet link + summary once it's built. A sheet failure never blocks the DM.
+    sheet_url = ""
+    try:
+        sheet_url, _name, _ = await asyncio.to_thread(sheets.create_psa_sheet, username, cert_list)
+        missing = await asyncio.to_thread(sheets.fill_buying_sheet, sheet_url, rows)
+        if missing:
+            await ping_kevin(f"⚠️ {len(missing)} cert(s) didn't land on {username}'s sheet: "
+                             + ", ".join(certs.cert_label(c) for c in missing))
+    except Exception as e:
+        await ping_kevin(f"⚠️ buying sheet failed for #{channel.name} ({e}) — "
+                         f"summary below, add rows by hand if needed.")
+    await ping_kevin(pricing.kevin_summary(quote, username, sheet_url))
 
 
 async def _welcome_if_new(message, channel) -> bool:

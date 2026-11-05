@@ -35,6 +35,16 @@ PRICE_MOCK = os.environ.get("BOTV2_PRICE_MOCK", "").lower() in ("1", "true", "ye
 GOOGLE_CREDENTIALS_JSON = os.environ.get("GOOGLE_CREDENTIALS_JSON")
 GOOGLE_CREDENTIALS_FILE = os.environ.get(
     "GOOGLE_CREDENTIALS_FILE", os.path.expanduser("~/Downloads/google_credentials.json"))
+# Buying sheets are created by the same Apps Script web app v1 uses (so the format
+# Kevin pays off, and the downstream !summary / payments / nightly reconcile that
+# read these sheets, stay identical). v2 fills them from the portal's rows.
+APPS_SCRIPT_URL = os.environ.get(
+    "APPS_SCRIPT_URL",
+    "https://script.google.com/macros/s/AKfycbxPenrARSCnPZ6Ddwaokcz24Fwvcobgp0ybvvzJR49cCJ_DUcNoprRXDPpyTJA0rJ71Cg/exec")
+PSA_FOLDER_ID = os.environ.get("PSA_FOLDER_ID", "1ayHilGpXqNQA8RDRSw1igTsCxBEI4hvm")
+TEMPLATE_SHEET_ID = os.environ.get("TEMPLATE_SHEET_ID", "1y_jis_knml_UIVWxxtEHrKs_vjkuX97x8Q7u3pVsQVM")
+SHEET_FORM_NAME = "Form. Put Date Here."   # the worksheet tab the template ships with
+SHEET_NOT_LOADED_MARK = "didn't load — resend"
 
 # ── Persistence (set DATA_DIR to a mounted volume in prod so state survives) ───
 DATA_DIR = os.environ.get("DATA_DIR") or os.path.join(
