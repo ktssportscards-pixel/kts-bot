@@ -33,6 +33,29 @@ def _unauthorized():
     return web.json_response({"error": "unauthorized"}, status=401)
 
 
+_SNOWFLAKE_KEYS = ("channel_id", "message_id")
+
+
+def _stringify_snowflakes(obj):
+    """Emit Discord snowflake ids (channel_id/message_id) as JSON STRINGS, recursively.
+    A snowflake (e.g. 1492170401608896533) exceeds JS's safe-integer range (2**53), so as
+    a JSON *number* it is silently corrupted by JSON.parse (…896533 → …896500) and the
+    native app — which decodes channel_id as a String — fails the whole decode. Non-
+    snowflake ints (counts, uptime, offer_pct, …) are left untouched."""
+    if isinstance(obj, dict):
+        return {k: (str(v) if (k in _SNOWFLAKE_KEYS and isinstance(v, int))
+                    else _stringify_snowflakes(v)) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_stringify_snowflakes(x) for x in obj]
+    return obj
+
+
+def _json(payload):
+    """CORS JSON response with snowflake ids stringified (see _stringify_snowflakes).
+    Use this for any payload that can carry a channel_id / snowflake id."""
+    return _cors(web.json_response(_stringify_snowflakes(payload)))
+
+
 async def _health(_req):
     return _cors(web.Response(
         text=f"KTS botv2 — owed/tickets endpoint OK · started {_STARTED}"))
@@ -41,25 +64,25 @@ async def _health(_req):
 async def _owed(req):
     if not _authed(req):                       # was public — leaked seller names + payouts
         return _unauthorized()
-    return _cors(web.json_response(state.load("owed", list)))
+    return _json(state.load("owed", list))
 
 
 async def _tickets(req):
     if not _authed(req):                       # was public — leaked per-card offer_pct (buy rate)
         return _unauthorized()
-    return _cors(web.json_response(state.load("tickets", list)))
+    return _json(state.load("tickets", list))
 
 
 async def _leaderboard(req):
     if not _authed(req):
         return _unauthorized()
-    return _cors(web.json_response(state.load("leaderboard", dict)))
+    return _json(state.load("leaderboard", dict))
 
 
 async def _links(req):
     if not _authed(req):
         return _unauthorized()
-    return _cors(web.json_response(state.load("supplier_links", dict)))
+    return _json(state.load("supplier_links", dict))
 
 
 async def _ops(req):
@@ -70,7 +93,7 @@ async def _ops(req):
         return _unauthorized()
     from . import tracking
     detail = req.query.get("cards", "").lower() in ("1", "true", "yes")   # ?cards=1 → per-cert
-    return _cors(web.json_response({"tickets": tracking.ops_view(detail=detail)}))
+    return _json({"tickets": tracking.ops_view(detail=detail)})
 
 
 async def _status(req):
@@ -157,9 +180,9 @@ async def _delivery(req):
                 posted = await botmod.notify_out_for_delivery(res["channel_id"], res.get("user", ""))
             except Exception as e:
                 print(f"[web] out-for-delivery notify failed (non-fatal): {e}")
-        return _cors(web.json_response(
+        return _json(
             {**res, "stage": "out_for_delivery", "posted": posted,
-             "messaging_enabled": config.DELIVERY_TRACKING}))
+             "messaging_enabled": config.DELIVERY_TRACKING})
 
     if status != "delivered":                       # only out_for_delivery + delivered act; ack the rest
         return _cors(web.json_response({"ok": True, "ignored": status}))
@@ -177,8 +200,8 @@ async def _delivery(req):
             posted = await botmod.notify_delivered(res["channel_id"], res.get("user", ""))
         except Exception as e:
             print(f"[web] delivery notify failed (non-fatal): {e}")
-    return _cors(web.json_response(
-        {**res, "stage": "delivered", "posted": posted, "messaging_enabled": config.DELIVERY_TRACKING}))
+    return _json(
+        {**res, "stage": "delivered", "posted": posted, "messaging_enabled": config.DELIVERY_TRACKING})
 
 
 async def start():

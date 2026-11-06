@@ -606,6 +606,10 @@ def test_webserver_auth():
             check(st(h(_Req())) == 401, f"auth: /{name} rejects a missing key")
             check(st(h(_Req(key="selftestkey"))) == 200, f"auth: /{name} allows a valid key")
         check(st(webserver._delivery(_Req(body={}))) == 401, "auth: /delivery rejects a missing key")
+        import json as _j
+        ops = _j.loads(loop.run_until_complete(webserver._ops(_Req(key="selftestkey"))).body.decode())
+        check(all(isinstance(r["channel_id"], str) for r in ops.get("tickets", []) if "channel_id" in r),
+              "auth: /ops emits channel_id as a JS-safe string")
         cfg.BOT_API_KEY = ""                          # fails closed when no key is configured
         check(st(webserver._tickets(_Req(key="anything"))) == 401,
               "auth: fails closed when BOT_API_KEY is unset")
@@ -652,6 +656,15 @@ def test_audit_fixes():
     tracking.record_tracking(882, "1Z882SAME00111")   # same number re-dropped
     check(tracking.delivery_status(882)["status"] == "out_for_delivery",
           "fix: same-number re-drop keeps out_for_delivery (no regress)")
+
+    # (5) Discord snowflakes must serialize as JSON STRINGS (JS safe-int); other ints untouched.
+    from botv2 import webserver as ws
+    s = ws._stringify_snowflakes({"channel_id": 1492170401608896533, "uptime": 42,
+                                  "rows": [{"channel_id": 123, "message_id": 9, "offer_pct": 95}]})
+    check(s["channel_id"] == "1492170401608896533" and s["uptime"] == 42
+          and s["rows"][0]["channel_id"] == "123" and s["rows"][0]["message_id"] == "9"
+          and s["rows"][0]["offer_pct"] == 95,
+          "fix: snowflake ids -> strings, non-snowflake ints untouched")
 
 
 def main():
