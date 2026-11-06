@@ -34,6 +34,7 @@ async def handle(bot, message) -> bool:
                      "• `!paid` — mark this ticket's lot paid\n"
                      "• `!bands` — DM you the live allocation board\n"
                      "• `!stats [days]` — DM you volume + payout analytics\n"
+                     "• `!stalecheck` — DM you the stuck-ticket digest on demand (same as the daily 8am check)\n"
                      "• `!owe [user]` — DM you copy-paste payment packets for the unpaid queue\n"
                      "• `!payinfo` — store/view a seller's wire info (use in a DM; I scrub it from channels)\n"
                      "• `!synctracking` — register open tickets' tracking #s with the delivery watcher\n"
@@ -100,6 +101,35 @@ async def handle(bot, message) -> bool:
         if getattr(channel, "guild", None) is not None:
             try:
                 await channel.send("📈 Stats sent to your DMs.")
+            except Exception:
+                pass
+        return True
+
+    if cmd in ("stalecheck", "stale"):
+        # On-demand version of the daily 8am-ET stuck-ticket digest (so Kevin can test /
+        # check it any time). Kevin-only; NOT gated by BOTV2_STALE_NUDGES (that flag only
+        # controls the automatic daily loop). The digest carries seller names + channels,
+        # so it's DM-only, never a customer channel.
+        if not is_kevin:
+            return True
+        from . import bot as botmod                      # reuse the daily loop's digest builder
+        digest = botmod._stale_digest() or \
+            "✅ Stale-ticket check — nothing stuck past its thresholds right now."
+        if not config.STALE_NUDGES:
+            digest += ("\n\n_(On-demand only — the automatic daily 8am-ET nudge is OFF; "
+                       "set BOTV2_STALE_NUDGES=1 to schedule it.)_")
+        try:
+            await message.author.send(digest)
+        except Exception as e:
+            print(f"[cmd] !stalecheck DM failed: {e}")
+            try:
+                await channel.send("⚠️ Couldn't DM you the stale check — open your DMs to the bot and retry.")
+            except Exception:
+                pass
+            return True
+        if getattr(channel, "guild", None) is not None:
+            try:
+                await channel.send("🕒 Stale-ticket check sent to your DMs.")
             except Exception:
                 pass
         return True
