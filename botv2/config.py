@@ -124,8 +124,10 @@ DATA_DIR = os.environ.get("DATA_DIR") or os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "data")
 
 # ── Lot minimums + lane status ─────────────────────────────────────────────────
-SPORTS_OP_MIN_LOT = int(os.environ.get("SPORTS_OP_MIN_LOT", "1500"))       # Doral lane min
-POKEMON_SINGLES_MIN_LOT = int(os.environ.get("POKEMON_SINGLES_MIN_LOT", "1500"))
+# No minimum lot size — everything drop-ships now (Kevin removed the floor 2026-11-06);
+# the ship path no longer holds small lots. Kept configurable in case a floor returns.
+SPORTS_OP_MIN_LOT = int(os.environ.get("SPORTS_OP_MIN_LOT", "0"))
+POKEMON_SINGLES_MIN_LOT = int(os.environ.get("POKEMON_SINGLES_MIN_LOT", "0"))
 MIN_LOT_VALUE = int(os.environ.get("MIN_LOT_VALUE", "0"))                  # combined min (0 = off)
 MIN_SLAB_COUNT = int(os.environ.get("MIN_SLAB_COUNT", "0"))               # slab-count min (0 = off)
 # Whether the Pokémon (Pixel, no-minimum) lane is open — controls only customer

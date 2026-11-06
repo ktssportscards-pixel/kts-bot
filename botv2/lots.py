@@ -1,10 +1,10 @@
 """
 lots — the per-ticket running lot: accepted slab values by lane + buying minimums.
 
-Ported from v1. Lane routing: Pokémon → VA (no minimum); sports + One Piece →
-Doral (needs $1,500+ combined, batched to the separate address). An unknown/blank
-category falls into the VA (Pokémon) lane — the least-disruptive default that never
-misroutes to Doral or wrongly holds.
+Lane routing: Pokémon → VA; sports + One Piece → Doral (separate address). NO minimum
+lot size — everything drop-ships (the $1,500 floor was removed 2026-11-06). An
+unknown/blank category falls into the VA (Pokémon) lane — the least-disruptive default
+that never misroutes to Doral.
 
 In-memory per channel (survives a session, not a redeploy). Collectr-CSV singles
 are stubbed empty until the CSV module lands; the slab lane logic is complete.
@@ -80,9 +80,9 @@ def is_rebuilt(cid) -> bool:
 
 
 def qualifies(cid) -> bool:
-    """True if the running lot meets the buying minimums for its path (verbatim v1
-    logic). With MIN_LOT_VALUE/MIN_SLAB_COUNT at 0 this means 'non-empty'; the
-    sports/OP $1,500 LANE gate is enforced separately in shipping."""
+    """True if the running lot is non-empty. There is NO minimum lot size anymore
+    (MIN_LOT_VALUE / MIN_SLAB_COUNT / POKEMON_SINGLES_MIN_LOT all default 0), so any lot
+    with a slab or a single qualifies; shipping no longer holds small sports/OP lots."""
     slab_count, slab_value, singles, combined = summary(cid)
     games = singles_by_game(cid)
     if slab_count == 0 and singles == 0:
@@ -166,19 +166,9 @@ def rebuild_from_sheets(cid, username, days=4, created_after=None) -> bool:
 
 def proceed_or_hold_tail(cid):
     """None if the lot qualifies (caller shows its normal 'proceed' prompt), else a
-    customer-facing message listing exactly what's missing (used instead)."""
-    pk_lane, so_lane = value_by_lane(cid)
-    pk_invite = ", or send **Pokémon** (no minimum)!" if config.POKEMON_LANE_OPEN else "!"
-    if 0 < so_lane < config.SPORTS_OP_MIN_LOT:
-        short = config.SPORTS_OP_MIN_LOT - so_lane
-        if pk_lane > 0:
-            return (f"Let me know if you'd like to proceed with your **Pokémon**! "
-                    f"⏳ Your **Sports/One Piece** (**${so_lane:,.2f}**) is held — that lane needs "
-                    f"**${config.SPORTS_OP_MIN_LOT:,}+** (it ships to a separate address). "
-                    f"You're **${short:,.2f}** short, so add more to include it.")
-        return (f"📊 Your **Sports & One Piece** slabs total **${so_lane:,.2f}** — the minimum for "
-                f"that lane is **${config.SPORTS_OP_MIN_LOT:,}** (it ships to a separate address, so we "
-                f"batch it). You're **${short:,.2f}** short. Add more and resubmit" + pk_invite)
+    customer-facing message listing what's missing. NO minimum lot size (everything
+    drop-ships), so a non-empty lot always qualifies — this now only catches an empty /
+    not-yet-finalized lot."""
     if qualifies(cid):
         return None
     slab_count, slab_value, singles, combined = summary(cid)

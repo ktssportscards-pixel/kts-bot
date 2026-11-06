@@ -115,17 +115,19 @@ def test_lots_shipping():
     section("lots + shipping")
     def fresh(cid): lots._lots.pop(cid, None)
 
-    fresh(1); lots.add_slab_values(1, {"a": 800}, {"a": "basketball"})
+    fresh(1); lots.add_slab_values(1, {"a": 80}, {"a": "basketball"})
     _, gave, note = shipping.compose_shipping(1)
-    check(not gave and shipping.ship_blocked_sportsop_only(1), "sportsOP<1500 held")
+    check(gave and "Doral" in note and "HELD" not in note,
+          "no minimum: a small sports-only lot still ships to Doral")
 
     fresh(2); lots.add_slab_values(2, {"a": 1200, "b": 900}, {"a": "baseball", "b": "football"})
     _, gave, note = shipping.compose_shipping(2)
-    check(gave and "Doral" in note, "sportsOP>=1500 -> Doral")
+    check(gave and "Doral" in note, "sports -> Doral")
 
-    fresh(3); lots.add_slab_values(3, {"a": 500, "b": 800}, {"a": "pokemon", "b": "basketball"})
+    fresh(3); lots.add_slab_values(3, {"a": 500, "b": 80}, {"a": "pokemon", "b": "basketball"})
     _, gave, note = shipping.compose_shipping(3)
-    check(gave and "VA" in note and "HELD" in note, "mixed: VA ships, sports held")
+    check(gave and "VA" in note and "Doral" in note and "HELD" not in note,
+          "mixed: both VA + Doral ship, no hold")
 
     fresh(4); lots.add_slab_values(4, {"a": 500}, {"a": "pokemon"})
     _, gave, note = shipping.compose_shipping(4)
@@ -135,10 +137,12 @@ def test_lots_shipping():
     _, gave, note = shipping.compose_shipping(5)
     check(gave and "default" in note, "empty -> fail open VA")
 
-    fresh(6); lots.add_slab_values(6, {"a": 800}, {"a": "basketball"})
-    check(lots.proceed_or_hold_tail(6), "proceed tail holds when short")
+    fresh(6); lots.add_slab_values(6, {"a": 80}, {"a": "basketball"})
+    check(lots.proceed_or_hold_tail(6) is None, "proceed tail clears a small lot (no minimum)")
     fresh(7); lots.add_slab_values(7, {"a": 2000}, {"a": "basketball"})
     check(lots.proceed_or_hold_tail(7) is None, "proceed tail clears when qualified")
+    fresh(8)
+    check(lots.proceed_or_hold_tail(8), "proceed tail: empty lot returns a 'not finalized' note")
     check(lots.has_lot(7) and not lots.has_lot(999), "has_lot")
 
 
