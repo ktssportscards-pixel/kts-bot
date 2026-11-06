@@ -641,16 +641,24 @@ def test_webserver_auth():
 # ── audit fixes: paid-regression, cold-quote ship, numeric-tracking tolerance, re-drop ──
 def test_audit_fixes():
     section("audit fixes")
-    # (1) record_accepted_ship must NOT regress an already-PAID owed entry of the same amount.
-    snap = {"username": "regress_ray", "comp": 300, "payout": 270, "cards": 2, "certs": {}}
+    # (1) record_accepted_ship must NOT re-queue an already-PAID card: a re-ship of the same
+    #     cards stays paid even at a CORRECTED total (cert identity, not payout total — a paid
+    #     card is settled); only a genuinely NEW card re-opens the row.
+    snap = {"username": "regress_ray", "comp": 300, "payout": 270, "cards": 2,
+            "certs": {"RR1": 150, "RR2": 150}, "cert_offers": {"RR1": 135, "RR2": 135}}
     tracking.record_accepted_ship(880, snap)
     check(tracking.mark_paid(880), "fix: owed entry created + marked paid")
     tracking.record_accepted_ship(880, snap)          # a repeat "ship" of the same lot after !paid
     owed = next(r for r in tracking.state.load("owed", list) if r["id"] == "owed_880")
-    check(owed.get("paid") is True, "fix: re-ship after paid does NOT regress to unpaid (no double-pay)")
-    tracking.record_accepted_ship(880, {**snap, "payout": 500})   # a genuinely different lot
-    owed2 = next(r for r in tracking.state.load("owed", list) if r["id"] == "owed_880")
-    check(owed2.get("paid") is False, "fix: a different-amount lot re-opens as unpaid")
+    check(owed.get("paid") is True, "fix: re-ship of the same paid cards does NOT regress to unpaid")
+    tracking.record_accepted_ship(880, {**snap, "payout": 500, "cert_offers": {"RR1": 250, "RR2": 250}})
+    check(next(r for r in tracking.state.load("owed", list) if r["id"] == "owed_880").get("paid") is True,
+          "fix: a corrected total on already-paid cards stays paid (no re-queue/overpay)")
+    tracking.record_accepted_ship(880, {"username": "regress_ray", "comp": 100, "payout": 90,
+                                        "cards": 1, "certs": {"RR3": 100}, "cert_offers": {"RR3": 90}})
+    o880 = next(r for r in tracking.state.load("owed", list) if r["id"] == "owed_880")
+    check(o880.get("paid") is False and o880.get("payout") == 90.0,
+          "fix: a genuinely new card re-opens the row as unpaid ($90)")
 
     # (1b) SAME payout but DIFFERENT certs = a new lot → must re-open as unpaid (Codex edge:
     # payout-total alone false-positived; the guard also compares the cert set).
@@ -876,6 +884,39 @@ def test_owed_accumulation():
     ship(702, {"z": 200}, {"z": 180})
     check(owed(702).get("tracking") == "1Z702BEFORE0001",
           "audit: tracking dropped during the quoted phase still reaches the owed row")
+
+    # (Q) RE-AUDIT money-critical — a PAID un-itemised card re-shipped at a CORRECTED total
+    #     must stay paid (a settled card is never re-queued — was an overpay).
+    uship(703, {"a": 100}, 100.0); tracking.mark_paid(703)
+    uship(703, {"a": 100}, 110.0)
+    check(owed(703).get("paid") is True and owed(703).get("payout") == 0.0,
+          "re-audit: corrected-total re-ship of a PAID un-itemised card stays paid (no overpay)")
+
+    # (R) RE-AUDIT money-critical — re-shipping a SUBSET of a PAID multi-cert carried lot must
+    #     not re-queue the shared card.
+    uship(704, {"a": 100, "b": 50}, 150.0); tracking.mark_paid(704)
+    uship(704, {"a": 100}, 100.0)
+    check(owed(704).get("paid") is True and owed(704).get("payout") == 0.0,
+          "re-audit: sub-lot re-ship of a PAID carried lot does NOT re-queue the shared card")
+
+    # (S) RE-AUDIT money-critical — a genuinely NEW bare-total lot must NOT be eaten by an
+    #     equal-amount PAID bare-total lot (empty cert set has no identity → booked + flagged,
+    #     never silently dropped / underpaid).
+    seed_legacy(705, {"certs": {}, "payout": 88.0, "paid": True})
+    uship(705, {}, 88.0)
+    check(owed(705).get("payout") == 88.0 and owed(705).get("paid") is False,
+          "re-audit: new bare-total lot not eaten by an equal paid lot (seller not underpaid)")
+    check(tracking._UNKNOWN in (owed(705).get("review_overlaps") or []),
+          "re-audit: an un-identifiable bare-total lot is flagged for review")
+
+    # (T) RE-AUDIT money-critical — two un-itemised lots that PARTIALLY overlap must not
+    #     double-count the shared card; the ambiguous overlap is flagged, balance left as-is.
+    uship(706, {"a": 100, "b": 50}, 150.0)
+    uship(706, {"b": 50, "c": 40}, 90.0)                     # shares b with the first lot
+    check(owed(706).get("payout") == 150.0,
+          "re-audit: partial-overlap un-itemised lots do not double-count the shared card")
+    check(tracking._UNKNOWN in (owed(706).get("review_overlaps") or []),
+          "re-audit: an ambiguous partial overlap is flagged for review")
 
 
 def main():
