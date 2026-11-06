@@ -1,0 +1,47 @@
+name: canary
+
+# A live smoke test of the deployed bot: liveness, a clean boot (no last_error), and a
+# real cert priced through /bot/price. Runs after each deploy (push to the live branch),
+# hourly as a backstop, and on demand. Needs repo secrets: BOT_API_KEY, CANARY_CERT
+# (and optionally BOT_BASE_URL). With no secrets set it still checks /health and exits 0.
+on:
+  push:
+    branches: ["bot-v2-triumph"]
+    paths: ["botv2/**"]
+  schedule:
+    - cron: "17 * * * *" # hourly backstop (catches runtime breakage, not just deploys)
+  workflow_dispatch: {}
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: python -m pip install --upgrade pip && python -m pip install -r botv2/requirements.txt
+
+      - name: Wait for the redeploy (push only)
+        if: github.event_name == 'push'
+        env:
+          BOT_BASE_URL: ${{ secrets.BOT_BASE_URL || 'https://worker-production-1175.up.railway.app' }}
+        run: |
+          # Railway redeploys on this push; wait for /health's process-start stamp to flip
+          # so we canary the NEW build, not the old one. Backstop schedule covers a miss.
+          base=$(curl -sS --max-time 15 "$BOT_BASE_URL/health" | sed -n 's/.*started //p' | tr -d '[:space:]')
+          echo "pre-deploy stamp: ${base:-<none>}"
+          for i in $(seq 1 40); do
+            sleep 15
+            cur=$(curl -sS --max-time 15 "$BOT_BASE_URL/health" | sed -n 's/.*started //p' | tr -d '[:space:]')
+            if [ -n "$cur" ] && [ "$cur" != "$base" ]; then echo "fresh deploy live: $cur"; exit 0; fi
+          done
+          echo "::warning::deploy stamp did not change in ~10m — canarying current live anyway"
+
+      - name: Canary
+        env:
+          BOT_BASE_URL: ${{ secrets.BOT_BASE_URL || 'https://worker-production-1175.up.railway.app' }}
+          BOT_API_KEY: ${{ secrets.BOT_API_KEY }}
+          CANARY_CERT: ${{ secrets.CANARY_CERT }}
+        run: python -m botv2.canary

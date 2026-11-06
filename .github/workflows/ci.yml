@@ -1,0 +1,25 @@
+name: ci
+
+# Run the botv2 offline suite on every push + PR, so a regression is caught in GitHub
+# BEFORE it ever reaches the live bot. No secrets needed — selftest runs fully mocked.
+on:
+  push:
+    paths: ["botv2/**", ".github/workflows/ci.yml"]
+  pull_request:
+    paths: ["botv2/**", ".github/workflows/ci.yml"]
+  workflow_dispatch: {}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: python -m pip install --upgrade pip && python -m pip install -r botv2/requirements.txt
+      - name: Compile
+        run: python -m py_compile botv2/*.py
+      - name: Selftest
+        run: python -m botv2.selftest
