@@ -650,6 +650,20 @@ def test_audit_fixes():
     owed2 = next(r for r in tracking.state.load("owed", list) if r["id"] == "owed_880")
     check(owed2.get("paid") is False, "fix: a different-amount lot re-opens as unpaid")
 
+    # (1b) SAME payout but DIFFERENT certs = a new lot → must re-open as unpaid (Codex edge:
+    # payout-total alone false-positived; the guard also compares the cert set).
+    tracking.record_accepted_ship(883, {"username": "edge", "comp": 300, "payout": 270,
+                                         "cards": 2, "certs": {"A": 150, "B": 150}})
+    tracking.mark_paid(883)
+    tracking.record_accepted_ship(883, {"username": "edge", "comp": 300, "payout": 270,
+                                         "cards": 2, "certs": {"A": 150, "B": 150}})   # re-ship SAME lot
+    check(next(r for r in tracking.state.load("owed", list) if r["id"] == "owed_883").get("paid") is True,
+          "fix: re-ship of the same certs+total stays paid")
+    tracking.record_accepted_ship(883, {"username": "edge", "comp": 300, "payout": 270,
+                                         "cards": 2, "certs": {"C": 135, "D": 135}})   # new certs, same total
+    check(next(r for r in tracking.state.load("owed", list) if r["id"] == "owed_883").get("paid") is False,
+          "fix: new certs at the same total re-open as unpaid (no underpay)")
+
     # (2) quoted_snapshot rebuilds a ship snapshot from the persisted ticket (cold _last_quote).
     tracking.record_quote(881, {"username": "cold_cora", "comp": 100, "payout": 90,
                                 "cards": 1, "certs": {}}, channel_name="cold_cora")

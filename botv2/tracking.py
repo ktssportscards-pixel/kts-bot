@@ -39,13 +39,16 @@ def record_accepted_ship(channel_id, snapshot: dict):
     _upsert("tickets", {**base, "id": f"tk_{channel_id}"})
     # Owed: never regress an already-PAID entry back to unpaid. A customer who says
     # "ship"/"proceed" again after Kevin ran !paid would otherwise re-queue them for a
-    # second payment. Preserve paid/paid_date when the SAME lot (same payout) is already
-    # paid; a genuinely different lot (different payout) still opens a fresh unpaid entry.
+    # second payment. Preserve paid/paid_date ONLY for a re-ship of the SAME lot — same
+    # cert SET AND same payout. A genuinely new lot (different certs, even if the payout
+    # total coincidentally matches) opens a fresh UNPAID entry so Kevin isn't underpaid.
+    # (Codex caught that payout-total alone false-positives on same-total/different-certs.)
     owed_rec = {**base, "id": f"owed_{channel_id}", "paid": False}
     existing = next((r for r in state.load("owed", list)
                      if r.get("id") == f"owed_{channel_id}"), None)
     if (existing and existing.get("paid")
-            and round(float(existing.get("payout", 0) or 0), 2) == owed_rec["payout"]):
+            and round(float(existing.get("payout", 0) or 0), 2) == owed_rec["payout"]
+            and set(existing.get("certs") or {}) == set(owed_rec["certs"] or {})):
         owed_rec["paid"] = True
         owed_rec["paid_date"] = existing.get("paid_date")
     _upsert("owed", owed_rec)
