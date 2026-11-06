@@ -167,8 +167,10 @@ def test_tracking_digest():
     d = payout_digest.build_digest()
     check("Payout digest" in d and "topguy" in d and "1Z999AA10123456784" in d, "digest content")
     check("2,070.00" in d, "digest total")
-    tracking.record_accepted_ship(10, {"username": "topguy", "payout": 1400})  # idempotent re-ship
+    tracking.record_accepted_ship(10, {"username": "topguy", "comp": 1500, "payout": 1350, "cards": 3, "certs": {"a": 1500}})  # idempotent re-ship (same lot)
     check(len(tracking.state.load("tickets", list)) == 2, "re-ship updates in place")
+    check(next(r for r in tracking.state.load("owed", list) if r["id"] == "owed_10").get("payout") == 1350.0,
+          "re-ship of the same un-itemised lot does not double the balance")
     check(tracking.mark_paid(10) and "topguy" not in payout_digest.build_digest(), "mark_paid drops from digest")
 
     # ops dashboard view: quote → ship → claim → paid lifecycle
@@ -743,6 +745,11 @@ def test_owed_accumulation():
     def ship(cid, certs, offers):     # SHIP (snapshot = that one message, as in the bot)
         tracking.record_accepted_ship(cid, snap(certs, offers))
 
+    def uship(cid, certs, payout):    # un-itemised ship: cert ids known, NO per-cert offers, explicit total
+        tracking.record_accepted_ship(cid, {"username": "acc", "comp": round(sum(certs.values()), 2),
+                                             "payout": payout, "cards": len(certs),
+                                             "certs": certs, "cert_offers": {}})
+
     def owed(cid):
         return next((r for r in tracking.state.load("owed", list) if r["id"] == f"owed_{cid}"), {})
 
@@ -845,6 +852,30 @@ def test_owed_accumulation():
     check(owed(923).get("payout") == 178.0, "no-cert legacy + itemised card keeps $88 (+$90=$178)")
     check(tracking._UNKNOWN in (owed(923).get("review_overlaps") or []),
           "no-cert legacy beside an itemised card is flagged as unverifiable")
+
+    # (N) ADVERSARIAL-AUDIT money-critical — once two un-itemised lots fold into the carried
+    #     list, re-shipping ONE sub-lot must NOT double-count it (per-lot identity).
+    uship(700, {"a": 100}, 100.0)                             # un-itemised lot (cert known, no offers)
+    uship(700, {"b": 50}, 50.0)
+    check(owed(700).get("payout") == 150.0, "audit: two distinct un-itemised lots accumulate ($150)")
+    uship(700, {"b": 50}, 50.0)                               # re-ship the SAME sub-lot
+    check(owed(700).get("payout") == 150.0,
+          "audit: re-ship of one folded un-itemised sub-lot does NOT double-count (stays $150)")
+
+    # (O) ADVERSARIAL-AUDIT — a bare-total (no-cert) re-ship on an already-itemised ticket must
+    #     NOT open a carried lot on top of the itemised cards (was: $90 itemised + $90 bare = $180).
+    quote(701, {"q": 100}, {"q": 90}); ship(701, {"q": 100}, {"q": 90})     # itemised, owed $90
+    uship(701, {}, 90.0)                                      # bare total, no certs
+    check(owed(701).get("payout") == 90.0,
+          "audit: bare-total re-ship on an itemised ticket does NOT double (stays $90)")
+
+    # (P) ADVERSARIAL-AUDIT (cosmetic) — tracking dropped in the quoted phase (before ship)
+    #     still lands on the owed row, so the Friday digest shows it.
+    quote(702, {"z": 200}, {"z": 180})
+    tracking.record_tracking(702, "1Z702BEFORE0001")         # customer posts tracking before shipping
+    ship(702, {"z": 200}, {"z": 180})
+    check(owed(702).get("tracking") == "1Z702BEFORE0001",
+          "audit: tracking dropped during the quoted phase still reaches the owed row")
 
 
 def main():

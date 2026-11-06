@@ -49,6 +49,21 @@ def _entry(offer, comp, status):
             "comp": round(float(comp or 0), 2), "status": status}
 
 
+def _carried_lots(ledger: dict) -> list:
+    """The carried bucket is a LIST of un-itemised legacy/fallback lots, each with its
+    own cert set + amount + status, so a re-ship of ONE sub-lot can be recognised
+    instead of folded into an anonymous running total (which would double-count it)."""
+    return list((ledger or {}).get(_CARRIED) or [])
+
+
+def _carried_certs(ledger: dict) -> set:
+    """Union of the cert ids across every carried lot (for overlap detection)."""
+    out = set()
+    for lot in _carried_lots(ledger):
+        out |= set(lot.get("certs") or [])
+    return out
+
+
 def _quote_entries(certs: dict, cert_offers: dict) -> dict:
     """Per-cert ledger entries for a quote (status 'quoted'). Keyed by cert; the
     offer is what we pay, the comp is the market value (display/analytics)."""
@@ -64,7 +79,7 @@ def _merge_quote(ledger: dict, entries: dict) -> tuple:
     (that would double-count the same card) and is flagged for review; a still-quoted
     cert takes the latest offer (a genuine re-quote at a new price)."""
     led = dict(ledger or {})
-    carried_certs = set((led.get(_CARRIED) or {}).get("certs") or [])
+    carried_certs = _carried_certs(led)
     review = []
     for cert, e in entries.items():
         if cert in carried_certs:
@@ -79,26 +94,35 @@ def _merge_quote(ledger: dict, entries: dict) -> tuple:
 
 def _sum_ledger(ledger: dict, statuses: tuple) -> tuple:
     """(payout, comp, cards) over ledger entries whose status is in `statuses`,
-    including the carried legacy bucket when its status qualifies."""
+    including any carried legacy lots whose status qualifies."""
     payout = comp = 0.0
     cards = 0
     for cert, e in (ledger or {}).items():
+        if cert == _CARRIED:
+            for lot in (e or []):
+                if lot.get("status") in statuses:
+                    payout += float(lot.get("offer", 0) or 0)
+                    comp += float(lot.get("comp", 0) or 0)
+                    cards += len(lot.get("certs") or []) or 1
+            continue
         if e.get("status") not in statuses:
             continue
         payout += float(e.get("offer", 0) or 0)
         comp += float(e.get("comp", 0) or 0)
-        cards += (len(e.get("certs") or []) or 1) if cert == _CARRIED else 1
+        cards += 1
     return round(payout, 2), round(comp, 2), cards
 
 
-def _project_owed(channel_id, ledger: dict, existing_owed: dict, base: dict) -> dict:
+def _project_owed(channel_id, ledger: dict, existing_owed: dict, base: dict, ticket: dict = None) -> dict:
     """Build the owed store row from the ledger: payout = the OUTSTANDING balance
-    (accepted + unpaid, plus any still-unpaid carried legacy amount). paid=True once
-    nothing is outstanding. Keeps the tracking + ship date already on the row."""
+    (accepted + unpaid, plus any still-unpaid carried legacy lots). paid=True once
+    nothing is outstanding. Keeps the tracking + ship date already on the row, falling
+    back to the ticket's tracking when none was carried (a number dropped before ship)."""
     payout, comp, cards = _sum_ledger(ledger, ("accepted",))
     accepted = {c: e for c, e in (ledger or {}).items()
                 if c != _CARRIED and e.get("status") == "accepted"}
     eo = existing_owed or {}
+    tk = ticket or {}
     row = {
         "id": f"owed_{channel_id}", "channel_id": channel_id,
         "user": base.get("user") or eo.get("user", ""),
@@ -108,7 +132,7 @@ def _project_owed(channel_id, ledger: dict, existing_owed: dict, base: dict) -> 
         "certs": {c: e["comp"] for c, e in accepted.items()},
         "cert_payout": {c: e["offer"] for c, e in accepted.items()},
         "payout": payout, "comp": comp, "cards": cards,
-        "tracking": eo.get("tracking"),
+        "tracking": eo.get("tracking") or tk.get("tracking") or (tk.get("delivery") or {}).get("number"),
     }
     row["paid_date"] = eo.get("paid_date") if row["paid"] else None
     return row
@@ -116,14 +140,14 @@ def _project_owed(channel_id, ledger: dict, existing_owed: dict, base: dict) -> 
 
 def _carried_from_legacy(existing_owed: dict) -> dict:
     """A ticket that shipped before the ledger existed has no per-cert offers. Carry
-    its EXACT owed total verbatim (never split into invented per-card prices); its
-    status mirrors whether that legacy balance was already paid."""
-    return {_CARRIED: {
+    its EXACT owed total verbatim as a single carried lot (never split into invented
+    per-card prices); its status mirrors whether that legacy balance was already paid."""
+    return {_CARRIED: [{
         "offer": round(float(existing_owed.get("payout", 0) or 0), 2),
         "comp": round(float(existing_owed.get("comp", 0) or 0), 2),
         "status": "paid" if existing_owed.get("paid") else "accepted",
         "certs": list((existing_owed.get("certs") or {}).keys()),
-    }}
+    }]}
 
 
 def _migrate_ledger(ledger: dict, existing_owed: dict) -> dict:
@@ -138,28 +162,31 @@ def _migrate_ledger(ledger: dict, existing_owed: dict) -> dict:
     return {}
 
 
-def _carried_update(ledger: dict, amount: float, certs: list, comp: float) -> None:
+def _carried_add(ledger: dict, amount: float, certs: list, comp: float) -> None:
     """Fold an UN-ITEMISED lot total (a snapshot with no per-cert offers — a legacy/
-    fallback shape) into the carried bucket. There are no per-cert offers to dedup on, so:
-    an exact re-ship of the carried lot (same total + same cert set) is left untouched
-    (keeps its paid/accepted status — no double-pay); a different lot after the carried was
-    paid reopens it; otherwise the amount accumulates onto the still-unpaid balance."""
+    fallback shape) into the carried LIST as its OWN lot, keyed by its cert set so it
+    keeps per-lot identity. An exact re-ship (same cert set + amount) of any existing
+    lot is a no-op — it never double-counts and keeps that lot's paid/accepted status;
+    a re-ship of the same cards at a corrected total replaces that still-unpaid lot;
+    a genuinely new lot (distinct cert set) is appended as accepted. This is what lets a
+    sub-lot re-ship be recognised instead of folded into an anonymous growing total."""
     amount = round(float(amount or 0), 2)
-    nc = list(certs or [])
-    cur = ledger.get(_CARRIED)
-    if cur and set(nc) == set(cur.get("certs") or []) \
-            and amount == round(float(cur.get("offer", 0) or 0), 2):
-        return                                         # idempotent re-ship → no change
-    if cur is None or cur.get("status") == "paid":     # fresh, or a new lot after payment → (re)open
-        ledger[_CARRIED] = {"offer": amount, "comp": round(float(comp or 0), 2),
-                            "status": "accepted", "certs": nc}
-    else:                                              # unpaid carried + a different total → accumulate
-        ledger[_CARRIED] = {
-            "offer": round(float(cur.get("offer", 0) or 0) + amount, 2),
-            "comp": round(float(cur.get("comp", 0) or 0) + float(comp or 0), 2),
-            "status": "accepted",
-            "certs": list(dict.fromkeys((cur.get("certs") or []) + nc)),
-        }
+    nc = sorted(set(certs or []))
+    lots = _carried_lots(ledger)
+    for lot in lots:                                   # exact re-ship of any lot → no change
+        if sorted(set(lot.get("certs") or [])) == nc \
+                and round(float(lot.get("offer", 0) or 0), 2) == amount:
+            return
+    if nc:                                             # same cards, corrected total, still unpaid → replace
+        for i, lot in enumerate(lots):
+            if sorted(set(lot.get("certs") or [])) == nc and lot.get("status") != "paid":
+                lots[i] = {"offer": amount, "comp": round(float(comp or 0), 2),
+                           "status": "accepted", "certs": nc}
+                ledger[_CARRIED] = lots
+                return
+    lots.append({"offer": amount, "comp": round(float(comp or 0), 2),
+                 "status": "accepted", "certs": nc})
+    ledger[_CARRIED] = lots
 
 
 def record_accepted_ship(channel_id, snapshot: dict):
@@ -196,7 +223,7 @@ def record_accepted_ship(channel_id, snapshot: dict):
 
     # seed any legacy balance BEFORE touching the ledger (a quote may already have done it)
     ledger = _migrate_ledger((ticket or {}).get("ledger") or {}, existing)
-    carried_certs = set((ledger.get(_CARRIED) or {}).get("certs") or [])
+    carried_certs = _carried_certs(ledger)
 
     # ship accepts every card quoted so far on the ticket (accumulated across quote msgs);
     # a quoted cert that sits inside the carried amount is dropped + flagged, never promoted
@@ -221,14 +248,19 @@ def record_accepted_ship(channel_id, snapshot: dict):
         ledger[cert] = {**e, "status": "accepted"}
 
     # a snapshot with NO per-cert offers carries only a lot TOTAL → book it un-itemised,
-    # unless the quote already itemised these cards on the ledger (then it's booked already)
-    if not new_entries and base["payout"] and not any(c in ledger for c in certs):
-        _carried_update(ledger, base["payout"], list(certs.keys()), base["comp"])
+    # unless the quote already itemised these cards on the ledger (then it's booked
+    # already). Guard: a bare total (no certs) must NOT open a carried lot on top of
+    # itemised cards already accepted/paid on this ticket — that would double the lot.
+    itemised_present = any(c != _CARRIED and e.get("status") in ("accepted", "paid")
+                           for c, e in ledger.items())
+    if (not new_entries and base["payout"] and not any(c in ledger for c in certs)
+            and not (not certs and itemised_present)):
+        _carried_add(ledger, base["payout"], list(certs.keys()), base["comp"])
 
-    # a carried amount with NO cert list can't be checked for overlap against itemised
-    # cards, so a shared card could be paid twice → flag the ticket for a manual check
-    carried = ledger.get(_CARRIED)
-    if carried and carried.get("status") != "paid" and not (carried.get("certs") or []) \
+    # a carried lot with NO cert list can't be overlap-checked against itemised cards,
+    # so a shared card could be paid twice → flag the ticket for a manual check
+    if any(lot.get("status") != "paid" and not (lot.get("certs") or [])
+           for lot in _carried_lots(ledger)) \
             and any(c != _CARRIED and e.get("status") == "accepted" for c, e in ledger.items()):
         review.append(_UNKNOWN)
 
@@ -238,7 +270,7 @@ def record_accepted_ship(channel_id, snapshot: dict):
         tk["review_overlaps"] = review
     _upsert("tickets", tk)                            # ticket = latest snapshot (payout stays the quote) + ledger
 
-    owed_rec = _project_owed(channel_id, ledger, existing, base)
+    owed_rec = _project_owed(channel_id, ledger, existing, base, ticket)
     if review:
         owed_rec["review_overlaps"] = review
         log.warning("owed ledger on channel %s needs review (overlap with a legacy "
@@ -440,11 +472,19 @@ def mark_paid(channel_id) -> bool:
     """Flip the owed entry for a channel to paid. Returns True if found. Also marks
     the ticket ledger's accepted cards as paid, so they are KEPT but can never be
     re-queued by a later re-ship or an overlapping new lot (per-cert paid state)."""
-    # 1) ledger: accepted → paid (new; retains the cards so a re-ship stays settled)
+    # 1) ledger: accepted → paid (new; retains the cards so a re-ship stays settled),
+    #    including every accepted carried lot
     for t in state.load("tickets", list):
         if t.get("id") == f"tk_{channel_id}" and t.get("ledger"):
-            led = {c: ({**e, "status": "paid"} if e.get("status") == "accepted" else e)
-                   for c, e in t["ledger"].items()}
+            led = {}
+            for c, e in t["ledger"].items():
+                if c == _CARRIED:
+                    led[c] = [{**lot, "status": "paid"} if lot.get("status") == "accepted" else lot
+                              for lot in (e or [])]
+                elif e.get("status") == "accepted":
+                    led[c] = {**e, "status": "paid"}
+                else:
+                    led[c] = e
             _upsert("tickets", {"id": f"tk_{channel_id}", "ledger": led})
             break
     # 2) owed row: unchanged external behaviour (also covers legacy rows with no ledger)
