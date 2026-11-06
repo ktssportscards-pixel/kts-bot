@@ -727,46 +727,92 @@ def test_lanes_schedule():
 
 # ── owed ACCUMULATION across unpaid lots (the Codex/portal money-ledger fix) ──────
 def test_owed_accumulation():
-    section("owed accumulation")
+    section("owed accumulation (per-cert ledger)")
 
     def snap(certs, offers):
         return {"username": "acc", "comp": round(sum(certs.values()), 2),
                 "payout": round(sum(offers.values()), 2), "cards": len(offers),
                 "certs": certs, "cert_offers": offers}
 
+    def cd(certs, offers):   # card_detail as the bot passes it to record_quote
+        return [{"cert": c, "value": certs[c], "offer": offers[c]} for c in offers]
+
+    def quote(cid, certs, offers):    # one QUOTE message (accumulates the ledger)
+        tracking.record_quote(cid, snap(certs, offers), card_detail=cd(certs, offers))
+
+    def ship(cid, certs, offers):     # SHIP (snapshot = that one message, as in the bot)
+        tracking.record_accepted_ship(cid, snap(certs, offers))
+
     def owed(cid):
         return next((r for r in tracking.state.load("owed", list) if r["id"] == f"owed_{cid}"), {})
 
-    # (1) two UNPAID lots in one ticket -> owed ADDS up (was: 2nd overwrote + lost the 1st)
-    tracking.record_accepted_ship(910, snap({"A": 150, "B": 150}, {"A": 135, "B": 135}))   # $270
-    tracking.record_accepted_ship(910, snap({"C": 100, "D": 100}, {"C": 90, "D": 90}))      # +$180, before paid
-    check(owed(910).get("payout") == 450.0 and owed(910).get("cards") == 4,
-          "accumulate: 2nd unpaid lot adds to balance ($270+$180=$450, 4 cards)")
-    # (2) identical retry -> no double-count (dedup by cert)
-    tracking.record_accepted_ship(910, snap({"A": 150, "B": 150}, {"A": 135, "B": 135}))
-    check(owed(910).get("payout") == 450.0, "accumulate: identical retry does not double-count")
-    # (3) re-quote at a changed price -> that cert's offer updates to the latest
-    tracking.record_accepted_ship(910, snap({"A": 150}, {"A": 140}))                        # A 135 -> 140 (+5)
-    check(owed(910).get("payout") == 455.0, "accumulate: re-quote updates that cert's offer (+$5)")
-    # (4) partial overlap -> only the new cert adds
-    tracking.record_accepted_ship(910, snap({"A": 150, "E": 50}, {"A": 140, "E": 45}))      # A known, E new (+45)
-    check(owed(910).get("payout") == 500.0 and owed(910).get("cards") == 5,
-          "accumulate: partial overlap adds only the new cert")
-    # (5) pay, then a NEW lot after payment -> fresh UNPAID (this lot only)
-    tracking.mark_paid(910)
-    tracking.record_accepted_ship(910, snap({"F": 200}, {"F": 180}))
-    check(owed(910).get("paid") is False and owed(910).get("payout") == 180.0,
-          "accumulate: new lot after payment -> fresh unpaid $180")
-    # (6) re-ship the SAME lot while paid -> stays paid
-    tracking.mark_paid(910)
-    tracking.record_accepted_ship(910, snap({"F": 200}, {"F": 180}))
-    check(owed(910).get("paid") is True, "accumulate: re-ship of a paid lot stays paid")
-    # (7) pre-fix owed row (no cert_payout) -> seed carries the total, then accumulates
-    tracking.state.save("owed", [r for r in tracking.state.load("owed", list) if r["id"] != "owed_911"]
-                         + [{"id": "owed_911", "channel_id": 911, "user": "old", "paid": False,
-                             "certs": {"X": 100}, "payout": 90.0, "cards": 1, "status": "accepted"}])
-    tracking.record_accepted_ship(911, snap({"Y": 100}, {"Y": 80}))
-    check(owed(911).get("payout") == 170.0, "accumulate: pre-fix row total carries + new cert adds ($90+$80)")
+    def seed_legacy(cid, row):        # a pre-ledger owed row (shipped before the ledger existed)
+        data = [r for r in tracking.state.load("owed", list) if r["id"] != f"owed_{cid}"]
+        data.append({"id": f"owed_{cid}", "channel_id": cid, "user": "old", "status": "accepted", **row})
+        tracking.state.save("owed", data)
+        tracking.state.save("tickets", [t for t in tracking.state.load("tickets", list)
+                                        if t["id"] != f"tk_{cid}"])   # ensure NO ticket ledger
+
+    # (A) Codex #3 — TWO quote messages then ONE ship books BOTH batches, even though the
+    #     ship snapshot only carries the last message (the in-memory _last_quote is replaced).
+    quote(912, {"A": 150, "B": 150}, {"A": 135, "B": 135})   # msg 1
+    quote(912, {"C": 100, "D": 100}, {"C": 90, "D": 90})     # msg 2
+    ship(912, {"C": 100, "D": 100}, {"C": 90, "D": 90})      # ship snapshot = msg 2 only
+    check(owed(912).get("payout") == 450.0 and owed(912).get("cards") == 4,
+          "two quote msgs then one ship book BOTH batches ($270+$180=$450, 4 cards)")
+
+    # (B) two unpaid SHIPS on one ticket accumulate (no prior quote → direct ship path)
+    ship(913, {"A": 150, "B": 150}, {"A": 135, "B": 135})    # $270
+    ship(913, {"C": 100}, {"C": 90})                          # +$90 before paid
+    check(owed(913).get("payout") == 360.0 and owed(913).get("cards") == 3,
+          "two unpaid ships accumulate ($360, 3 cards)")
+
+    # (C) re-quote a cert at a new price BEFORE ship → latest offer wins
+    quote(914, {"A": 150}, {"A": 135})
+    quote(914, {"A": 150}, {"A": 140})                        # same cert, re-quoted higher
+    ship(914, {"A": 150}, {"A": 140})
+    check(owed(914).get("payout") == 140.0, "re-quote before ship takes the latest offer ($140)")
+
+    # (D) Codex #1a — pay a lot, then re-ship ONE of its paid cards → stays paid, NOT re-queued
+    quote(915, {"A": 150, "B": 150}, {"A": 135, "B": 135})
+    ship(915, {"A": 150, "B": 150}, {"A": 135, "B": 135})     # owed $270
+    tracking.mark_paid(915)
+    quote(915, {"B": 150}, {"B": 135}); ship(915, {"B": 150}, {"B": 135})   # retry B alone
+    check(owed(915).get("payout") == 0.0 and owed(915).get("paid") is True,
+          "Codex#1a: re-ship a paid sub-lot does NOT re-queue it (stays $0, paid)")
+
+    # (E) Codex #1b — a partially-overlapping NEW lot after payment queues only the NEW card
+    quote(915, {"B": 150, "G": 80}, {"B": 135, "G": 72})      # B already paid, G new
+    ship(915, {"B": 150, "G": 80}, {"B": 135, "G": 72})
+    check(owed(915).get("payout") == 72.0 and owed(915).get("paid") is False
+          and owed(915).get("cards") == 1,
+          "Codex#1b: overlapping new lot after payment queues only the NEW card ($72)")
+
+    # (F) Codex #2a — legacy $100 across 3 certs: EXACT total preserved (no 99.99 split),
+    #     and a new card that collides with that un-itemised set is flagged for review
+    seed_legacy(916, {"certs": {"X": 40, "Y": 35, "Z": 25}, "payout": 100.0, "paid": False})
+    ship(916, {"Y": 35, "W": 60}, {"Y": 30, "W": 55})        # Y overlaps legacy, W new
+    check(owed(916).get("payout") == 155.0,
+          "Codex#2a: legacy $100 preserved EXACTLY + new $55 = $155 (no invented split)")
+    check("Y" in (owed(916).get("review_overlaps") or []),
+          "Codex#2a: overlapping legacy cert flagged for review (not double-counted)")
+
+    # (G) Codex #2b — legacy row with NO cert keys keeps its whole balance (was: lost)
+    seed_legacy(917, {"certs": {}, "payout": 88.0, "paid": False})
+    ship(917, {"Q": 100}, {"Q": 90})
+    check(owed(917).get("payout") == 178.0,
+          "Codex#2b: legacy row with no cert keys keeps its $88 (+$90) = $178")
+
+    # (H) legacy PAID row: a new lot owes only the new card; the paid balance is not revived
+    seed_legacy(918, {"certs": {"X": 100}, "payout": 90.0, "paid": True})
+    ship(918, {"R": 50}, {"R": 45})
+    check(owed(918).get("payout") == 45.0 and owed(918).get("paid") is False,
+          "legacy PAID row: new lot owes only the new card ($45), paid not revived")
+
+    # (I) identical retry does not double-count (dedup by cert)
+    quote(919, {"A": 150, "B": 150}, {"A": 135, "B": 135}); ship(919, {"A": 150, "B": 150}, {"A": 135, "B": 135})
+    ship(919, {"A": 150, "B": 150}, {"A": 135, "B": 135})     # identical retry
+    check(owed(919).get("payout") == 270.0, "identical retry does not double-count ($270)")
 
 
 def main():
