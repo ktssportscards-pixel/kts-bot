@@ -6,7 +6,7 @@
     "watchPatterns": ["botv2/**"]
   },
   "deploy": {
-    "startCommand": "python -m botv2.bot",
+    "startCommand": "python -m botv2",
     "healthcheckPath": "/health",
     "healthcheckTimeout": 300,
     "restartPolicyType": "ON_FAILURE",

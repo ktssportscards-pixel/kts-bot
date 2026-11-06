@@ -530,4 +530,11 @@ def run() -> None:
 
 
 if __name__ == "__main__":
-    run()
+    # Safety net for `python -m botv2.bot`: that loads this file as `__main__`, but the
+    # package (webserver, …) imports it as `botv2.bot` — a separate module with its own,
+    # never-logged-in client, so delivery posts would hit a dead client. Delegate to the
+    # package module's run() so exactly ONE client exists. Preferred entrypoint is
+    # `python -m botv2` (see botv2/__main__.py); this just keeps the old command safe.
+    from botv2.bot import run as _run
+
+    _run()
