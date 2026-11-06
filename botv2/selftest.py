@@ -450,11 +450,39 @@ def test_register_tracking():
           "tickets_with_open_tracking: carries tracking + user")
 
 
+# ── delivery: out-for-delivery intermediate stage ────────────────────────────────
+def test_delivery_ofd():
+    section("delivery out-for-delivery")
+    from botv2 import config
+    tracking.record_quote(55, {"username": "ofd_olivia", "comp": 300, "payout": 270,
+                               "cards": 1, "certs": {}}, channel_name="ofd_olivia")
+    tracking.record_tracking(55, "1Z555OFD00111222333")
+    r = tracking.mark_out_for_delivery(tracking_num="1Z555OFD00111222333")
+    check(r["found"] and r["channel_id"] == 55 and not r["already"],
+          "ofd: marks out_for_delivery (by tracking #)")
+    check(tracking.delivery_status(55)["status"] == "out_for_delivery", "ofd: status set")
+    check(tracking.mark_out_for_delivery(channel_id=55)["already"],
+          "ofd: idempotent (already out_for_delivery)")
+    # a delivered event, then a late out-for-delivery event, must NOT regress the ticket.
+    tracking.mark_delivered(channel_id=55)
+    check(tracking.delivery_status(55)["status"] == "delivered", "ofd: delivered after OFD")
+    noreg = tracking.mark_out_for_delivery(channel_id=55)
+    check(noreg["already"] and tracking.delivery_status(55)["status"] == "delivered",
+          "ofd: never regresses a delivered ticket")
+    check(not tracking.mark_out_for_delivery(tracking_num="1ZNOPE00000")["found"],
+          "ofd: unknown tracking → graceful miss")
+    m = tracking.delivery_ofd_message("ofd_olivia")
+    low = m.lower()
+    check(m and not any(w in low for w in config.CUSTOMER_FORBIDDEN_WORDS)
+          and "payout" not in low, "ofd: message is customer-safe")
+
+
 def main():
     print("botv2 selftest:")
     for t in (test_certs, test_pricing, test_lots_shipping, test_tracking_digest,
               test_payout_flow, test_vip_commands_client, test_psa_folder_guard,
-              test_alerts_status, test_analytics, test_delivery, test_register_tracking):
+              test_alerts_status, test_analytics, test_delivery, test_register_tracking,
+              test_delivery_ofd):
         t()
     if _fails:
         print(f"\nFAILED ({len(_fails)}):")

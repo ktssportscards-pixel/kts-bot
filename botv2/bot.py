@@ -144,6 +144,25 @@ async def notify_delivered(channel_id, user: str = "") -> bool:
     return posted
 
 
+async def notify_out_for_delivery(channel_id, user: str = "") -> bool:
+    """Post a customer-safe 'out for delivery today' heads-up in a ticket — ONLY if
+    config.DELIVERY_TRACKING is on (same gate as the 'arrived' post). Best-effort; never
+    raises into the web handler. No Kevin DM here (his delivery DM fires on ARRIVAL, not
+    on every out-for-delivery). Returns True iff the note actually posted."""
+    if not config.DELIVERY_TRACKING:
+        return False
+    try:
+        channel = bot.get_channel(int(channel_id)) or await bot.fetch_channel(int(channel_id))
+        await channel.send(tracking.delivery_ofd_message(user))
+        return True
+    except Exception as e:
+        print(f"[bot] notify_out_for_delivery: post failed in {channel_id}: {e}")
+        await alert_kevin("delivery_ofd",
+                          f"⚠️ delivery: couldn't post the 'out for delivery' note to channel "
+                          f"{channel_id}: {e}")
+        return False
+
+
 def _seconds_until_friday_9am_et() -> float:
     from datetime import datetime, timedelta, timezone
     try:
