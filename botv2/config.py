@@ -74,13 +74,6 @@ DELIVERY_TRACKING = os.environ.get("BOTV2_DELIVERY_TRACKING", "").lower() in ("1
 REGISTER_TRACKING = os.environ.get("BOTV2_REGISTER_TRACKING", "").lower() in ("1", "true", "yes")
 REGISTER_TRACKING_ENDPOINT = PORTAL_BASE_URL.rstrip("/") + "/bot/register-tracking"
 
-# ── Customer self-service status (!status in a ticket) ─────────────────────────
-# When ON, a customer can run `!status` in their own ticket to see their order's stage
-# (quoted → confirmed → in transit → delivered → paid) — CUSTOMER-SAFE (no buyer name,
-# no amounts; the app shows the rest). DEFAULT OFF so Kevin controls availability; with
-# it off the bot ignores `!status` entirely.
-CUSTOMER_STATUS = os.environ.get("BOTV2_CUSTOMER_STATUS", "").lower() in ("1", "true", "yes")
-
 # ── Live "lanes" board (customer-safe, auto-refreshing) ────────────────────────
 # An auto-updating pinned message in LANES_CHANNEL_ID showing which buying lanes are
 # open / filling / full during the rush — CUSTOMER-SAFE: no numbers, no dollars, no
@@ -101,7 +94,6 @@ STALE_NUDGES = os.environ.get("BOTV2_STALE_NUDGES", "").lower() in ("1", "true",
 STALE_QUOTED_DAYS = int(os.environ.get("BOTV2_STALE_QUOTED_DAYS", "5"))    # quoted, never shipped
 STALE_TRANSIT_DAYS = int(os.environ.get("BOTV2_STALE_TRANSIT_DAYS", "5"))  # shipped, not delivered
 STALE_UNPAID_DAYS = int(os.environ.get("BOTV2_STALE_UNPAID_DAYS", "3"))    # delivered, still unpaid
-
 # ── Google Sheets (buying sheets) ──────────────────────────────────────────────
 GOOGLE_CREDENTIALS_JSON = os.environ.get("GOOGLE_CREDENTIALS_JSON")
 GOOGLE_CREDENTIALS_FILE = os.environ.get(

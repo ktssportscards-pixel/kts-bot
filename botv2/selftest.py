@@ -450,39 +450,6 @@ def test_register_tracking():
           "tickets_with_open_tracking: carries tracking + user")
 
 
-# ── customer self-service status (!status): stage ladder, customer-safe ──────────
-def test_customer_status():
-    section("customer status")
-    from botv2 import config
-    # quoted: a quote-time ticket, no owed entry yet
-    tracking.record_quote(700, {"username": "stat_q", "comp": 300, "payout": 270,
-                                "cards": 2, "certs": {}}, channel_name="stat_q")
-    check("Quoted" in tracking.customer_status(700) and "🔵" in tracking.customer_status(700),
-          "status: quoted stage")
-    # confirmed: accepted (owed) but no tracking number yet
-    tracking.record_accepted_ship(701, {"username": "stat_c", "comp": 300, "payout": 270,
-                                        "cards": 1, "certs": {}})
-    check("Confirmed" in tracking.customer_status(701), "status: confirmed stage")
-    # in transit: accepted + tracking, not delivered
-    tracking.record_accepted_ship(702, {"username": "stat_t", "comp": 300, "payout": 270,
-                                        "cards": 3, "certs": {}})
-    tracking.record_tracking(702, "1Z900CU10111222333")
-    check("In transit" in tracking.customer_status(702), "status: in-transit stage")
-    # delivered
-    tracking.mark_delivered(channel_id=702)
-    check("Delivered" in tracking.customer_status(702), "status: delivered stage")
-    # paid (terminal)
-    tracking.mark_paid(702)
-    check("Paid" in tracking.customer_status(702), "status: paid stage")
-    # no order in this channel → friendly fallback
-    check("No order found" in tracking.customer_status(70999), "status: no-order case")
-    # CONFIDENTIALITY: never a buyer name / $ amount / memberMultiplier, at any stage
-    for cid in (700, 701, 702, 70999):
-        out = tracking.customer_status(cid).lower()
-        check(not any(w in out for w in config.CUSTOMER_FORBIDDEN_WORDS)
-              and "$" not in out and "membermultiplier" not in out,
-              f"status: customer-safe (channel {cid})")
-
 # ── live lanes board: customer-safe open/filling/full, NO numbers ────────────────
 def test_lanes_board():
     section("lanes board")
@@ -610,7 +577,7 @@ def main():
     for t in (test_certs, test_pricing, test_lots_shipping, test_tracking_digest,
               test_payout_flow, test_vip_commands_client, test_psa_folder_guard,
               test_alerts_status, test_analytics, test_delivery, test_register_tracking,
-              test_customer_status, test_lanes_board, test_stale_tickets, test_delivery_ofd):
+              test_lanes_board, test_stale_tickets, test_delivery_ofd):
         t()
     if _fails:
         print(f"\nFAILED ({len(_fails)}):")

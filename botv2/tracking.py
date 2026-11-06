@@ -184,62 +184,6 @@ def tickets_with_open_tracking() -> list:
     return out
 
 
-def customer_status(channel_id) -> str:
-    """A CUSTOMER-SAFE one-liner of this ticket's lifecycle stage, for a customer's own
-    `!status` in their ticket. Ladder: Quoted → Confirmed → In transit → Delivered → Paid,
-    built only from what the bot already tracks (the app shows Triumph approval). It NEVER
-    names a buyer/internal term or an amount — just the stage + generic timing."""
-    tk = next((r for r in state.load("tickets", list)
-               if r.get("id") == f"tk_{channel_id}"), None)
-    owed = next((r for r in state.load("owed", list)
-                 if r.get("id") == f"owed_{channel_id}"), None)
-    if not tk and not owed:
-        return ("🧾 No order found in this channel yet — drop your PSA/CGC cert numbers for a "
-                "quote and I'll track it from there.")
-
-    delivery = (tk or {}).get("delivery") or {}
-    tracking_num = (tk or {}).get("tracking") or delivery.get("number")
-    paid = bool(owed and owed.get("paid"))
-    delivered = delivery.get("status") == "delivered"
-    accepted = bool(owed)                       # an owed entry = the lot was confirmed
-
-    if paid:
-        stage = "paid"
-    elif delivered:
-        stage = "delivered"
-    elif accepted and tracking_num:
-        stage = "transit"
-    elif accepted:
-        stage = "confirmed"
-    else:
-        stage = "quoted"
-
-    order = ["quoted", "confirmed", "transit", "delivered", "paid"]
-    labels = {"quoted": "Quoted", "confirmed": "Confirmed", "transit": "In transit",
-              "delivered": "Delivered", "paid": "Paid"}
-    cur = order.index(stage)
-    ladder = " → ".join(
-        (("✅ " if i < cur else ("🔵 " if i == cur else "⚪ ")) + labels[k])
-        for i, k in enumerate(order))
-    tails = {
-        "quoted": "Say `ship` or `proceed` whenever you're ready to send them in.",
-        "confirmed": "Your address is set — ship them over and drop your tracking # here so I can follow it.",
-        "transit": "On its way — I'll let you know the moment it's delivered.",
-        "delivered": "Delivered and in the queue. Payouts run on Fridays.",
-        "paid": "All done — you've been paid. Thanks! 🙌",
-    }
-    cards = int((tk or owed or {}).get("cards", 0) or 0)
-    header = "📦 **Your order status**" + (f" — {cards} card{'' if cards == 1 else 's'}" if cards else "")
-    msg = f"{header}\n{ladder}\n{tails[stage]}"
-
-    # belt-and-suspenders: the text is hard-coded safe, but never let a buyer identity,
-    # internal term, or dollar amount out to a customer under any circumstance.
-    low = msg.lower()
-    if any(w in low for w in config.CUSTOMER_FORBIDDEN_WORDS) or "$" in msg:
-        return f"{header}\n{ladder}"            # stages only — guaranteed customer-safe
-    return msg
-
-
 def delivery_customer_message(user: str = "") -> str:
     """Customer-safe 'your package arrived' note for the ticket. Deliberately generic —
     no buyer name, no payout, no internal terms — and scrubbed against the forbidden
