@@ -450,11 +450,53 @@ def test_register_tracking():
           "tickets_with_open_tracking: carries tracking + user")
 
 
+# ── live lanes board: customer-safe open/filling/full, NO numbers ────────────────
+def test_lanes_board():
+    section("lanes board")
+    import re
+
+    from botv2 import config
+    mock = {"spendHidden": False, "reliability": "approximate", "categories": [
+        {"category": "basketball", "categoryLabel": "Basketball", "ranges": [{"pctFull": 20.0}]},
+        {"category": "baseball", "categoryLabel": "Baseball", "ranges": [{"pctFull": 92.0}]},
+        {"category": "onepiece", "categoryLabel": "One Piece", "ranges": [{"pctFull": 100.0}]},
+        {"category": "football", "categoryLabel": "Football", "ranges": [{"pctFull": None}]},
+    ]}
+    board = pricing.lanes_board(mock)
+
+    def line_for(lbl):
+        return next((ln for ln in board.splitlines() if lbl in ln), "")
+    check("🟢" in line_for("Basketball"), "lanes: <85% full → open 🟢")
+    check("🟡" in line_for("Baseball"), "lanes: 85-99% full → filling 🟡")
+    check("🔴" in line_for("One Piece"), "lanes: >=100% full → full 🔴")
+    check("🟢" in line_for("Football"), "lanes: unknown %-full → treated as open 🟢")
+
+    # CONFIDENTIALITY: no buyer word (esp. 'allocation'), and no number / % / $ anywhere.
+    low = board.lower()
+    check(not any(w in low for w in config.CUSTOMER_FORBIDDEN_WORDS),
+          "lanes: no forbidden word (no 'allocation'/buyer name)")
+    check(re.search(r"[0-9%$]", board) is None, "lanes: no digit, %, or $ in the customer board")
+
+    # A label that would leak a buyer name is dropped entirely; safe ones stay.
+    leaky = pricing.lanes_board({"categories": [
+        {"categoryLabel": "Triumph VIP", "ranges": [{"pctFull": 10.0}]},
+        {"categoryLabel": "Baseball", "ranges": [{"pctFull": 10.0}]}]})
+    check("triumph" not in leaky.lower() and "Baseball" in leaky,
+          "lanes: a forbidden-word label is dropped, safe ones kept")
+
+    # spendHidden → everything shows open, still no numbers.
+    hidden = pricing.lanes_board({"spendHidden": True, "categories": [
+        {"categoryLabel": "Basketball", "ranges": [{"pctFull": 99.0}]}]})
+    check("🟢" in hidden and re.search(r"[0-9%$]", hidden) is None,
+          "lanes: spendHidden → open + no numbers")
+
+
 def main():
     print("botv2 selftest:")
     for t in (test_certs, test_pricing, test_lots_shipping, test_tracking_digest,
               test_payout_flow, test_vip_commands_client, test_psa_folder_guard,
-              test_alerts_status, test_analytics, test_delivery, test_register_tracking):
+              test_alerts_status, test_analytics, test_delivery, test_register_tracking,
+              test_lanes_board):
         t()
     if _fails:
         print(f"\nFAILED ({len(_fails)}):")
