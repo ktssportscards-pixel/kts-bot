@@ -20,14 +20,21 @@ def build_digest() -> str:
     payinfo = state.load("payinfo", dict)   # load once; flag entries with no details on file
     lines = [f"💰 **Payout digest** — {len(pending)} unpaid, **${total:,.2f}** total:", ""]
     missing = 0
+    needs_review = 0
     for r in pending:
         track = f" · 📦 `{r['tracking']}`" if r.get("tracking") else " · ⏳ no tracking yet"
         pin = "" if (r.get("user") or "").lstrip("@").strip().lower() in payinfo else " · ❓ no payment info"
         if pin:
             missing += 1
+        rev = " · ⚠️ REVIEW before paying" if r.get("review_overlaps") else ""
+        if rev:
+            needs_review += 1
         lines.append(f"• **{r.get('user', '?')}** — ${float(r.get('payout', 0) or 0):,.2f} "
-                     f"({r.get('cards', 0)} cards, {r.get('date', '')}){track}{pin}")
+                     f"({r.get('cards', 0)} cards, {r.get('date', '')}){track}{pin}{rev}")
     tail = ["", "`!owe` for copy-paste payment packets · mark each paid with `!paid` in their ticket."]
+    if needs_review:
+        tail.insert(1, f"⚠️ {needs_review} need REVIEW before paying (quoted cards not confirmed "
+                       f"shipped) — check `!owe` for the certs, then `!resolve` in each ticket.")
     if missing:
         tail.insert(1, f"❓ {missing} missing payment info — `!payinfo set <name> <details>` to add.")
     lines += tail

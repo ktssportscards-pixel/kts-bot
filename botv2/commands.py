@@ -32,6 +32,7 @@ async def handle(bot, message) -> bool:
             base += ("\n\n**Admin (you):**\n"
                      "• `!adopt` — treat this channel as a ticket\n"
                      "• `!paid` — mark this ticket's lot paid\n"
+                     "• `!resolve` — clear a ticket's ⚠️ review flag after you've checked it (money unchanged)\n"
                      "• `!bands` — DM you the live allocation board\n"
                      "• `!lanes` — DM you the customer-safe lanes board (preview before it goes live)\n"
                      "• `!stats [days]` — DM you volume + payout analytics\n"
@@ -55,6 +56,18 @@ async def handle(bot, message) -> bool:
             return True
         ok = tracking.mark_paid(channel.id)
         await channel.send("✅ Marked paid." if ok else "⚠️ No owed entry for this channel.")
+        return True
+
+    if cmd == "resolve":
+        if not is_kevin:
+            return True
+        cleared = tracking.resolve_review(channel.id)
+        if cleared:
+            shown = ", ".join(str(c) for c in cleared)
+            await channel.send(f"✅ Review flag cleared for this ticket ({shown}). "
+                               f"The owed amount is unchanged — pay it when you're ready.")
+        else:
+            await channel.send("ℹ️ Nothing to resolve — this ticket has no review flag.")
         return True
 
     if cmd == "bands":

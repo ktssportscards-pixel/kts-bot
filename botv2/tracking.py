@@ -532,6 +532,24 @@ def mark_paid(channel_id) -> bool:
     return hit
 
 
+def resolve_review(channel_id) -> list:
+    """Kevin has eyeballed an ambiguous ticket — clear its review flag from BOTH the ticket
+    and the owed row. Returns the certs/markers that were cleared (empty if none), so the
+    command can confirm what it resolved. The money is untouched; this only clears the flag."""
+    cleared = []
+    for store, key in (("tickets", f"tk_{channel_id}"), ("owed", f"owed_{channel_id}")):
+        data = state.load(store, list)
+        changed = False
+        for r in data:
+            if r.get("id") == key and r.get("review_overlaps"):
+                cleared = cleared or list(r["review_overlaps"])
+                r.pop("review_overlaps", None)
+                changed = True
+        if changed:
+            state.save(store, data)
+    return cleared
+
+
 def record_quote(channel_id, snapshot: dict, channel_name: str = "",
                  card_detail: list = None) -> None:
     """Record/refresh a ticket at QUOTE time (status 'quoted') so OPEN tickets show on
@@ -685,6 +703,9 @@ def ops_view(channel_sheet: dict = None, detail: bool = False) -> list:
             "quoted_at": t.get("quoted_at"),
             "updated_at": t.get("updated_at") or t.get("quoted_at"),
         }
+        _rev = list(t.get("review_overlaps") or o.get("review_overlaps") or [])
+        row["needs_review"] = bool(_rev)       # ambiguous ticket — Kevin must eyeball before payout
+        row["review_certs"] = _rev
         if detail:
             row["card_detail"] = t.get("card_detail", [])
         rows.append(row)
@@ -777,6 +798,7 @@ def build_payment_packet(entry: dict, all_unpaid: list = None) -> str:
     key = _payinfo_key(user)
     amount = float(entry.get("payout", 0) or 0)
     info = state.load("payinfo", dict).get(key)
+    review = list(entry.get("review_overlaps") or [])
     flags = []
 
     if all_unpaid is None:
@@ -800,6 +822,16 @@ def build_payment_packet(entry: dict, all_unpaid: list = None) -> str:
              f"Amount: **${amount:,.2f}**",
              f"Memo: KTS payout — {user} — {entry.get('date', date.today().isoformat())} "
              f"({entry.get('cards', 0)} cards)"]
+    if review:                                    # ambiguous ticket — make it UNMISSABLE before paying
+        certs = [str(c) for c in review if c != _UNKNOWN]
+        bits = []
+        if certs:
+            bits.append("card(s) quoted but NOT confirmed in the final ship: " + ", ".join(certs))
+        if _UNKNOWN in review:
+            bits.append("an un-itemised legacy balance of unknown composition")
+        lines.insert(1, "⚠️ **NEEDS REVIEW before paying** — " + "; ".join(bits)
+                     + ". The amount above is the confirmed-shipped total; verify whether these "
+                       "belong, then `!resolve` in the ticket to clear this flag.")
     if info:
         lines.append(f"── details on file (updated {info.get('updated', '?')}) ──")
         lines.append(info.get("details", ""))
@@ -824,5 +856,9 @@ def build_owe_packets(user: str = None) -> str:
     unpaid.sort(key=lambda o: o.get("date", ""))
     total = sum(float(o.get("payout", 0) or 0) for o in unpaid)
     header = f"💸 **{len(unpaid)} to pay — ${total:,.2f} total** (oldest first):"
+    n_review = sum(1 for o in unpaid if o.get("review_overlaps"))
+    if n_review:
+        header += (f"\n⚠️ **{n_review} need review before paying** — flagged below "
+                   f"(quoted cards not confirmed shipped). Verify, then `!resolve` in each ticket.")
     packets = [build_payment_packet(o, all_unpaid=unpaid) for o in unpaid]
     return header + "\n\n" + "\n\n".join(packets)

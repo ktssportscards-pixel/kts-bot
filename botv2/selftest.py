@@ -951,6 +951,34 @@ def test_owed_accumulation():
     check("B" in (owed(709).get("review_overlaps") or []),
           "re-audit-4: the retracted card B is flagged for review, not silently booked")
 
+    # (X) Codex operational-gap fix — the review flag must be VISIBLE in the PAYOUT workflow
+    #     (!owe packet, Friday digest, /ops) and `!resolve` must clear it. Full quote→payout path.
+    def _snapX(certs, offers):
+        return {"username": "flagseller", "comp": round(sum(certs.values()), 2),
+                "payout": round(sum(offers.values()), 2), "cards": len(offers),
+                "certs": certs, "cert_offers": offers}
+    tracking.record_quote(710, _snapX({"FA": 100, "FB": 90}, {"FA": 90, "FB": 81}),
+                          card_detail=[{"cert": "FA", "value": 100, "offer": 90},
+                                       {"cert": "FB", "value": 90, "offer": 81}])
+    tracking.record_quote(710, _snapX({"FA": 100}, {"FA": 90}),
+                          card_detail=[{"cert": "FA", "value": 100, "offer": 90}])   # FB retracted
+    tracking.record_accepted_ship(710, _snapX({"FA": 100}, {"FA": 90}))
+    check(owed(710).get("payout") == 90.0 and "FB" in (owed(710).get("review_overlaps") or []),
+          "payout-visibility: retraction books $90 and flags FB")
+    pk = tracking.build_owe_packets("flagseller")
+    check("NEEDS REVIEW" in pk and "FB" in pk,
+          "payout-visibility: !owe packet surfaces the review flag + the flagged cert")
+    check("REVIEW before paying" in payout_digest.build_digest(),
+          "payout-visibility: the Friday digest flags ambiguous tickets")
+    opsrow = next((r for r in tracking.ops_view({}) if r["channel_id"] == 710), None)
+    check(opsrow and opsrow.get("needs_review") is True and "FB" in (opsrow.get("review_certs") or []),
+          "payout-visibility: /ops exposes needs_review + the flagged cert for the admin dashboard")
+    cleared = tracking.resolve_review(710)
+    check("FB" in cleared and owed(710).get("payout") == 90.0 and not owed(710).get("review_overlaps"),
+          "!resolve clears the flag, money unchanged ($90 still owed)")
+    check("NEEDS REVIEW" not in tracking.build_owe_packets("flagseller"),
+          "payout-visibility: after !resolve the packet no longer warns")
+
 
 def main():
     print("botv2 selftest:")
