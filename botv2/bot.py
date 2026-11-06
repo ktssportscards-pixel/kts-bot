@@ -209,6 +209,51 @@ async def _heartbeat_loop():
             await asyncio.sleep(3600)              # back off an hour, then re-arm
 
 
+async def _render_lanes_board():
+    """Fetch the lanes data + build the CUSTOMER-SAFE board, then create+pin (first time)
+    or edit-in-place a single pinned message in LANES_CHANNEL_ID. The message id is
+    persisted so restarts edit the same message instead of re-posting. No-op unless the
+    board is enabled + a channel is set."""
+    if not (config.LANES_BOARD and config.LANES_CHANNEL_ID):
+        return
+    data = await portal_client.fetch_allocation()
+    text = pricing.lanes_board(data)
+    channel = bot.get_channel(config.LANES_CHANNEL_ID) or await bot.fetch_channel(config.LANES_CHANNEL_ID)
+    st = state.load("lanes_board", dict)
+    msg = None
+    if st.get("message_id") and st.get("channel_id") == config.LANES_CHANNEL_ID:
+        try:
+            msg = await channel.fetch_message(int(st["message_id"]))
+        except Exception:
+            msg = None                                # deleted/unpinned → re-create below
+    if msg is None:
+        msg = await channel.send(text)
+        try:
+            await msg.pin()
+        except Exception as e:
+            print(f"[bot] lanes board pin failed (non-fatal): {e}")
+        state.save("lanes_board", {"message_id": msg.id, "channel_id": config.LANES_CHANNEL_ID})
+    else:
+        await msg.edit(content=text)
+
+
+async def _lanes_board_loop():
+    """Refresh the customer-safe 'lanes' board every LANES_REFRESH_MIN minutes while the
+    rush is on. Guarded like the other loops: a fetch/edit failure alerts Kevin + backs
+    off, never crashing the task. No-op unless enabled + a channel is set."""
+    if not (config.LANES_BOARD and config.LANES_CHANNEL_ID):
+        return
+    while True:
+        try:
+            await _render_lanes_board()
+            await asyncio.sleep(max(60, config.LANES_REFRESH_MIN * 60))
+        except Exception as e:
+            print(f"[bot] lanes board failed (non-fatal): {e}")
+            await alert_kevin("lanes_board", f"⚠️ lanes board refresh failed: {e} — the live "
+                              f"board in the lanes channel may be stale; check the bot.")
+            await asyncio.sleep(600)                  # back off 10 min, then re-arm
+
+
 _web_runner = None
 _digest_started = False
 
@@ -232,6 +277,8 @@ async def on_ready():
         _digest_started = True
         bot.loop.create_task(_payout_digest_loop())
         bot.loop.create_task(_heartbeat_loop())
+        if config.LANES_BOARD and config.LANES_CHANNEL_ID:
+            bot.loop.create_task(_lanes_board_loop())
     try:
         await tickets.sweep_overflow(bot)
     except Exception as e:

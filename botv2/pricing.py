@@ -242,3 +242,51 @@ def allocation_board(data: dict) -> str:
     if note:
         out.append(f"_{note}_")
     return "\n".join(out)
+
+
+def _lane_pct(c: dict):
+    """A category's peak %-full across its sub-ranges (+ the category level), or None if
+    none is known. None → treat the lane as open; NEVER invent a number."""
+    pcts = [r.get("pctFull") for r in (c.get("ranges") or []) if r.get("pctFull") is not None]
+    if c.get("pctFull") is not None:
+        pcts.append(c.get("pctFull"))
+    return max(pcts) if pcts else None
+
+
+def _scrub_customer(text: str) -> str:
+    """Belt-and-suspenders: strip any buyer-identity / forbidden word from customer text
+    (case-insensitive), so a surprise category label can never leak one."""
+    import re
+    for w in config.CUSTOMER_FORBIDDEN_WORDS:
+        text = re.sub(re.escape(w), "", text, flags=re.IGNORECASE)
+    return text
+
+
+def lanes_board(data: dict) -> str:
+    """CUSTOMER-FACING 'lanes' board: which lanes we're buying are open / filling / full,
+    with NO numbers, dollars, or percentages and NO buyer name. (allocation_board above
+    shows Kevin the real figures; THIS one must never.) Fullness → a label from the
+    category's peak %-full: < NEAR_FULL_PCT open 🟢, 85-99 filling 🟡, >=100 full 🔴.
+    spendHidden or an unknown %-full → open (never invent a number). Text is built from
+    categoryLabel only and scrubbed as a backstop; a label carrying a forbidden word is
+    dropped entirely."""
+    head = "📋 **What we're buying right now**"
+    hidden = bool(data.get("spendHidden"))
+    rows = []
+    for c in data.get("categories") or []:
+        label = (c.get("categoryLabel") or c.get("category") or "").strip()
+        if not label or any(w in label.lower() for w in config.CUSTOMER_FORBIDDEN_WORDS):
+            continue                                  # no label, or a label that'd leak → skip
+        pct = _lane_pct(c)
+        if hidden or pct is None or pct < config.NEAR_FULL_PCT:
+            icon, word = "🟢", "open"
+        elif pct >= 100:
+            icon, word = "🔴", "full for now"
+        else:
+            icon, word = "🟡", "filling fast — send soon"
+        rows.append(f"{icon} **{label}** — {word}")
+    if not rows:
+        return head + " — drop your cards in your ticket for a live quote."
+    body = "\n".join([head] + rows
+                     + ["_🟡 means that lane is filling up — drop your cards soon to lock it in._"])
+    return _scrub_customer(body)

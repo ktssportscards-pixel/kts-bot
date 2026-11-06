@@ -81,6 +81,16 @@ REGISTER_TRACKING_ENDPOINT = PORTAL_BASE_URL.rstrip("/") + "/bot/register-tracki
 # it off the bot ignores `!status` entirely.
 CUSTOMER_STATUS = os.environ.get("BOTV2_CUSTOMER_STATUS", "").lower() in ("1", "true", "yes")
 
+# ── Live "lanes" board (customer-safe, auto-refreshing) ────────────────────────
+# An auto-updating pinned message in LANES_CHANNEL_ID showing which buying lanes are
+# open / filling / full during the rush — CUSTOMER-SAFE: no numbers, no dollars, no
+# percentages, no buyer name (the Kevin-only !bands board shows the real figures; this
+# one must NOT). DEFAULT OFF, and a no-op unless BOTV2_LANES_BOARD is on AND a channel
+# id is set. Refreshes every LANES_REFRESH_MIN minutes (floored at 1).
+LANES_BOARD = os.environ.get("BOTV2_LANES_BOARD", "").lower() in ("1", "true", "yes")
+LANES_CHANNEL_ID = int(os.environ.get("BOTV2_LANES_CHANNEL_ID", "0") or "0")
+LANES_REFRESH_MIN = int(os.environ.get("BOTV2_LANES_REFRESH_MIN", "10") or "10")
+
 # ── Google Sheets (buying sheets) ──────────────────────────────────────────────
 GOOGLE_CREDENTIALS_JSON = os.environ.get("GOOGLE_CREDENTIALS_JSON")
 GOOGLE_CREDENTIALS_FILE = os.environ.get(
