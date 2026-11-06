@@ -768,13 +768,16 @@ def test_owed_accumulation():
         tracking.state.save("tickets", [t for t in tracking.state.load("tickets", list)
                                         if t["id"] != f"tk_{cid}"])   # ensure NO ticket ledger
 
-    # (A) Codex #3 — TWO quote messages then ONE ship books BOTH batches, even though the
-    #     ship snapshot only carries the last message (the in-memory _last_quote is replaced).
-    quote(912, {"A": 150, "B": 150}, {"A": 135, "B": 135})   # msg 1
-    quote(912, {"C": 100, "D": 100}, {"C": 90, "D": 90})     # msg 2
-    ship(912, {"C": 100, "D": 100}, {"C": 90, "D": 90})      # ship snapshot = msg 2 only
-    check(owed(912).get("payout") == 450.0 and owed(912).get("cards") == 4,
-          "two quote msgs then one ship book BOTH batches ($270+$180=$450, 4 cards)")
+    # (A) multi-QUOTE then one ship: only the cards in the FINAL ship snapshot are owed; a card
+    #     quoted in an earlier message but NOT in the ship is FLAGGED — never silently paid NOR
+    #     dropped (a quoted BUY can flip to PASS, so the bot must not auto-pay an unshipped quote).
+    quote(912, {"A": 150, "B": 150}, {"A": 135, "B": 135})   # msg 1 (A,B)
+    quote(912, {"C": 100, "D": 100}, {"C": 90, "D": 90})     # msg 2 (C,D)
+    ship(912, {"C": 100, "D": 100}, {"C": 90, "D": 90})      # ships C,D
+    check(owed(912).get("payout") == 180.0 and owed(912).get("cards") == 2,
+          "multi-quote then ship owes only the shipped snapshot ($180, 2 cards)")
+    check("A" in (owed(912).get("review_overlaps") or []) and "B" in (owed(912).get("review_overlaps") or []),
+          "multi-quote: earlier-quoted-but-unshipped cards are FLAGGED, not silently paid/dropped")
 
     # (B) two unpaid SHIPS on one ticket accumulate (no prior quote → direct ship path)
     ship(913, {"A": 150, "B": 150}, {"A": 135, "B": 135})    # $270
@@ -935,6 +938,18 @@ def test_owed_accumulation():
           "re-audit-3: bare total overlapping an itemised cert does not double it (stays $90)")
     check(tracking._UNKNOWN in (owed(708).get("review_overlaps") or []),
           "re-audit-3: the new card on that bare lot is flagged, not silently dropped")
+
+    # (W) RE-AUDIT-4 money-critical — a card quoted BUY then dropped from a later quote message
+    #     (it flipped PASS when its allocation band filled, so it's absent from the re-paste) must
+    #     NOT be silently promoted + paid at ship. Only the shipped snapshot is owed; the dropped
+    #     card is flagged. (Itemised path — reachable in the real multi-message quote flow.)
+    quote(709, {"A": 100, "B": 90}, {"A": 90, "B": 81})      # msg 1: A,B both BUY
+    quote(709, {"A": 100}, {"A": 90})                        # msg 2: B flipped PASS → absent
+    ship(709, {"A": 100}, {"A": 90})                         # ships only A
+    check(owed(709).get("payout") == 90.0,
+          "re-audit-4: a quoted card dropped from a later quote is NOT paid at ship (owes only $90)")
+    check("B" in (owed(709).get("review_overlaps") or []),
+          "re-audit-4: the retracted card B is flagged for review, not silently booked")
 
 
 def main():

@@ -253,9 +253,14 @@ def record_accepted_ship(channel_id, snapshot: dict):
     ledger = _migrate_ledger((ticket or {}).get("ledger") or {}, existing)
     carried_certs = _carried_certs(ledger)
 
-    # ship accepts every card quoted so far on the ticket (accumulated across quote msgs);
-    # a quoted cert that sits inside the carried amount is dropped + flagged, never promoted
-    # (overlap exclusion has to happen AT promotion, not only against this ship's new cards)
+    # ship accepts the cards in THIS ship's snapshot. A card quoted earlier (across messages)
+    # but NOT in the final ship snapshot is NOT auto-promoted: a quoted BUY can flip to PASS
+    # when its allocation band fills and the customer re-pastes a shorter lot, so promoting
+    # every lingering 'quoted' cert would OVERPAY for a card KTS declined. Instead it is FLAGGED
+    # (quoted-but-unshipped) and left quoted, so Kevin reconciles rather than the bot silently
+    # over- OR under-paying. (Already-ACCEPTED certs persist across multiple ships — a ship is a
+    # commitment, a quote is not.) A quoted cert inside the carried amount is dropped + flagged.
+    ship_certs = set(new_entries)
     for cert, e in list(ledger.items()):
         if cert == _CARRIED or e.get("status") != "quoted":
             continue
@@ -263,7 +268,10 @@ def record_accepted_ship(channel_id, snapshot: dict):
             review.append(cert)
             del ledger[cert]
             continue
-        ledger[cert] = {**e, "status": "accepted"}
+        if cert in ship_certs:
+            ledger[cert] = {**e, "status": "accepted"}   # in the final ship snapshot → accept/owe
+        else:
+            review.append(cert)                          # quoted but not shipped → flag, leave quoted (not owed)
 
     # fold in this ship's own itemised cards; a card already shipped stays locked
     for cert, e in new_entries.items():
