@@ -115,6 +115,17 @@ async def _status(req):
         "uptime_seconds": uptime,
         "counts": tracking.counts(),
         "last_error": alerts.last_error(),
+        "flags": {                                   # non-secret toggle states (NO keys/payout/margin)
+            "delivery_tracking": config.DELIVERY_TRACKING,
+            "register_tracking": config.REGISTER_TRACKING,
+            "lanes_board": config.LANES_BOARD,
+            "lanes_schedule": config.LANES_SCHEDULE,
+            "lanes_channel_id": str(config.LANES_CHANNEL_ID) if config.LANES_CHANNEL_ID else "",
+            "stale_nudges": config.STALE_NUDGES,
+            "ship_all_doral": config.SHIP_ALL_DORAL,
+            "auto_claim": config.AUTO_CLAIM,
+            "pokemon_lane_open": config.POKEMON_LANE_OPEN,
+        },
     }))
 
 

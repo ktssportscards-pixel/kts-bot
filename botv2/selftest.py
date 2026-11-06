@@ -626,6 +626,10 @@ def test_webserver_auth():
         ops = _j.loads(loop.run_until_complete(webserver._ops(_Req(key="selftestkey"))).body.decode())
         check(all(isinstance(r["channel_id"], str) for r in ops.get("tickets", []) if "channel_id" in r),
               "auth: /ops emits channel_id as a JS-safe string")
+        stat = _j.loads(loop.run_until_complete(webserver._status(_Req(key="selftestkey"))).body.decode())
+        check(isinstance(stat.get("flags"), dict) and "delivery_tracking" in stat["flags"]
+              and "ship_all_doral" in stat["flags"] and "lanes_schedule" in stat["flags"],
+              "status: non-secret flags readout present")
         cfg.BOT_API_KEY = ""                          # fails closed when no key is configured
         check(st(webserver._tickets(_Req(key="anything"))) == 401,
               "auth: fails closed when BOT_API_KEY is unset")
