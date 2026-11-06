@@ -219,13 +219,17 @@ def _carried_add(ledger: dict, amount: float, certs: list, comp: float) -> list:
 
 def record_accepted_ship(channel_id, snapshot: dict):
     """Record an accepted/shipped lot. `snapshot` = {username, comp, payout, cards,
-    certs (cert->market value), cert_offers (cert->offer)}. Promotes the ticket's
-    quoted cards to accepted, writes the 'accepted' TICKET (latest snapshot + ledger),
+    certs (cert->market value), cert_offers (cert->offer)}. Shipping accepts the FULL
+    union of still-quoted BUY cards the ticket accumulated across EVERY quote message
+    (not just this snapshot), writes the 'accepted' TICKET (latest snapshot + ledger),
     and PROJECTS the OWED row (the outstanding balance) from the ledger.
 
     The owed balance ACCUMULATES per cert across unpaid lots and NEVER re-queues a
     paid card: a second lot shipped before the first is paid adds to the balance; a
-    re-ship of a paid card, or a later lot that re-lists one, leaves it paid. A legacy
+    re-ship of a paid card, or a later lot that re-lists one, leaves it paid. A card
+    quoted BUY and never explicitly PASSed is owed even if it's absent from the final
+    message — a plain omission is NOT a withdrawal (its allocation slot was claimed at
+    quote time; an explicit re-quoted PASS already dropped it at quote time). A legacy
     owed row (no ledger) keeps its exact prior total as a carried amount and flags any
     overlapping new card for review."""
     if not snapshot:
@@ -253,14 +257,13 @@ def record_accepted_ship(channel_id, snapshot: dict):
     ledger = _migrate_ledger((ticket or {}).get("ledger") or {}, existing)
     carried_certs = _carried_certs(ledger)
 
-    # ship accepts the cards in THIS ship's snapshot. A card quoted earlier (across messages)
-    # but NOT in the final ship snapshot is NOT auto-promoted: a quoted BUY can flip to PASS
-    # when its allocation band fills and the customer re-pastes a shorter lot, so promoting
-    # every lingering 'quoted' cert would OVERPAY for a card KTS declined. Instead it is FLAGGED
-    # (quoted-but-unshipped) and left quoted, so Kevin reconciles rather than the bot silently
-    # over- OR under-paying. (Already-ACCEPTED certs persist across multiple ships — a ship is a
-    # commitment, a quote is not.) A quoted cert inside the carried amount is dropped + flagged.
-    ship_certs = set(new_entries)
+    # COMBINE-ALL-QUOTES: shipping the lot accepts the FULL union of still-quoted BUY cards the
+    # ticket accumulated across EVERY quote message — not just this message's snapshot. A card
+    # merely absent from the final message is NOT withdrawn: its allocation slot was claimed the
+    # instant it was first quoted, so a plain omission keeps it. An explicit re-quoted PASS (the
+    # portal declined a re-listed card) already removed its card at quote time. (Already-ACCEPTED
+    # certs persist across ships — a ship is a commitment.) A quoted cert sitting inside an
+    # un-itemised carried amount is dropped + flagged, since itemising it would double-count money.
     for cert, e in list(ledger.items()):
         if cert == _CARRIED or e.get("status") != "quoted":
             continue
@@ -268,10 +271,7 @@ def record_accepted_ship(channel_id, snapshot: dict):
             review.append(cert)
             del ledger[cert]
             continue
-        if cert in ship_certs:
-            ledger[cert] = {**e, "status": "accepted"}   # in the final ship snapshot → accept/owe
-        else:
-            review.append(cert)                          # quoted but not shipped → flag, leave quoted (not owed)
+        ledger[cert] = {**e, "status": "accepted"}       # every quoted BUY in the lot → accepted/owed
 
     # fold in this ship's own itemised cards; a card already shipped stays locked
     for cert, e in new_entries.items():
@@ -297,10 +297,14 @@ def record_accepted_ship(channel_id, snapshot: dict):
         review.append(_UNKNOWN)
 
     review = sorted(set(review))
-    tk = {**base, "id": f"tk_{channel_id}", "ledger": ledger}
+    # ticket totals = the WHOLE accumulated lot (ledger union), so the ops dashboard + analytics
+    # match the owed union rather than only this ship message's snapshot.
+    t_payout, t_comp, t_cards = _sum_ledger(ledger, ("quoted", "accepted", "paid"))
+    tk = {**base, "id": f"tk_{channel_id}", "ledger": ledger,
+          "comp": t_comp, "payout": t_payout, "cards": t_cards}
     if review:
         tk["review_overlaps"] = review
-    _upsert("tickets", tk)                            # ticket = latest snapshot (payout stays the quote) + ledger
+    _upsert("tickets", tk)                            # ticket = latest snapshot + union totals + ledger
 
     owed_rec = _project_owed(channel_id, ledger, existing, base, ticket)
     if review:
@@ -551,7 +555,7 @@ def resolve_review(channel_id) -> list:
 
 
 def record_quote(channel_id, snapshot: dict, channel_name: str = "",
-                 card_detail: list = None) -> None:
+                 card_detail: list = None, passed: list = None) -> None:
     """Record/refresh a ticket at QUOTE time (status 'quoted') so OPEN tickets show on
     the ops dashboard before they ship. Upserts the same id ship uses, so a later ship
     just flips it to 'accepted'; never downgrades an already-accepted ticket.
@@ -575,7 +579,42 @@ def record_quote(channel_id, snapshot: dict, channel_name: str = "",
         if c.get("cert") is not None and c.get("offer") is not None}
     ledger = _migrate_ledger((cur or {}).get("ledger") or {}, existing_owed)
     ledger, review = _merge_quote(ledger, _quote_entries(snapshot.get("certs", {}), cert_offers))
+    # An explicit PASS on a re-quote (the portal declined a card we'd quoted BUY) drops a
+    # STILL-QUOTED card from the lot. A card merely OMITTED from a later message is NOT a
+    # withdrawal (its allocation slot was claimed at quote time) — only an explicit PASS
+    # removes it; accepted/paid cards are LOCKED (a shipped card can't be un-shipped by a
+    # later PASS, and it stays in card_detail for the margin reconcile).
+    dropped = []
+    for cert in (passed or []):
+        e = ledger.get(cert)
+        if isinstance(e, dict) and e.get("status") == "quoted":
+            del ledger[cert]
+            dropped.append(cert)
     review = sorted(set(list((cur or {}).get("review_overlaps") or []) + review))
+    # card_detail is the UNION of BUY cards across quote messages, each cert exactly ONCE: the
+    # portal reconcile sums it 1:1 with NO dedup, so a cert emitted twice double-counts the card
+    # (count, paid total, and row list). Latest row wins per re-quoted cert; an explicitly-passed
+    # card is removed; a card merely omitted from this message stays booked (combine-all).
+    merged_cd = {c.get("cert"): c for c in ((cur or {}).get("card_detail") or [])
+                 if c.get("cert") is not None}
+    for c in (card_detail or []):
+        cert = c.get("cert")
+        if cert is None:
+            continue
+        led = ledger.get(cert)
+        if isinstance(led, dict) and led.get("status") in ("accepted", "paid"):
+            continue                          # a shipped/paid card is LOCKED — don't re-price its row
+        merged_cd[cert] = c
+    for cert in dropped:
+        merged_cd.pop(cert, None)
+    # The ticket's comp/payout/cards reflect the WHOLE accumulated lot (the ledger union across
+    # every quote message), not just this message — so the ops dashboard + !stats analytics match
+    # the owed union instead of under-counting a multi-message lot by its earlier messages.
+    t_payout, t_comp, t_cards = _sum_ledger(ledger, ("quoted", "accepted", "paid"))
+    if not t_payout and not t_cards:        # a bare-total quote (no per-cert ledger yet) keeps its total
+        t_payout = round(float(snapshot.get("payout", 0) or 0), 2)
+        t_comp = round(float(snapshot.get("comp", 0) or 0), 2)
+        t_cards = int(snapshot.get("cards", 0) or 0)
     rec = {
         "id": f"tk_{channel_id}",
         "channel_id": channel_id,
@@ -583,11 +622,11 @@ def record_quote(channel_id, snapshot: dict, channel_name: str = "",
         "user": snapshot.get("username", ""),
         "date": (cur or {}).get("date") or date.today().isoformat(),
         "certs": snapshot.get("certs", {}),
-        "card_detail": card_detail if card_detail is not None else (cur or {}).get("card_detail", []),
+        "card_detail": list(merged_cd.values()),
         "ledger": ledger,
-        "comp": round(float(snapshot.get("comp", 0) or 0), 2),
-        "payout": round(float(snapshot.get("payout", 0) or 0), 2),
-        "cards": int(snapshot.get("cards", 0) or 0),
+        "comp": t_comp,
+        "payout": t_payout,
+        "cards": t_cards,
         "status": status,
         "quoted_at": (cur or {}).get("quoted_at") or datetime.now().isoformat(timespec="seconds"),
         "updated_at": datetime.now().isoformat(timespec="seconds"),
@@ -826,12 +865,13 @@ def build_payment_packet(entry: dict, all_unpaid: list = None) -> str:
         certs = [str(c) for c in review if c != _UNKNOWN]
         bits = []
         if certs:
-            bits.append("card(s) quoted but NOT confirmed in the final ship: " + ", ".join(certs))
+            bits.append("card(s) that may already sit inside a legacy un-itemised balance "
+                        "(couldn't auto-verify — check they aren't double-counted): " + ", ".join(certs))
         if _UNKNOWN in review:
-            bits.append("an un-itemised legacy balance of unknown composition")
+            bits.append("a legacy un-itemised balance of unknown composition")
         lines.insert(1, "⚠️ **NEEDS REVIEW before paying** — " + "; ".join(bits)
-                     + ". The amount above is the confirmed-shipped total; verify whether these "
-                       "belong, then `!resolve` in the ticket to clear this flag.")
+                     + ". Make sure the amount above isn't double-counting a card already paid "
+                       "or already inside this balance, then `!resolve` in the ticket to clear it.")
     if info:
         lines.append(f"── details on file (updated {info.get('updated', '?')}) ──")
         lines.append(info.get("details", ""))
@@ -859,6 +899,7 @@ def build_owe_packets(user: str = None) -> str:
     n_review = sum(1 for o in unpaid if o.get("review_overlaps"))
     if n_review:
         header += (f"\n⚠️ **{n_review} need review before paying** — flagged below "
-                   f"(quoted cards not confirmed shipped). Verify, then `!resolve` in each ticket.")
+                   f"(a legacy un-itemised balance that couldn't be auto-verified). "
+                   f"Check for no double-count, then `!resolve` in each ticket.")
     packets = [build_payment_packet(o, all_unpaid=unpaid) for o in unpaid]
     return header + "\n\n" + "\n\n".join(packets)

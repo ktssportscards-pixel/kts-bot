@@ -33,8 +33,8 @@ def build_digest() -> str:
                      f"({r.get('cards', 0)} cards, {r.get('date', '')}){track}{pin}{rev}")
     tail = ["", "`!owe` for copy-paste payment packets · mark each paid with `!paid` in their ticket."]
     if needs_review:
-        tail.insert(1, f"⚠️ {needs_review} need REVIEW before paying (quoted cards not confirmed "
-                       f"shipped) — check `!owe` for the certs, then `!resolve` in each ticket.")
+        tail.insert(1, f"⚠️ {needs_review} need REVIEW before paying (a legacy un-itemised "
+                       f"balance that couldn't be auto-verified) — see `!owe`, then `!resolve`.")
     if missing:
         tail.insert(1, f"❓ {missing} missing payment info — `!payinfo set <name> <details>` to add.")
     lines += tail

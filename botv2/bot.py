@@ -516,7 +516,8 @@ async def _handle_message(message) -> None:
         card_detail=[{"cert": r.cert, "value": r.comp_value, "offer": r.offer,
                       "offer_pct": r.offer_pct, "category": r.category,
                       "grader": r.grader, "grade": r.grade, "name": (r.card_name or "")[:60]}
-                     for r in quote.accepted])
+                     for r in quote.accepted],
+        passed=[r.cert for r in quote.rejected])   # explicit PASS drops a re-quoted card (combine-all)
     proceed = lots.proceed_or_hold_tail(channel.id)
     await channel.send(pricing.customer_message(quote, proceed_override=proceed))  # instant
 

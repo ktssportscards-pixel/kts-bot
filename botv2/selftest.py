@@ -758,6 +758,12 @@ def test_owed_accumulation():
                                              "payout": payout, "cards": len(certs),
                                              "certs": certs, "cert_offers": {}})
 
+    def qpass(cid, certs, offers, passed):   # a QUOTE message that ALSO explicitly PASSes certs
+        tracking.record_quote(cid, snap(certs, offers), card_detail=cd(certs, offers), passed=passed)
+
+    def tkt(cid):
+        return next((r for r in tracking.state.load("tickets", list) if r["id"] == f"tk_{cid}"), {})
+
     def owed(cid):
         return next((r for r in tracking.state.load("owed", list) if r["id"] == f"owed_{cid}"), {})
 
@@ -768,16 +774,19 @@ def test_owed_accumulation():
         tracking.state.save("tickets", [t for t in tracking.state.load("tickets", list)
                                         if t["id"] != f"tk_{cid}"])   # ensure NO ticket ledger
 
-    # (A) multi-QUOTE then one ship: only the cards in the FINAL ship snapshot are owed; a card
-    #     quoted in an earlier message but NOT in the ship is FLAGGED — never silently paid NOR
-    #     dropped (a quoted BUY can flip to PASS, so the bot must not auto-pay an unshipped quote).
+    # (A) COMBINE-ALL-QUOTES: multiple quote messages, then one ship. EVERY BUY card across ALL
+    #     messages is owed (each once). A card merely absent from the final ship message is a
+    #     plain OMISSION, not a withdrawal (its slot was claimed at quote time) — so it is owed
+    #     and NOT flagged. (Kevin's call; confirmed by the portal reconcile contract.)
     quote(912, {"A": 150, "B": 150}, {"A": 135, "B": 135})   # msg 1 (A,B)
     quote(912, {"C": 100, "D": 100}, {"C": 90, "D": 90})     # msg 2 (C,D)
-    ship(912, {"C": 100, "D": 100}, {"C": 90, "D": 90})      # ships C,D
-    check(owed(912).get("payout") == 180.0 and owed(912).get("cards") == 2,
-          "multi-quote then ship owes only the shipped snapshot ($180, 2 cards)")
-    check("A" in (owed(912).get("review_overlaps") or []) and "B" in (owed(912).get("review_overlaps") or []),
-          "multi-quote: earlier-quoted-but-unshipped cards are FLAGGED, not silently paid/dropped")
+    ship(912, {"C": 100, "D": 100}, {"C": 90, "D": 90})      # final message ships C,D
+    check(owed(912).get("payout") == 450.0 and owed(912).get("cards") == 4,
+          "combine-all: every BUY card across all quote messages is owed ($450, 4 cards)")
+    check(not owed(912).get("review_overlaps"),
+          "combine-all: a card omitted from the final message is owed, not flagged")
+    check(tkt(912).get("payout") == 450.0 and tkt(912).get("cards") == 4,
+          "combine-all: ticket totals reflect the whole lot union (ops + !stats volume correct)")
 
     # (B) two unpaid SHIPS on one ticket accumulate (no prior quote → direct ship path)
     ship(913, {"A": 150, "B": 150}, {"A": 135, "B": 135})    # $270
@@ -939,45 +948,93 @@ def test_owed_accumulation():
     check(tracking._UNKNOWN in (owed(708).get("review_overlaps") or []),
           "re-audit-3: the new card on that bare lot is flagged, not silently dropped")
 
-    # (W) RE-AUDIT-4 money-critical — a card quoted BUY then dropped from a later quote message
-    #     (it flipped PASS when its allocation band filled, so it's absent from the re-paste) must
-    #     NOT be silently promoted + paid at ship. Only the shipped snapshot is owed; the dropped
-    #     card is flagged. (Itemised path — reachable in the real multi-message quote flow.)
+    # (W) COMBINE-ALL — a card quoted BUY then merely OMITTED from a later message is NOT a
+    #     withdrawal; it stays owed. (Only an EXPLICIT re-quoted PASS drops it — see W2.)
     quote(709, {"A": 100, "B": 90}, {"A": 90, "B": 81})      # msg 1: A,B both BUY
-    quote(709, {"A": 100}, {"A": 90})                        # msg 2: B flipped PASS → absent
-    ship(709, {"A": 100}, {"A": 90})                         # ships only A
-    check(owed(709).get("payout") == 90.0,
-          "re-audit-4: a quoted card dropped from a later quote is NOT paid at ship (owes only $90)")
-    check("B" in (owed(709).get("review_overlaps") or []),
-          "re-audit-4: the retracted card B is flagged for review, not silently booked")
+    quote(709, {"A": 100}, {"A": 90})                        # msg 2: B merely omitted (NOT passed)
+    ship(709, {"A": 100}, {"A": 90})                         # final message lists only A
+    check(owed(709).get("payout") == 171.0 and owed(709).get("cards") == 2,
+          "combine-all: a card omitted from a later message is still owed (A+B = $171)")
+    check(not owed(709).get("review_overlaps"),
+          "combine-all: a plain omission is not flagged")
 
-    # (X) Codex operational-gap fix — the review flag must be VISIBLE in the PAYOUT workflow
-    #     (!owe packet, Friday digest, /ops) and `!resolve` must clear it. Full quote→payout path.
+    # (W2) EXPLICIT PASS — a card quoted BUY then explicitly PASSed on a re-quote (portal declined
+    #     the re-listed card, e.g. its band filled) IS dropped from the lot, cleanly (not flagged).
+    quote(7091, {"A": 100, "B": 90}, {"A": 90, "B": 81})     # msg 1: A,B both BUY
+    qpass(7091, {"A": 100}, {"A": 90}, ["B"])                # msg 2: B re-listed and PASSed
+    ship(7091, {"A": 100}, {"A": 90})
+    check(owed(7091).get("payout") == 90.0 and owed(7091).get("cards") == 1,
+          "explicit PASS: a re-quoted-PASS card is dropped (owes only A = $90)")
+    check(not owed(7091).get("review_overlaps"),
+          "explicit PASS: a cleanly-passed card is not flagged")
+
+    # (X) PAYOUT-VISIBILITY — a flagged ticket must surface the flag in the !owe packet, the Friday
+    #     digest, and /ops, and `!resolve` must clear it (money untouched). Under combine-all a flag
+    #     now comes from genuine legacy/un-itemised ambiguity: here a quoted cert that sits inside a
+    #     legacy un-itemised carried balance (can't auto-verify → flag, don't double-count).
     def _snapX(certs, offers):
         return {"username": "flagseller", "comp": round(sum(certs.values()), 2),
                 "payout": round(sum(offers.values()), 2), "cards": len(offers),
                 "certs": certs, "cert_offers": offers}
-    tracking.record_quote(710, _snapX({"FA": 100, "FB": 90}, {"FA": 90, "FB": 81}),
-                          card_detail=[{"cert": "FA", "value": 100, "offer": 90},
-                                       {"cert": "FB", "value": 90, "offer": 81}])
-    tracking.record_quote(710, _snapX({"FA": 100}, {"FA": 90}),
-                          card_detail=[{"cert": "FA", "value": 100, "offer": 90}])   # FB retracted
-    tracking.record_accepted_ship(710, _snapX({"FA": 100}, {"FA": 90}))
-    check(owed(710).get("payout") == 90.0 and "FB" in (owed(710).get("review_overlaps") or []),
-          "payout-visibility: retraction books $90 and flags FB")
+    seed_legacy(710, {"certs": {"FA": 120, "FZ": 80}, "payout": 200.0, "paid": False,
+                      "user": "flagseller"})
+    tracking.record_quote(710, _snapX({"FA": 120}, {"FA": 110}))   # FA sits inside the carried $200
+    tracking.record_accepted_ship(710, _snapX({"FA": 120}, {"FA": 110}))
+    check(owed(710).get("payout") == 200.0 and "FA" in (owed(710).get("review_overlaps") or []),
+          "payout-visibility: overlapping legacy cert is flagged, exact balance preserved ($200)")
     pk = tracking.build_owe_packets("flagseller")
-    check("NEEDS REVIEW" in pk and "FB" in pk,
+    check("NEEDS REVIEW" in pk and "FA" in pk,
           "payout-visibility: !owe packet surfaces the review flag + the flagged cert")
     check("REVIEW before paying" in payout_digest.build_digest(),
           "payout-visibility: the Friday digest flags ambiguous tickets")
     opsrow = next((r for r in tracking.ops_view({}) if r["channel_id"] == 710), None)
-    check(opsrow and opsrow.get("needs_review") is True and "FB" in (opsrow.get("review_certs") or []),
+    check(opsrow and opsrow.get("needs_review") is True and "FA" in (opsrow.get("review_certs") or []),
           "payout-visibility: /ops exposes needs_review + the flagged cert for the admin dashboard")
     cleared = tracking.resolve_review(710)
-    check("FB" in cleared and owed(710).get("payout") == 90.0 and not owed(710).get("review_overlaps"),
-          "!resolve clears the flag, money unchanged ($90 still owed)")
+    check("FA" in cleared and owed(710).get("payout") == 200.0 and not owed(710).get("review_overlaps"),
+          "!resolve clears the flag, money unchanged ($200 still owed)")
     check("NEEDS REVIEW" not in tracking.build_owe_packets("flagseller"),
           "payout-visibility: after !resolve the packet no longer warns")
+
+    # (Y) UNION, NO DOUBLE-COUNT — a cert that rides in TWO quote messages is owed ONCE, and the
+    #     card_detail the portal reconciles 1:1 carries it ONCE (the portal has no dedup).
+    quote(711, {"A": 150, "B": 150}, {"A": 135, "B": 135})   # msg 1: A,B
+    quote(711, {"B": 150, "C": 100}, {"B": 135, "C": 90})    # msg 2: B re-listed, C new
+    ship(711, {"B": 150, "C": 100}, {"B": 135, "C": 90})
+    check(owed(711).get("payout") == 360.0 and owed(711).get("cards") == 3,
+          "union: a cert quoted in two messages is owed once (A,B,C = $360, 3 cards)")
+    cdY = [c for c in tkt(711).get("card_detail", []) if c.get("cert")]
+    check({c["cert"] for c in cdY} == {"A", "B", "C"} and len(cdY) == 3,
+          "union: card_detail carries each cert exactly once (no double-count for the portal)")
+    cd_sum = round(sum(float(c.get("offer", 0) or 0) for c in cdY), 2)
+    check(cd_sum == 360.0,
+          "parity: sum(card_detail.offer) == owed union ($360) — the portal's 1:1 reconcile matches")
+
+    # (Z) EXPLICIT PASS removes the card from card_detail too (the portal renders what's present,
+    #     so a passed card must not leave behind a row reconcile would still count).
+    quote(712, {"A": 100, "B": 90}, {"A": 90, "B": 81})
+    qpass(712, {"A": 100}, {"A": 90}, ["B"])
+    check({c["cert"] for c in tkt(712).get("card_detail", []) if c.get("cert")} == {"A"},
+          "explicit PASS: the passed cert is removed from card_detail too")
+
+    # (AA) OMISSION keeps the card in card_detail (a plain omission is not a withdrawal).
+    quote(713, {"A": 100, "B": 90}, {"A": 90, "B": 81})
+    quote(713, {"A": 100}, {"A": 90})                        # B omitted, NOT passed
+    check({c["cert"] for c in tkt(713).get("card_detail", []) if c.get("cert")} == {"A", "B"},
+          "omission: an omitted-but-not-passed cert stays in card_detail")
+
+    # (AB) CARD_DETAIL LOCK — re-quoting an already-SHIPPED card at a new price must NOT re-price
+    #      its card_detail row: the ledger locks accepted/paid cards, and card_detail must match so
+    #      the portal's 1:1 reconcile and analytics by_category don't drift. Parity: Σ cd.offer==owed.
+    quote(714, {"A": 150, "B": 150}, {"A": 135, "B": 135})
+    ship(714, {"A": 150, "B": 150}, {"A": 135, "B": 135})    # A,B accepted at 135 each
+    quote(714, {"A": 150}, {"A": 160})                       # re-quote the SHIPPED A at a higher price
+    cdlock = {c["cert"]: c["offer"] for c in tkt(714).get("card_detail", []) if c.get("cert")}
+    check(cdlock.get("A") == 135 and owed(714).get("payout") == 270.0,
+          "card_detail lock: a re-quoted shipped card keeps its locked offer (owed stays $270)")
+    cd_sum714 = round(sum(float(c.get("offer", 0) or 0) for c in tkt(714).get("card_detail", [])), 2)
+    check(cd_sum714 == owed(714).get("payout"),
+          "card_detail lock: Σ card_detail.offer == owed union — the portal's reconcile stays in parity")
 
 
 def main():
