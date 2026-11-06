@@ -22,24 +22,43 @@ def _cors(resp):
     return resp
 
 
+def _authed(req) -> bool:
+    """x-bot-key gate, shared by every non-public endpoint. Fails CLOSED when BOT_API_KEY
+    is unset (no key configured → deny everyone) so an endpoint can never be accidentally
+    public. Only /health is intentionally unauthenticated (Railway health-check + canary)."""
+    return bool(config.BOT_API_KEY) and req.headers.get("x-bot-key") == config.BOT_API_KEY
+
+
+def _unauthorized():
+    return web.json_response({"error": "unauthorized"}, status=401)
+
+
 async def _health(_req):
     return _cors(web.Response(
         text=f"KTS botv2 — owed/tickets endpoint OK · started {_STARTED}"))
 
 
-async def _owed(_req):
+async def _owed(req):
+    if not _authed(req):                       # was public — leaked seller names + payouts
+        return _unauthorized()
     return _cors(web.json_response(state.load("owed", list)))
 
 
-async def _tickets(_req):
+async def _tickets(req):
+    if not _authed(req):                       # was public — leaked per-card offer_pct (buy rate)
+        return _unauthorized()
     return _cors(web.json_response(state.load("tickets", list)))
 
 
-async def _leaderboard(_req):
+async def _leaderboard(req):
+    if not _authed(req):
+        return _unauthorized()
     return _cors(web.json_response(state.load("leaderboard", dict)))
 
 
-async def _links(_req):
+async def _links(req):
+    if not _authed(req):
+        return _unauthorized()
     return _cors(web.json_response(state.load("supplier_links", dict)))
 
 
@@ -47,8 +66,8 @@ async def _ops(req):
     """Consolidated per-ticket lifecycle (quote → claim → ship → owed) for the portal's
     ops dashboard. AUTHENTICATED with x-bot-key — unlike the local-tracker reads above,
     this is the full picture and must not be public."""
-    if not config.BOT_API_KEY or req.headers.get("x-bot-key") != config.BOT_API_KEY:
-        return web.json_response({"error": "unauthorized"}, status=401)
+    if not _authed(req):
+        return _unauthorized()
     from . import tracking
     detail = req.query.get("cards", "").lower() in ("1", "true", "yes")   # ?cards=1 → per-cert
     return _cors(web.json_response({"tickets": tracking.ops_view(detail=detail)}))
@@ -59,8 +78,8 @@ async def _status(req):
     live store counts (open tickets / unpaid owed), and the last failure the bot saw.
     AUTHENTICATED with x-bot-key (same gate as /ops) — it exposes internal counts, so
     it must not be public. Additive: /health stays the public liveness check."""
-    if not config.BOT_API_KEY or req.headers.get("x-bot-key") != config.BOT_API_KEY:
-        return web.json_response({"error": "unauthorized"}, status=401)
+    if not _authed(req):
+        return _unauthorized()
     from . import tracking, alerts
     try:
         started = datetime.datetime.fromisoformat(_STARTED)
@@ -79,12 +98,14 @@ async def _status(req):
 async def _analytics(req):
     """Volume + payout aggregates for the portal's analytics view. AUTHENTICATED with
     x-bot-key. VOLUME + PAYOUT ONLY — margin stays portal-side. Optional ?days=N window."""
-    if not config.BOT_API_KEY or req.headers.get("x-bot-key") != config.BOT_API_KEY:
-        return web.json_response({"error": "unauthorized"}, status=401)
+    if not _authed(req):
+        return _unauthorized()
     from . import analytics
     try:
         days = int(req.query["days"]) if req.query.get("days") else None
-    except ValueError:
+        if days is not None:
+            days = max(1, min(days, 3650))           # clamp: a huge ?days would OverflowError in timedelta
+    except (ValueError, OverflowError):
         days = None
     return _cors(web.json_response(analytics.summary(days)))
 
@@ -95,14 +116,15 @@ async def _delivery(req):
     tracked package is delivered; the bot flips the ticket to delivered and — ONLY if
     config.DELIVERY_TRACKING is on — posts a customer-safe 'arrived!' note in that
     ticket + DMs Kevin. Body: {channel_id? | tracking?, status? (out_for_delivery |
-    delivered; default delivered), delivered_at?, out_for_delivery_at?, carrier?};
+    delivered — a missing/blank/unknown status is acked + ignored, never defaulted to
+    delivered), delivered_at?, out_for_delivery_at?, carrier?};
     resolves by channel_id, else by tracking number. status 'out_for_delivery' posts a
     customer-safe 'out for delivery today' heads-up (gated, no Kevin DM); 'delivered'
     posts the 'arrived' note + DMs Kevin; any other status is acked + ignored. The bot
     holds NO carrier credentials and makes no outbound carrier calls. Always 200 on the
     delivered path (even when no ticket matches) so a webhook can't retry-storm."""
-    if not config.BOT_API_KEY or req.headers.get("x-bot-key") != config.BOT_API_KEY:
-        return web.json_response({"error": "unauthorized"}, status=401)
+    if not _authed(req):
+        return _unauthorized()
     try:
         body = await req.json()
     except Exception:
@@ -110,15 +132,24 @@ async def _delivery(req):
     if not isinstance(body, dict):                   # valid JSON but not an object (e.g. [] / null)
         return web.json_response({"error": "body must be a JSON object"}, status=400)
     from . import tracking
-    status = str(body.get("status", "delivered")).lower().replace(" ", "_")
+    # Fail CLOSED on a missing/blank status (and tolerate hyphens): a status-less webhook
+    # must NOT default to the terminal 'delivered' (that would fire a false customer
+    # 'arrived' post); unknown statuses fall through to ack+ignore below.
+    status = str(body.get("status") or "").lower().replace(" ", "_").replace("-", "_")
     channel_id = body.get("channel_id")
     tracking_num = body.get("tracking") or body.get("tracking_num") or body.get("trackingNumber")
+    if tracking_num is not None:                      # a carrier may serialize an all-digit number as a JSON int
+        tracking_num = str(tracking_num).strip() or None
     if channel_id is None and not tracking_num:
         return web.json_response({"error": "need channel_id or tracking"}, status=400)
 
     if status == "out_for_delivery":                # intermediate: the 'on the truck today' heads-up
-        res = tracking.mark_out_for_delivery(channel_id=channel_id, tracking_num=tracking_num,
-                                             at=body.get("out_for_delivery_at"))
+        try:
+            res = tracking.mark_out_for_delivery(channel_id=channel_id, tracking_num=tracking_num,
+                                                 at=body.get("out_for_delivery_at"))
+        except Exception as e:                       # never 500 → a webhook would retry-storm
+            print(f"[web] out-for-delivery mark failed (non-fatal): {e}")
+            return _cors(web.json_response({"ok": True, "stage": "out_for_delivery", "error": "mark_failed"}))
         posted = False
         if res.get("found") and not res.get("already"):
             try:
@@ -132,9 +163,13 @@ async def _delivery(req):
 
     if status != "delivered":                       # only out_for_delivery + delivered act; ack the rest
         return _cors(web.json_response({"ok": True, "ignored": status}))
-    res = tracking.mark_delivered(channel_id=channel_id, tracking_num=tracking_num,
-                                  delivered_at=body.get("delivered_at"),
-                                  carrier=body.get("carrier"))
+    try:
+        res = tracking.mark_delivered(channel_id=channel_id, tracking_num=tracking_num,
+                                      delivered_at=body.get("delivered_at"),
+                                      carrier=body.get("carrier"))
+    except Exception as e:                           # never 500 → a webhook would retry-storm
+        print(f"[web] delivery mark failed (non-fatal): {e}")
+        return _cors(web.json_response({"ok": True, "stage": "delivered", "error": "mark_failed"}))
     posted = False
     if res.get("found") and not res.get("already"):   # notify_delivered gates the customer post itself
         try:

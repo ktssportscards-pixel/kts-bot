@@ -115,9 +115,13 @@ async def handle(bot, message) -> bool:
         from . import bot as botmod                      # reuse the daily loop's digest builder
         digest = botmod._stale_digest() or \
             "✅ Stale-ticket check — nothing stuck past its thresholds right now."
-        if not config.STALE_NUDGES:
-            digest += ("\n\n_(On-demand only — the automatic daily 8am-ET nudge is OFF; "
-                       "set BOTV2_STALE_NUDGES=1 to schedule it.)_")
+        # Backtick the env var (its underscores would otherwise be eaten by Discord's
+        # `_italics_`), and positively confirm whether the daily auto-nudge is scheduled.
+        if config.STALE_NUDGES:
+            digest += "\n\n_(Daily auto-nudge is ON — you also get this automatically at 8 AM ET.)_"
+        else:
+            digest += ("\n\n(Daily auto-nudge is OFF — this ran on demand only. Set "
+                       "`BOTV2_STALE_NUDGES=1` on Railway to also get it automatically at 8 AM ET.)")
         try:
             await message.author.send(digest)
         except Exception as e:

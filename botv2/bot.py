@@ -83,7 +83,11 @@ async def _handle_ship(channel) -> None:
     msg, gave, note = shipping.compose_shipping(channel.id)
     await channel.send(msg)
     if gave:
-        tracking.record_accepted_ship(channel.id, _last_quote.get(channel.id))
+        # _last_quote is in-memory and is wiped by a redeploy; fall back to the PERSISTED
+        # quoted ticket so a cert-less "ship" right after a redeploy still books the owed
+        # entry (otherwise the shipped lot silently never enters the payout queue).
+        snap = _last_quote.get(channel.id) or tracking.quoted_snapshot(channel.id)
+        tracking.record_accepted_ship(channel.id, snap)
     await ping_kevin(f"🚚 #{channel.name} — ship: {note}")
 
 

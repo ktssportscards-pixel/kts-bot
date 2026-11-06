@@ -572,12 +572,95 @@ def test_delivery_ofd():
           and "payout" not in low, "ofd: message is customer-safe")
 
 
+# ── webserver endpoint auth (the HTTP blind spot that let the public-leak bug ship) ──
+def test_webserver_auth():
+    section("webserver auth")
+    from botv2 import webserver
+    from botv2 import config as cfg
+
+    class _Req:
+        def __init__(self, key=None, query=None, body=None):
+            self.headers = {"x-bot-key": key} if key else {}
+            self.query = query or {}
+            self._body = body
+
+        async def json(self):
+            if self._body is None:
+                raise ValueError("no body")
+            return self._body
+
+    loop = asyncio.new_event_loop()
+
+    def st(coro):
+        return loop.run_until_complete(coro).status
+
+    saved = cfg.BOT_API_KEY
+    cfg.BOT_API_KEY = "selftestkey"
+    try:
+        check(st(webserver._health(_Req())) == 200, "auth: /health stays public")
+        gated = [("owed", webserver._owed), ("tickets", webserver._tickets),
+                 ("leaderboard", webserver._leaderboard), ("links", webserver._links),
+                 ("ops", webserver._ops), ("status", webserver._status),
+                 ("analytics", webserver._analytics)]
+        for name, h in gated:
+            check(st(h(_Req())) == 401, f"auth: /{name} rejects a missing key")
+            check(st(h(_Req(key="selftestkey"))) == 200, f"auth: /{name} allows a valid key")
+        check(st(webserver._delivery(_Req(body={}))) == 401, "auth: /delivery rejects a missing key")
+        cfg.BOT_API_KEY = ""                          # fails closed when no key is configured
+        check(st(webserver._tickets(_Req(key="anything"))) == 401,
+              "auth: fails closed when BOT_API_KEY is unset")
+    finally:
+        cfg.BOT_API_KEY = saved
+        loop.close()
+
+
+# ── audit fixes: paid-regression, cold-quote ship, numeric-tracking tolerance, re-drop ──
+def test_audit_fixes():
+    section("audit fixes")
+    # (1) record_accepted_ship must NOT regress an already-PAID owed entry of the same amount.
+    snap = {"username": "regress_ray", "comp": 300, "payout": 270, "cards": 2, "certs": {}}
+    tracking.record_accepted_ship(880, snap)
+    check(tracking.mark_paid(880), "fix: owed entry created + marked paid")
+    tracking.record_accepted_ship(880, snap)          # a repeat "ship" of the same lot after !paid
+    owed = next(r for r in tracking.state.load("owed", list) if r["id"] == "owed_880")
+    check(owed.get("paid") is True, "fix: re-ship after paid does NOT regress to unpaid (no double-pay)")
+    tracking.record_accepted_ship(880, {**snap, "payout": 500})   # a genuinely different lot
+    owed2 = next(r for r in tracking.state.load("owed", list) if r["id"] == "owed_880")
+    check(owed2.get("paid") is False, "fix: a different-amount lot re-opens as unpaid")
+
+    # (2) quoted_snapshot rebuilds a ship snapshot from the persisted ticket (cold _last_quote).
+    tracking.record_quote(881, {"username": "cold_cora", "comp": 100, "payout": 90,
+                                "cards": 1, "certs": {}}, channel_name="cold_cora")
+    qs = tracking.quoted_snapshot(881)
+    check(qs and qs["payout"] == 90 and qs["username"] == "cold_cora",
+          "fix: quoted_snapshot rebuilds from the persisted ticket")
+    tracking.record_accepted_ship(881, qs)
+    check(any(r["id"] == "owed_881" for r in tracking.state.load("owed", list)),
+          "fix: cold-quote ship still books an owed entry")
+    check(tracking.quoted_snapshot(99999) is None, "fix: quoted_snapshot is None for an unknown channel")
+
+    # (3) a numeric (JSON int) tracking number must not crash carrier_of / find_channel_by_tracking.
+    check(tracking.carrier_of(123456789012) == "FedEx", "fix: carrier_of tolerates an int")
+    check(tracking.find_channel_by_tracking(999000111222) is None,
+          "fix: find_channel_by_tracking tolerates an int")
+
+    # (4) a re-drop of the SAME number must not regress an out_for_delivery sub-record.
+    tracking.record_quote(882, {"username": "ofd_oona", "comp": 50, "payout": 45,
+                                "cards": 1, "certs": {}}, channel_name="ofd_oona")
+    tracking.record_tracking(882, "1Z882SAME00111")
+    tracking.mark_out_for_delivery(channel_id=882)
+    tracking.record_tracking(882, "1Z882SAME00111")   # same number re-dropped
+    check(tracking.delivery_status(882)["status"] == "out_for_delivery",
+          "fix: same-number re-drop keeps out_for_delivery (no regress)")
+
+
 def main():
     print("botv2 selftest:")
     for t in (test_certs, test_pricing, test_lots_shipping, test_tracking_digest,
               test_payout_flow, test_vip_commands_client, test_psa_folder_guard,
               test_alerts_status, test_analytics, test_delivery, test_register_tracking,
-              test_lanes_board, test_stale_tickets, test_delivery_ofd):
+              test_lanes_board, test_stale_tickets, test_delivery_ofd,
+              test_webserver_auth, test_audit_fixes):
         t()
     if _fails:
         print(f"\nFAILED ({len(_fails)}):")

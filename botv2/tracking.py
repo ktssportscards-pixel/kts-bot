@@ -37,14 +37,38 @@ def record_accepted_ship(channel_id, snapshot: dict):
         "status": "accepted",
     }
     _upsert("tickets", {**base, "id": f"tk_{channel_id}"})
-    _upsert("owed", {**base, "id": f"owed_{channel_id}", "paid": False})
+    # Owed: never regress an already-PAID entry back to unpaid. A customer who says
+    # "ship"/"proceed" again after Kevin ran !paid would otherwise re-queue them for a
+    # second payment. Preserve paid/paid_date when the SAME lot (same payout) is already
+    # paid; a genuinely different lot (different payout) still opens a fresh unpaid entry.
+    owed_rec = {**base, "id": f"owed_{channel_id}", "paid": False}
+    existing = next((r for r in state.load("owed", list)
+                     if r.get("id") == f"owed_{channel_id}"), None)
+    if (existing and existing.get("paid")
+            and round(float(existing.get("payout", 0) or 0), 2) == owed_rec["payout"]):
+        owed_rec["paid"] = True
+        owed_rec["paid_date"] = existing.get("paid_date")
+    _upsert("owed", owed_rec)
     return base
+
+
+def quoted_snapshot(channel_id):
+    """Rebuild a ship snapshot ({username,comp,payout,cards,certs}) from the PERSISTED
+    ticket — a fallback for when the in-memory _last_quote was wiped by a redeploy, so a
+    cert-less "ship" after a redeploy still books the owed entry. None if no ticket."""
+    r = next((r for r in state.load("tickets", list)
+              if r.get("id") == f"tk_{channel_id}"), None)
+    if not r:
+        return None
+    return {"username": r.get("user", ""), "comp": r.get("comp", 0),
+            "payout": r.get("payout", 0), "cards": r.get("cards", 0),
+            "certs": r.get("certs", {})}
 
 
 def carrier_of(tracking_num: str) -> str:
     """Best-effort carrier from the tracking-number shape (display only — the real
     carrier comes from the aggregator). UPS `1Z…`, USPS 20-22 digits, FedEx 12-15."""
-    t = (tracking_num or "").strip().upper()
+    t = str(tracking_num or "").strip().upper()          # tolerate a non-str (e.g. JSON number)
     if t.startswith("1Z"):
         return "UPS"
     if t.isdigit() and 20 <= len(t) <= 22:
@@ -69,7 +93,11 @@ def record_tracking(channel_id, tracking_num: str) -> bool:
                 r["tracking"] = tracking_num
                 if store == "tickets":
                     d = r.get("delivery") or {}
-                    if not (d.get("status") == "delivered" and d.get("number") == tracking_num):
+                    # Only (re)open an in_transit record when the NUMBER actually changes.
+                    # A re-drop of the SAME number must NOT regress an out_for_delivery or
+                    # delivered sub-record back to in_transit (that would let a later scan
+                    # re-post the customer 'out for delivery'/'arrived' note a second time).
+                    if d.get("number") != tracking_num:
                         r["delivery"] = {
                             "number": tracking_num,
                             "carrier": carrier_of(tracking_num),
@@ -86,7 +114,7 @@ def record_tracking(channel_id, tracking_num: str) -> bool:
 def find_channel_by_tracking(tracking_num: str):
     """Resolve a tracking number to its ticket's channel_id (scans the tickets store),
     so the delivery webhook can act on a number alone. None if no ticket matches."""
-    num = (tracking_num or "").strip().upper()        # tracking #s are case-insensitive
+    num = str(tracking_num or "").strip().upper()     # case-insensitive; tolerate a non-str
     if not num:
         return None
     for r in state.load("tickets", list):
