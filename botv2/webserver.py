@@ -1,10 +1,11 @@
 """
-webserver — tracker sync (/owed /tickets /leaderboard /links) + /health.
+webserver — authenticated JSON endpoints for the portal + monitoring, plus /health.
 
-Binds $PORT so Railway's `web` process health-check passes (the bot must hold the
-port). Serves JSON from the state stores, which the payments / ship-accept flow
-populate. Read-only; CORS wide open (the local ticket/owed tracker is the only
-consumer). Ported from v1's owed web server.
+Binds $PORT so Railway's health-check passes (the bot holds the port). Public:
+/health only. Authenticated (x-bot-key, fails closed): /ops (portal ops dashboard),
+/status (monitoring + flags), /analytics (volume/payout), /delivery (carrier webhook
+sink). The old v1 /owed /tickets /leaderboard /links reads were removed — their only
+consumer was a retired local tracker, and the portal reads /ops instead.
 """
 import datetime
 
@@ -58,31 +59,7 @@ def _json(payload):
 
 async def _health(_req):
     return _cors(web.Response(
-        text=f"KTS botv2 — owed/tickets endpoint OK · started {_STARTED}"))
-
-
-async def _owed(req):
-    if not _authed(req):                       # was public — leaked seller names + payouts
-        return _unauthorized()
-    return _json(state.load("owed", list))
-
-
-async def _tickets(req):
-    if not _authed(req):                       # was public — leaked per-card offer_pct (buy rate)
-        return _unauthorized()
-    return _json(state.load("tickets", list))
-
-
-async def _leaderboard(req):
-    if not _authed(req):
-        return _unauthorized()
-    return _json(state.load("leaderboard", dict))
-
-
-async def _links(req):
-    if not _authed(req):
-        return _unauthorized()
-    return _json(state.load("supplier_links", dict))
+        text=f"KTS botv2 — OK · started {_STARTED}"))
 
 
 async def _ops(req):
@@ -210,10 +187,6 @@ async def start():
     app.add_routes([
         web.get("/", _health),
         web.get("/health", _health),
-        web.get("/owed", _owed),
-        web.get("/tickets", _tickets),
-        web.get("/leaderboard", _leaderboard),
-        web.get("/links", _links),
         web.get("/ops", _ops),
         web.get("/status", _status),
         web.get("/analytics", _analytics),
