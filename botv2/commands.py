@@ -33,6 +33,7 @@ async def handle(bot, message) -> bool:
                      "• `!adopt` — treat this channel as a ticket\n"
                      "• `!paid` — mark this ticket's lot paid\n"
                      "• `!bands` — DM you the live allocation board\n"
+                     "• `!lanes` — DM you the customer-safe lanes board (preview before it goes live)\n"
                      "• `!stats [days]` — DM you volume + payout analytics\n"
                      "• `!stalecheck` — DM you the stuck-ticket digest on demand (same as the daily 8am check)\n"
                      "• `!owe [user]` — DM you copy-paste payment packets for the unpaid queue\n"
@@ -78,6 +79,38 @@ async def handle(bot, message) -> bool:
         if getattr(channel, "guild", None) is not None:
             try:
                 await channel.send("📊 Allocation board sent to your DMs.")
+            except Exception:
+                pass
+        return True
+
+    if cmd == "lanes":
+        # DM Kevin a PREVIEW of the CUSTOMER-SAFE lanes board (the same render the pinned
+        # auto-board posts), so he can eyeball/tweak the look before pointing it at a
+        # customer channel. Kevin-only; the board itself carries no numbers/names.
+        if not is_kevin:
+            return True
+        from . import pricing, portal_client
+        try:
+            board = pricing.lanes_board(await portal_client.fetch_allocation())
+        except Exception as e:
+            print(f"[cmd] !lanes fetch failed: {e}")
+            board = f"⚠️ Couldn't load the lanes board: {e}"
+        preview = "👁️ **Lanes board preview** — what customers would see:\n\n" + board
+        if not (config.LANES_BOARD and config.LANES_CHANNEL_ID):
+            preview += ("\n\n(Preview only — the live auto-board is OFF. Set "
+                        "`BOTV2_LANES_BOARD=1` + `BOTV2_LANES_CHANNEL_ID=<channel id>` to post it.)")
+        try:
+            await message.author.send(preview)
+        except Exception as e:
+            print(f"[cmd] !lanes DM failed: {e}")
+            try:
+                await channel.send("⚠️ Couldn't DM you the lanes preview — open your DMs to the bot and retry.")
+            except Exception:
+                pass
+            return True
+        if getattr(channel, "guild", None) is not None:
+            try:
+                await channel.send("👁️ Lanes board preview sent to your DMs.")
             except Exception:
                 pass
         return True
