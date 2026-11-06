@@ -164,45 +164,56 @@ def _migrate_ledger(ledger: dict, existing_owed: dict) -> dict:
 
 def _carried_add(ledger: dict, amount: float, certs: list, comp: float) -> list:
     """Fold an UN-ITEMISED lot total (a snapshot with no per-cert offers — a legacy/
-    fallback shape) into the carried list, resolving by CERT IDENTITY so no card is ever
-    paid twice or silently dropped. Un-itemised lots are inherently ambiguous without
-    per-cert offers, so anything that can't be resolved cleanly is FLAGGED, never guessed:
-      * shares ANY cert with a PAID lot        → no-op (a settled card is never re-queued)
-      * exact cert set of an UNPAID lot        → no-op if same total, else replace (corrected)
-      * partially overlaps an UNPAID lot       → flag for review, leave the balance as-is
-      * disjoint from every lot, certs known   → a genuinely new lot, appended as accepted
-      * NO certs at all (bare total, no id)     → appended as accepted AND flagged for review
-    Returns a list of review tokens for the caller to surface. This is what makes the
-    un-itemised path correct-by-construction instead of a per-edge patch."""
+    fallback shape) into the carried list, resolving by CERT IDENTITY against EVERY cert
+    already booked on the ticket (itemised entries AND carried lots), so no card is ever
+    paid twice or silently dropped. Without per-cert offers a bare total can't be split,
+    so anything that can't be resolved cleanly is FLAGGED (never guessed, never dropped):
+      * cert set already fully booked (⊆ known):
+          - exact match to an UNPAID carried lot → no-op if same total, else replace (corrected)
+          - otherwise (covered by a PAID lot and/or itemised certs) → no-op (settled/booked)
+      * shares some known certs AND adds genuinely-new cards → flag (can't value the new ones)
+      * fully disjoint, certs known → a genuinely new lot, appended accepted
+          (also flagged if any existing bare lot has unknown composition — can't be sure)
+      * NO certs at all (bare total): flag only if itemised cards already carry the ticket
+          (likely a dup → no overpay); else book it + flag (never silently underpay)
+    Returns a list of review tokens for the caller to surface. Correct-by-construction:
+    every outcome is a clean identity resolution or an explicit review flag."""
     amount = round(float(amount or 0), 2)
     nc = set(certs or [])
     lots = _carried_lots(ledger)
+    itemised = {c for c in ledger if c != _CARRIED and ledger[c].get("status") in ("accepted", "paid")}
+    known = itemised | _carried_certs(ledger)          # every cert already booked on this ticket
     review = []
-    if nc:
-        for i, lot in enumerate(lots):
-            lc = set(lot.get("certs") or [])
-            if not (lc & nc):
-                continue                               # no shared card → keep looking
-            if lot.get("status") == "paid":
-                return review                          # a paid card is NEVER re-queued (full or subset overlap)
-            if lc == nc:                               # same unpaid cards
+
+    if not nc:                                         # a bare total with NO cert identity
+        if itemised:                                   # itemised cards already carry this ticket's money →
+            review.append(_UNKNOWN)                    #   likely a dup; flag, don't book (avoid overpay)
+            return review
+        lots.append({"offer": amount, "comp": round(float(comp or 0), 2),
+                     "status": "accepted", "certs": []})
+        ledger[_CARRIED] = lots                        # otherwise book it + flag (never silently drop)
+        review.append(_UNKNOWN)
+        return review
+
+    if nc & known:                                     # overlaps cards already on the ticket
+        if nc - known:                                 # ...AND adds genuinely-new cards → can't value the
+            review.append(_UNKNOWN)                    #   new ones from a bare total → flag, don't book/drop
+            return review
+        for i, lot in enumerate(lots):                 # nc ⊆ known: a re-ship of already-booked cards
+            if set(lot.get("certs") or []) == nc and lot.get("status") != "paid":
                 if round(float(lot.get("offer", 0) or 0), 2) != amount:
                     lots[i] = {"offer": amount, "comp": round(float(comp or 0), 2),
-                               "status": "accepted", "certs": sorted(nc)}   # corrected total
+                               "status": "accepted", "certs": sorted(nc)}   # corrected total, same unpaid cards
                     ledger[_CARRIED] = lots
-                return review                          # same total → idempotent no-op
-            review.append(_UNKNOWN)                    # partial overlap with an unpaid lot → ambiguous
-            return review                              # don't guess which cards are new; flag, leave as-is
-        lots.append({"offer": amount, "comp": round(float(comp or 0), 2),
-                     "status": "accepted", "certs": sorted(nc)})   # disjoint → genuinely new lot
-        ledger[_CARRIED] = lots
-        return review
-    # no cert identity at all → can't reconcile against anything; book it (never silently
-    # drop a seller's money) and flag so a possible duplicate is checked by hand
-    lots.append({"offer": amount, "comp": round(float(comp or 0), 2),
-                 "status": "accepted", "certs": []})
+                return review                          # exact unpaid match → idempotent/corrected
+        return review                                  # covered by a paid lot and/or itemised certs → settled
+
+    # fully disjoint from every known cert → a genuinely new un-itemised lot
+    if any(not (lot.get("certs") or []) for lot in lots):
+        review.append(_UNKNOWN)                        # an existing bare lot's composition is unknown →
+    lots.append({"offer": amount, "comp": round(float(comp or 0), 2),   #   can't be sure this is really new
+                 "status": "accepted", "certs": sorted(nc)})
     ledger[_CARRIED] = lots
-    review.append(_UNKNOWN)
     return review
 
 
@@ -264,14 +275,10 @@ def record_accepted_ship(channel_id, snapshot: dict):
             continue                                  # locked once shipped — no re-queue, no re-price
         ledger[cert] = {**e, "status": "accepted"}
 
-    # a snapshot with NO per-cert offers carries only a lot TOTAL → book it un-itemised,
-    # unless the quote already itemised these cards on the ledger (then it's booked
-    # already). Guard: a bare total (no certs) must NOT open a carried lot on top of
-    # itemised cards already accepted/paid on this ticket — that would double the lot.
-    itemised_present = any(c != _CARRIED and e.get("status") in ("accepted", "paid")
-                           for c, e in ledger.items())
-    if (not new_entries and base["payout"] and not any(c in ledger for c in certs)
-            and not (not certs and itemised_present)):
+    # a snapshot with NO per-cert offers carries only a lot TOTAL → hand it to _carried_add,
+    # which resolves it against every cert already booked on the ticket (itemised + carried)
+    # by identity, or flags it when a bare total can't be reconciled (see its docstring)
+    if not new_entries and base["payout"]:
         review.extend(_carried_add(ledger, base["payout"], list(certs.keys()), base["comp"]))
 
     # a carried lot with NO cert list can't be overlap-checked against itemised cards,

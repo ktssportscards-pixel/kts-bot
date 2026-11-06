@@ -918,6 +918,24 @@ def test_owed_accumulation():
     check(tracking._UNKNOWN in (owed(706).get("review_overlaps") or []),
           "re-audit: an ambiguous partial overlap is flagged for review")
 
+    # (U) RE-AUDIT-3 money-critical — a SUPERSET un-itemised re-ship (shares a PAID card, adds a
+    #     NEW one) must not re-queue the paid card NOR silently drop the new one → flag it.
+    uship(707, {"a": 100}, 100.0); tracking.mark_paid(707)
+    uship(707, {"a": 100, "b": 50}, 150.0)                   # 'a' paid, 'b' genuinely new
+    check(owed(707).get("paid") is True and owed(707).get("payout") == 0.0,
+          "re-audit-3: superset over a PAID card books nothing automatically (no overpay)")
+    check(tracking._UNKNOWN in (owed(707).get("review_overlaps") or []),
+          "re-audit-3: the new card riding on a paid card is FLAGGED, not silently dropped")
+
+    # (V) RE-AUDIT-3 — a bare-total un-itemised ship that lists an already-ITEMISED cert plus a
+    #     new one must not double the itemised card nor silently drop the new one → flag it.
+    quote(708, {"a": 100}, {"a": 90}); ship(708, {"a": 100}, {"a": 90})   # itemised, 'a' accepted, owed $90
+    uship(708, {"a": 100, "b": 50}, 150.0)                   # bare total lists itemised 'a' + new 'b'
+    check(owed(708).get("payout") == 90.0,
+          "re-audit-3: bare total overlapping an itemised cert does not double it (stays $90)")
+    check(tracking._UNKNOWN in (owed(708).get("review_overlaps") or []),
+          "re-audit-3: the new card on that bare lot is flagged, not silently dropped")
+
 
 def main():
     print("botv2 selftest:")
