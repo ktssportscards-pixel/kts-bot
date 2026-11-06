@@ -5,6 +5,10 @@ Source of truth: `botv2/webserver.py`. The bot's web server runs on the Railway 
 Every endpoint except `/health` requires `x-bot-key` and **fails closed** (401) if `BOT_API_KEY`
 is unset. Snowflake ids (`channel_id`, `message_id`) are always emitted as **JSON strings**.
 
+**Actually called by the portal today: only `/ops` + `/delivery`.** `/status` + `/analytics` are authed and
+**available** but not called portal-side right now (monitoring/handy — e.g. the portal could read
+`/status.flags` later). `/health` is for Railway's health-check + the bot's own canary, not the portal.
+
 ---
 ## GET /health  — PUBLIC
 Liveness for the Railway health-check + the canary. Returns text `KTS botv2 — OK · started <ISO>`.

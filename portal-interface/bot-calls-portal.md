@@ -14,7 +14,7 @@ Prices certs against Triumph's scanner. The decision is authoritative (already r
 **Response:** `{ "rows": [ <row>, … ], "customerMatched": <bool> }`
 
 Each **row** the bot reads (`PricedRow`): `certId`, `grader`, `grade`, `cardTitle`, `imageUrl`,
-`category`, `marketValue`, `lastSale`, `value`, `valueBasis`, `offerPct`, `status`,
+`category`, `categoryLabel`, `band`, `marketValue`, `lastSale`, `value`, `valueBasis`, `offerPct`, `status`,
 `rejectionReason`, `clConfidence`, `decision` (`BUY`|`PASS`), `offer`, `reason`, `error`, `vip`,
 `nearFull` (bool), `pctFull` (number).
 
@@ -29,6 +29,9 @@ kill switch AND the bot's `BOTV2_AUTO_CLAIM` must both be on, else every row com
 **Request:** `{ "certs": ["<cert>", …] (≤200), "idempotencyKey"?: "<channel id>" }`
 **Response:** `{ "enabled": <bool>, "results": [ { "certId", "claimed", "alreadyClaimed", "removed", "skipped", "error", "idempotent" }, … ] }`
 Idempotent on (key, certId). PASS certs → `skipped`. `/bot/unclaim` is the kill-switch undo.
+**Note:** the portal's actual Triumph claim WRITE (`pricing.claimCert`) is still stubbed/inert pending the
+Saturday capture — so even fully gated-on, no real reservation fires yet (the "reserve a slot" behavior is
+not live; see `open-items.md` → auto-submit).
 
 ---
 ## GET /bot/allocation
