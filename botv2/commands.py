@@ -28,6 +28,8 @@ async def handle(bot, message) -> bool:
         base = ("**KTS bot**\n"
                 "• Drop your PSA/CGC cert numbers → instant quote\n"
                 "• `ship` or `proceed` → shipping address once your lot's set")
+        if config.CUSTOMER_STATUS:
+            base += "\n• `!status` → check your order's status anytime"
         if is_kevin:
             base += ("\n\n**Admin (you):**\n"
                      "• `!adopt` — treat this channel as a ticket\n"
@@ -196,6 +198,18 @@ async def handle(bot, message) -> bool:
                 + (f" — {fail} failed (see logs)" if fail else "") + "." + gate)
         except Exception:
             pass
+        return True
+
+    if cmd == "status":
+        # CUSTOMER-FACING self-service: a customer checks their OWN order's stage in their
+        # ticket. Gated by config.CUSTOMER_STATUS so Kevin controls availability; the reply
+        # is customer-safe (tracking.customer_status scrubs any buyer name / amount). Fail-soft.
+        if not config.CUSTOMER_STATUS:
+            return True                         # feature off → swallow quietly, post nothing
+        try:
+            await channel.send(tracking.customer_status(channel.id))
+        except Exception as e:
+            print(f"[cmd] !status failed (non-fatal): {e}")
         return True
 
     return False   # unknown command → fall through (normal processing ignores it)

@@ -74,6 +74,13 @@ DELIVERY_TRACKING = os.environ.get("BOTV2_DELIVERY_TRACKING", "").lower() in ("1
 REGISTER_TRACKING = os.environ.get("BOTV2_REGISTER_TRACKING", "").lower() in ("1", "true", "yes")
 REGISTER_TRACKING_ENDPOINT = PORTAL_BASE_URL.rstrip("/") + "/bot/register-tracking"
 
+# ── Customer self-service status (!status in a ticket) ─────────────────────────
+# When ON, a customer can run `!status` in their own ticket to see their order's stage
+# (quoted → confirmed → in transit → delivered → paid) — CUSTOMER-SAFE (no buyer name,
+# no amounts; the app shows the rest). DEFAULT OFF so Kevin controls availability; with
+# it off the bot ignores `!status` entirely.
+CUSTOMER_STATUS = os.environ.get("BOTV2_CUSTOMER_STATUS", "").lower() in ("1", "true", "yes")
+
 # ── Google Sheets (buying sheets) ──────────────────────────────────────────────
 GOOGLE_CREDENTIALS_JSON = os.environ.get("GOOGLE_CREDENTIALS_JSON")
 GOOGLE_CREDENTIALS_FILE = os.environ.get(
