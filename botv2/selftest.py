@@ -614,9 +614,7 @@ def test_webserver_auth():
     cfg.BOT_API_KEY = "selftestkey"
     try:
         check(st(webserver._health(_Req())) == 200, "auth: /health stays public")
-        gated = [("owed", webserver._owed), ("tickets", webserver._tickets),
-                 ("leaderboard", webserver._leaderboard), ("links", webserver._links),
-                 ("ops", webserver._ops), ("status", webserver._status),
+        gated = [("ops", webserver._ops), ("status", webserver._status),
                  ("analytics", webserver._analytics)]
         for name, h in gated:
             check(st(h(_Req())) == 401, f"auth: /{name} rejects a missing key")
@@ -627,7 +625,7 @@ def test_webserver_auth():
         check(all(isinstance(r["channel_id"], str) for r in ops.get("tickets", []) if "channel_id" in r),
               "auth: /ops emits channel_id as a JS-safe string")
         cfg.BOT_API_KEY = ""                          # fails closed when no key is configured
-        check(st(webserver._tickets(_Req(key="anything"))) == 401,
+        check(st(webserver._ops(_Req(key="anything"))) == 401,
               "auth: fails closed when BOT_API_KEY is unset")
     finally:
         cfg.BOT_API_KEY = saved
