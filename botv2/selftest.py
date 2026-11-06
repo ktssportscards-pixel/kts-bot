@@ -450,11 +450,68 @@ def test_register_tracking():
           "tickets_with_open_tracking: carries tracking + user")
 
 
+# ── stale-ticket nudges: pure stale_tickets(today) bucketing ─────────────────────
+def test_stale_tickets():
+    section("stale-ticket nudges")
+    from datetime import date, timedelta
+    from botv2 import config
+    anchor = date(2026, 6, 15)
+
+    def ago(n):
+        return (anchor - timedelta(days=n)).isoformat()
+
+    tks = tracking.state.load("tickets", list)
+    owd = tracking.state.load("owed", list)
+
+    def add_ticket(cid, user, qdays, delivered_ago=None, tracking_num=None):
+        rec = {"id": f"tk_{cid}", "channel_id": cid, "user": user,
+               "status": "accepted" if (delivered_ago is not None or tracking_num) else "quoted",
+               "date": ago(qdays), "quoted_at": ago(qdays) + "T12:00:00"}
+        if delivered_ago is not None:
+            rec["delivery"] = {"number": tracking_num or "", "status": "delivered",
+                               "delivered_at": ago(delivered_ago) + "T12:00:00"}
+        elif tracking_num:
+            rec["delivery"] = {"number": tracking_num, "status": "in_transit", "delivered_at": None}
+        tks.append(rec)
+
+    def add_owed(cid, user, shipdays, paid=False):
+        owd.append({"id": f"owed_{cid}", "channel_id": cid, "user": user,
+                    "date": ago(shipdays), "payout": 100.0, "paid": paid})
+
+    # UNIQUE channel ids (970-976) + membership asserts, so other suites' seeded data
+    # (dated ~today, which is in the FUTURE relative to the 2026-06-15 anchor) can't interfere.
+    add_ticket(970, "qstale", 10)                                                       # quoted 10d, no owed
+    add_ticket(971, "qfresh", 2)                                                        # quoted 2d
+    add_ticket(972, "tstale", 8, tracking_num="1ZT972"); add_owed(972, "tstale", 8)     # shipped 8d, in transit
+    add_ticket(973, "tfresh", 1, tracking_num="1ZT973"); add_owed(973, "tfresh", 1)     # shipped 1d, in transit
+    add_ticket(974, "ustale", 9, delivered_ago=5, tracking_num="1ZU974"); add_owed(974, "ustale", 9)  # delivered 5d, unpaid
+    add_ticket(975, "dpaid", 9, delivered_ago=5, tracking_num="1ZU975"); add_owed(975, "dpaid", 9, paid=True)  # delivered + PAID
+    add_ticket(976, "dfresh", 9, delivered_ago=1, tracking_num="1ZU976"); add_owed(976, "dfresh", 9)  # delivered 1d, unpaid
+
+    tracking.state.save("tickets", tks)
+    tracking.state.save("owed", owd)
+
+    res = tracking.stale_tickets(anchor)
+    q = {x["channel_id"] for x in res["quoted_stale"]}
+    tr = {x["channel_id"] for x in res["transit_stale"]}
+    up = {x["channel_id"] for x in res["unpaid_stale"]}
+    check(970 in q and 971 not in q, "stale: quoted-stale flagged, fresh quote excluded")
+    check(972 in tr and 973 not in tr, "stale: transit-stale flagged, fresh transit excluded")
+    check(974 in up and 975 not in up and 976 not in up,
+          "stale: delivered-unpaid flagged; paid + fresh excluded")
+    check(974 not in tr and 972 not in up, "stale: buckets mutually exclusive (delivered vs transit)")
+    item = next((x for x in res["quoted_stale"] if x["channel_id"] == 970), None)
+    check(item and item["days"] == 10 and item["user"] == "qstale",
+          "stale: item carries user + days-stuck")
+    _ = config.STALE_QUOTED_DAYS  # thresholds exist (defaults 5/5/3; the bucketing above exercises them)
+
+
 def main():
     print("botv2 selftest:")
     for t in (test_certs, test_pricing, test_lots_shipping, test_tracking_digest,
               test_payout_flow, test_vip_commands_client, test_psa_folder_guard,
-              test_alerts_status, test_analytics, test_delivery, test_register_tracking):
+              test_alerts_status, test_analytics, test_delivery, test_register_tracking,
+              test_stale_tickets):
         t()
     if _fails:
         print(f"\nFAILED ({len(_fails)}):")
