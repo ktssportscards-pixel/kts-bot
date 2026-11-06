@@ -814,6 +814,38 @@ def test_owed_accumulation():
     ship(919, {"A": 150, "B": 150}, {"A": 135, "B": 135})     # identical retry
     check(owed(919).get("payout") == 270.0, "identical retry does not double-count ($270)")
 
+    # (J) Codex migration bug — a NEW quote lands on a legacy unpaid ticket BEFORE the ship.
+    #     Migration must seed at quote time, else the ship projects only the new card.
+    seed_legacy(920, {"certs": {"OLD1": 150, "OLD2": 150}, "payout": 270.0, "paid": False})
+    quote(920, {"N": 200}, {"N": 180})                        # quote lands first
+    ship(920, {"N": 200}, {"N": 180})
+    check(owed(920).get("payout") == 450.0,
+          "Codex: quote-before-ship still carries the legacy $270 (+$180=$450)")
+
+    # (K) Codex promotion bug — a quote inserts a cert that OVERLAPS the carried set; it must
+    #     not be itemised at quote time nor counted at promotion (no double-count).
+    seed_legacy(921, {"certs": {"P": 100, "Q": 100}, "payout": 180.0, "paid": False})
+    quote(921, {"P": 100}, {"P": 95})                         # P already inside the carried $180
+    ship(921, {"P": 100}, {"P": 95})
+    check(owed(921).get("payout") == 180.0,
+          "Codex: overlapping cert via quote is not double-counted (stays $180)")
+    check("P" in (owed(921).get("review_overlaps") or []),
+          "Codex: the overlapping cert is flagged for review")
+
+    # (L) legacy PAID ticket, then quote → ship a new card: only the new card owes
+    seed_legacy(922, {"certs": {"S": 100}, "payout": 90.0, "paid": True})
+    quote(922, {"T": 60}, {"T": 54}); ship(922, {"T": 60}, {"T": 54})
+    check(owed(922).get("payout") == 54.0 and owed(922).get("paid") is False,
+          "legacy PAID + quote-then-ship: only the new card owes ($54), paid not revived")
+
+    # (M) a no-cert-list carried coexisting with an itemised card can't be overlap-checked →
+    #     the balance is kept AND the ticket is flagged as unverifiable
+    seed_legacy(923, {"certs": {}, "payout": 88.0, "paid": False})
+    quote(923, {"U": 100}, {"U": 90}); ship(923, {"U": 100}, {"U": 90})
+    check(owed(923).get("payout") == 178.0, "no-cert legacy + itemised card keeps $88 (+$90=$178)")
+    check(tracking._UNKNOWN in (owed(923).get("review_overlaps") or []),
+          "no-cert legacy beside an itemised card is flagged as unverifiable")
+
 
 def main():
     print("botv2 selftest:")

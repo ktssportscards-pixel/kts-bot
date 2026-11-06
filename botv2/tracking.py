@@ -41,6 +41,7 @@ def _upsert(store_name: str, rec: dict) -> None:
 # un-itemised set is flagged for review rather than silently merged or re-counted.
 
 _CARRIED = "_carried"   # reserved ledger key: a legacy, un-itemised shipped balance
+_UNKNOWN = "(legacy balance of unknown composition — verify no double-count)"
 
 
 def _entry(offer, comp, status):
@@ -56,17 +57,24 @@ def _quote_entries(certs: dict, cert_offers: dict) -> dict:
             for cert, offer in (cert_offers or {}).items()}
 
 
-def _merge_quote(ledger: dict, entries: dict) -> dict:
-    """Accumulate freshly-quoted certs into the ledger across quote messages. A cert
-    already accepted or paid is LOCKED — never re-priced and never downgraded; a
-    still-quoted cert takes the latest offer (a genuine re-quote at a new price)."""
+def _merge_quote(ledger: dict, entries: dict) -> tuple:
+    """Accumulate freshly-quoted certs into the ledger across quote messages. Returns
+    (ledger, review). A cert already accepted or paid is LOCKED (never re-priced or
+    downgraded); a cert that sits inside the un-itemised carried amount is NOT itemised
+    (that would double-count the same card) and is flagged for review; a still-quoted
+    cert takes the latest offer (a genuine re-quote at a new price)."""
     led = dict(ledger or {})
+    carried_certs = set((led.get(_CARRIED) or {}).get("certs") or [])
+    review = []
     for cert, e in entries.items():
+        if cert in carried_certs:
+            review.append(cert)            # already inside the carried amount → don't itemise
+            continue
         cur = led.get(cert)
         if cur and cur.get("status") in ("accepted", "paid"):
             continue                       # locked once shipped
         led[cert] = e
-    return led
+    return led, review
 
 
 def _sum_ledger(ledger: dict, statuses: tuple) -> tuple:
@@ -116,6 +124,18 @@ def _carried_from_legacy(existing_owed: dict) -> dict:
         "status": "paid" if existing_owed.get("paid") else "accepted",
         "certs": list((existing_owed.get("certs") or {}).keys()),
     }}
+
+
+def _migrate_ledger(ledger: dict, existing_owed: dict) -> dict:
+    """Seed a legacy balance into the ledger BEFORE any new cert is written, so a quote
+    that lands before the ship can't skip migration and drop the old owed total. No-op
+    once a ledger (incl. a carried bucket) already exists, or when there is no prior
+    owed row. Called at the top of BOTH record_quote and record_accepted_ship."""
+    if ledger:
+        return dict(ledger)
+    if existing_owed:
+        return _carried_from_legacy(existing_owed)
+    return {}
 
 
 def _carried_update(ledger: dict, amount: float, certs: list, comp: float) -> None:
@@ -174,17 +194,23 @@ def record_accepted_ship(channel_id, snapshot: dict):
     new_entries = _quote_entries(certs, cert_offers)
     review = list((ticket or {}).get("review_overlaps") or [])
 
-    ledger = dict((ticket or {}).get("ledger") or {})
-    if not ledger and existing:                       # legacy owed row, no ledger → carry its exact prior total
-        ledger = _carried_from_legacy(existing)
+    # seed any legacy balance BEFORE touching the ledger (a quote may already have done it)
+    ledger = _migrate_ledger((ticket or {}).get("ledger") or {}, existing)
+    carried_certs = set((ledger.get(_CARRIED) or {}).get("certs") or [])
 
-    # ship accepts every card quoted so far on the ticket (accumulated across quote msgs)
+    # ship accepts every card quoted so far on the ticket (accumulated across quote msgs);
+    # a quoted cert that sits inside the carried amount is dropped + flagged, never promoted
+    # (overlap exclusion has to happen AT promotion, not only against this ship's new cards)
     for cert, e in list(ledger.items()):
-        if cert != _CARRIED and e.get("status") == "quoted":
-            ledger[cert] = {**e, "status": "accepted"}
+        if cert == _CARRIED or e.get("status") != "quoted":
+            continue
+        if cert in carried_certs:
+            review.append(cert)
+            del ledger[cert]
+            continue
+        ledger[cert] = {**e, "status": "accepted"}
 
     # fold in this ship's own itemised cards; a card already shipped stays locked
-    carried_certs = set((ledger.get(_CARRIED) or {}).get("certs") or [])
     for cert, e in new_entries.items():
         if cert in carried_certs:                     # inside an un-itemised carried amount → flag, never double-count
             review.append(cert)
@@ -199,6 +225,13 @@ def record_accepted_ship(channel_id, snapshot: dict):
     if not new_entries and base["payout"] and not any(c in ledger for c in certs):
         _carried_update(ledger, base["payout"], list(certs.keys()), base["comp"])
 
+    # a carried amount with NO cert list can't be checked for overlap against itemised
+    # cards, so a shared card could be paid twice → flag the ticket for a manual check
+    carried = ledger.get(_CARRIED)
+    if carried and carried.get("status") != "paid" and not (carried.get("certs") or []) \
+            and any(c != _CARRIED and e.get("status") == "accepted" for c, e in ledger.items()):
+        review.append(_UNKNOWN)
+
     review = sorted(set(review))
     tk = {**base, "id": f"tk_{channel_id}", "ledger": ledger}
     if review:
@@ -208,8 +241,8 @@ def record_accepted_ship(channel_id, snapshot: dict):
     owed_rec = _project_owed(channel_id, ledger, existing, base)
     if review:
         owed_rec["review_overlaps"] = review
-        log.warning("owed overlap on channel %s: %s were inside a legacy un-itemised "
-                    "balance — flagged for review, not re-counted", channel_id, review)
+        log.warning("owed ledger on channel %s needs review (overlap with a legacy "
+                    "un-itemised balance — not re-counted): %s", channel_id, review)
     _upsert("owed", owed_rec)
     return base
 
@@ -439,16 +472,21 @@ def record_quote(channel_id, snapshot: dict, channel_name: str = "",
         return
     cur = next((r for r in state.load("tickets", list)
                 if r.get("id") == f"tk_{channel_id}"), None)
+    existing_owed = next((r for r in state.load("owed", list)
+                          if r.get("id") == f"owed_{channel_id}"), None)
     status = "accepted" if (cur and cur.get("status") == "accepted") else "quoted"
-    # Accumulate the per-cert money ledger across quote messages: each message merges
-    # its cards (latest offer per still-quoted cert; accepted/paid cards stay locked).
-    # Offers come from card_detail (authoritative per-cert) or the snapshot's cert_offers.
+    # Accumulate the per-cert money ledger across quote messages. Seed any legacy balance
+    # FIRST (so a quote landing before the ship can't skip migration and drop the old
+    # total), then merge this message's cards (latest offer per still-quoted cert;
+    # accepted/paid and carried cards are locked). Offers come from card_detail
+    # (authoritative per-cert) or the snapshot's cert_offers.
     cert_offers = dict(snapshot.get("cert_offers") or {}) or {
         c.get("cert"): c.get("offer") for c in (card_detail or [])
         if c.get("cert") is not None and c.get("offer") is not None}
-    ledger = _merge_quote((cur or {}).get("ledger") or {},
-                          _quote_entries(snapshot.get("certs", {}), cert_offers))
-    _upsert("tickets", {
+    ledger = _migrate_ledger((cur or {}).get("ledger") or {}, existing_owed)
+    ledger, review = _merge_quote(ledger, _quote_entries(snapshot.get("certs", {}), cert_offers))
+    review = sorted(set(list((cur or {}).get("review_overlaps") or []) + review))
+    rec = {
         "id": f"tk_{channel_id}",
         "channel_id": channel_id,
         "channel_name": channel_name or (cur or {}).get("channel_name", ""),
@@ -463,7 +501,10 @@ def record_quote(channel_id, snapshot: dict, channel_name: str = "",
         "status": status,
         "quoted_at": (cur or {}).get("quoted_at") or datetime.now().isoformat(timespec="seconds"),
         "updated_at": datetime.now().isoformat(timespec="seconds"),
-    })
+    }
+    if review:
+        rec["review_overlaps"] = review
+    _upsert("tickets", rec)
 
 
 def counts() -> dict:
