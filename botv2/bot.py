@@ -509,6 +509,7 @@ async def _handle_message(message) -> None:
         "username": username, "comp": quote.comp_total, "payout": quote.payout_total,
         "cards": quote.n_accepted,
         "certs": {r.cert: r.market_value for r in quote.accepted if r.market_value is not None},
+        "cert_offers": {r.cert: r.offer for r in quote.accepted},   # per-cert, for owed accumulation
     }
     tracking.record_quote(
         channel.id, _last_quote[channel.id], channel_name=channel.name,

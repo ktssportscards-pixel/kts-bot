@@ -725,13 +725,58 @@ def test_lanes_schedule():
     check(0 < b._seconds_until_lanes_open() <= 7 * 86400, "until-open is within a week")
 
 
+# ── owed ACCUMULATION across unpaid lots (the Codex/portal money-ledger fix) ──────
+def test_owed_accumulation():
+    section("owed accumulation")
+
+    def snap(certs, offers):
+        return {"username": "acc", "comp": round(sum(certs.values()), 2),
+                "payout": round(sum(offers.values()), 2), "cards": len(offers),
+                "certs": certs, "cert_offers": offers}
+
+    def owed(cid):
+        return next((r for r in tracking.state.load("owed", list) if r["id"] == f"owed_{cid}"), {})
+
+    # (1) two UNPAID lots in one ticket -> owed ADDS up (was: 2nd overwrote + lost the 1st)
+    tracking.record_accepted_ship(910, snap({"A": 150, "B": 150}, {"A": 135, "B": 135}))   # $270
+    tracking.record_accepted_ship(910, snap({"C": 100, "D": 100}, {"C": 90, "D": 90}))      # +$180, before paid
+    check(owed(910).get("payout") == 450.0 and owed(910).get("cards") == 4,
+          "accumulate: 2nd unpaid lot adds to balance ($270+$180=$450, 4 cards)")
+    # (2) identical retry -> no double-count (dedup by cert)
+    tracking.record_accepted_ship(910, snap({"A": 150, "B": 150}, {"A": 135, "B": 135}))
+    check(owed(910).get("payout") == 450.0, "accumulate: identical retry does not double-count")
+    # (3) re-quote at a changed price -> that cert's offer updates to the latest
+    tracking.record_accepted_ship(910, snap({"A": 150}, {"A": 140}))                        # A 135 -> 140 (+5)
+    check(owed(910).get("payout") == 455.0, "accumulate: re-quote updates that cert's offer (+$5)")
+    # (4) partial overlap -> only the new cert adds
+    tracking.record_accepted_ship(910, snap({"A": 150, "E": 50}, {"A": 140, "E": 45}))      # A known, E new (+45)
+    check(owed(910).get("payout") == 500.0 and owed(910).get("cards") == 5,
+          "accumulate: partial overlap adds only the new cert")
+    # (5) pay, then a NEW lot after payment -> fresh UNPAID (this lot only)
+    tracking.mark_paid(910)
+    tracking.record_accepted_ship(910, snap({"F": 200}, {"F": 180}))
+    check(owed(910).get("paid") is False and owed(910).get("payout") == 180.0,
+          "accumulate: new lot after payment -> fresh unpaid $180")
+    # (6) re-ship the SAME lot while paid -> stays paid
+    tracking.mark_paid(910)
+    tracking.record_accepted_ship(910, snap({"F": 200}, {"F": 180}))
+    check(owed(910).get("paid") is True, "accumulate: re-ship of a paid lot stays paid")
+    # (7) pre-fix owed row (no cert_payout) -> seed carries the total, then accumulates
+    tracking.state.save("owed", [r for r in tracking.state.load("owed", list) if r["id"] != "owed_911"]
+                         + [{"id": "owed_911", "channel_id": 911, "user": "old", "paid": False,
+                             "certs": {"X": 100}, "payout": 90.0, "cards": 1, "status": "accepted"}])
+    tracking.record_accepted_ship(911, snap({"Y": 100}, {"Y": 80}))
+    check(owed(911).get("payout") == 170.0, "accumulate: pre-fix row total carries + new cert adds ($90+$80)")
+
+
 def main():
     print("botv2 selftest:")
     for t in (test_certs, test_pricing, test_lots_shipping, test_tracking_digest,
               test_payout_flow, test_vip_commands_client, test_psa_folder_guard,
               test_alerts_status, test_analytics, test_delivery, test_register_tracking,
               test_lanes_board, test_stale_tickets, test_delivery_ofd,
-              test_webserver_auth, test_audit_fixes, test_lanes_schedule):
+              test_webserver_auth, test_audit_fixes, test_lanes_schedule,
+              test_owed_accumulation):
         t()
     if _fails:
         print(f"\nFAILED ({len(_fails)}):")

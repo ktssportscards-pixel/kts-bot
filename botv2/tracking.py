@@ -22,35 +22,67 @@ def _upsert(store_name: str, rec: dict) -> None:
 
 
 def record_accepted_ship(channel_id, snapshot: dict):
-    """Record an accepted lot at ship time. `snapshot` = {username, comp, payout,
-    cards, certs}. Writes an 'accepted' ticket + an unpaid owed entry."""
+    """Record an accepted/shipped lot. `snapshot` = {username, comp, payout, cards,
+    certs (cert->market value), cert_offers (cert->offer)}. Writes the 'accepted' TICKET
+    (the latest quote snapshot) + the OWED ledger entry.
+
+    OWED is the OUTSTANDING balance and ACCUMULATES across unpaid lots in a ticket, itemized
+    per cert (dedup by cert; a re-quote at a changed price updates that cert's offer). So a
+    second lot shipped BEFORE the first is paid ADDS to the balance instead of overwriting it
+    (the single-owed-row bug Codex + the portal flagged). `owed.payout` = sum of the per-cert
+    offers (what the iOS "Owed to sellers" tile sums); the TICKET's `payout` stays the latest
+    quote snapshot (ticket detail). Guards: a re-ship of the SAME paid lot (same cert set +
+    total) stays paid; a genuinely NEW lot after payment opens a fresh unpaid entry. Forward-
+    looking: a pre-fix owed row (no per-cert map) is seeded by an even split so its total
+    carries over and it becomes itemized going forward (old split-less history isn't recoverable)."""
     if not snapshot:
         return None
+    certs = dict(snapshot.get("certs") or {})
+    cert_offers = dict(snapshot.get("cert_offers") or {})
     base = {
         "user": snapshot.get("username", ""),
         "channel_id": channel_id,
         "date": date.today().isoformat(),
-        "certs": snapshot.get("certs", {}),
+        "certs": certs,
         "comp": round(float(snapshot.get("comp", 0) or 0), 2),
         "payout": round(float(snapshot.get("payout", 0) or 0), 2),
         "cards": int(snapshot.get("cards", 0) or 0),
         "status": "accepted",
     }
-    _upsert("tickets", {**base, "id": f"tk_{channel_id}"})
-    # Owed: never regress an already-PAID entry back to unpaid. A customer who says
-    # "ship"/"proceed" again after Kevin ran !paid would otherwise re-queue them for a
-    # second payment. Preserve paid/paid_date ONLY for a re-ship of the SAME lot — same
-    # cert SET AND same payout. A genuinely new lot (different certs, even if the payout
-    # total coincidentally matches) opens a fresh UNPAID entry so Kevin isn't underpaid.
-    # (Codex caught that payout-total alone false-positives on same-total/different-certs.)
-    owed_rec = {**base, "id": f"owed_{channel_id}", "paid": False}
+    _upsert("tickets", {**base, "id": f"tk_{channel_id}"})   # ticket = latest snapshot (payout stays the quote)
+
+    lot_total = round(sum(float(v or 0) for v in cert_offers.values()), 2) if cert_offers else base["payout"]
     existing = next((r for r in state.load("owed", list)
                      if r.get("id") == f"owed_{channel_id}"), None)
-    if (existing and existing.get("paid")
-            and round(float(existing.get("payout", 0) or 0), 2) == owed_rec["payout"]
-            and set(existing.get("certs") or {}) == set(owed_rec["certs"] or {})):
-        owed_rec["paid"] = True
-        owed_rec["paid_date"] = existing.get("paid_date")
+
+    def fresh_unpaid():
+        return {**base, "id": f"owed_{channel_id}", "paid": False,
+                "cert_payout": dict(cert_offers), "payout": lot_total}
+
+    if existing and existing.get("paid"):
+        same_lot = (round(float(existing.get("payout", 0) or 0), 2) == base["payout"]
+                    and set(existing.get("certs") or {}) == set(certs))
+        owed_rec = {**existing} if same_lot else fresh_unpaid()   # re-ship paid lot -> keep paid; else new unpaid
+    elif existing:                                    # existing UNPAID -> ACCUMULATE this lot into the balance
+        cp = dict(existing.get("cert_payout") or {})
+        if not cp:                                    # pre-fix row: seed an even split so the prior total carries + itemizes
+            pc = list(existing.get("certs") or {})
+            if pc:
+                s = round(float(existing.get("payout", 0) or 0) / len(pc), 2)
+                cp = {c: s for c in pc}
+        cp.update(cert_offers)                        # merge new lot: latest offer per cert (dedup + re-quote-at-new-price)
+        merged_certs = {**(existing.get("certs") or {}), **certs}
+        owed_rec = {
+            "id": f"owed_{channel_id}", "channel_id": channel_id, "user": base["user"],
+            "date": existing.get("date") or base["date"], "status": "accepted", "paid": False,
+            "certs": merged_certs, "cert_payout": cp,
+            "comp": round(sum(float(v or 0) for v in merged_certs.values()), 2),
+            "payout": round(sum(float(v or 0) for v in cp.values()), 2),
+            "cards": len(cp),
+            "tracking": existing.get("tracking"),
+        }
+    else:                                             # no owed row yet -> fresh unpaid
+        owed_rec = fresh_unpaid()
     _upsert("owed", owed_rec)
     return base
 
@@ -63,9 +95,11 @@ def quoted_snapshot(channel_id):
               if r.get("id") == f"tk_{channel_id}"), None)
     if not r:
         return None
+    cert_offers = {c.get("cert"): c.get("offer") for c in (r.get("card_detail") or [])
+                   if c.get("cert") is not None and c.get("offer") is not None}
     return {"username": r.get("user", ""), "comp": r.get("comp", 0),
             "payout": r.get("payout", 0), "cards": r.get("cards", 0),
-            "certs": r.get("certs", {})}
+            "certs": r.get("certs", {}), "cert_offers": cert_offers}
 
 
 def carrier_of(tracking_num: str) -> str:
