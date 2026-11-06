@@ -288,5 +288,5 @@ def lanes_board(data: dict) -> str:
     if not rows:
         return head + " — drop your cards in your ticket for a live quote."
     body = "\n".join([head] + rows
-                     + ["_🟡 means that lane is filling up — drop your cards soon to lock it in._"])
+                     + ["_👉 Drop your cards in your ticket for a live quote._"])
     return _scrub_customer(body)
