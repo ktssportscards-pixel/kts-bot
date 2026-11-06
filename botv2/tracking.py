@@ -131,6 +131,39 @@ def mark_delivered(channel_id=None, tracking_num=None, delivered_at=None,
     return miss
 
 
+def mark_out_for_delivery(channel_id=None, tracking_num=None, at=None) -> dict:
+    """Flip a ticket's delivery sub-record to 'out_for_delivery' (idempotent; NEVER
+    regresses a 'delivered'). Resolve by channel_id, else by tracking number. Returns
+    {found, channel_id, already, user, number} — `already` is True when it's already
+    out_for_delivery OR already delivered, so the caller won't re-post."""
+    if channel_id is None and tracking_num:
+        channel_id = find_channel_by_tracking(tracking_num)
+    miss = {"found": False, "channel_id": channel_id, "already": False,
+            "user": "", "number": (tracking_num or "")}
+    if channel_id is None:
+        return miss
+    data = state.load("tickets", list)
+    for r in data:
+        if r.get("id") == f"tk_{channel_id}":
+            d = r.get("delivery") or {}
+            number = d.get("number") or r.get("tracking") or (tracking_num or "")
+            if d.get("status") in ("out_for_delivery", "delivered"):
+                return {"found": True, "channel_id": channel_id, "already": True,
+                        "user": r.get("user", ""), "number": number}
+            r["delivery"] = {
+                "number": number,
+                "carrier": d.get("carrier") or carrier_of(number),
+                "status": "out_for_delivery",
+                "noted_at": d.get("noted_at"),
+                "delivered_at": d.get("delivered_at"),
+                "out_for_delivery_at": at or datetime.now().isoformat(timespec="seconds"),
+            }
+            state.save("tickets", data)
+            return {"found": True, "channel_id": channel_id, "already": False,
+                    "user": r.get("user", ""), "number": number}
+    return miss
+
+
 def delivery_status(channel_id) -> dict:
     """The delivery sub-record for a channel's ticket, or {} if none."""
     for r in state.load("tickets", list):
@@ -214,6 +247,16 @@ def delivery_customer_message(user: str = "") -> str:
     msg = "📦 Your package just arrived — got it safely, thank you! We'll take it from here. 🙌"
     if any(w in msg.lower() for w in config.CUSTOMER_FORBIDDEN_WORDS):
         return "📦 Your package just arrived — got it safely, thank you! 🙌"
+    return msg
+
+
+def delivery_ofd_message(user: str = "") -> str:
+    """Customer-safe 'out for delivery today' note for the ticket — the heads-up the day
+    the carrier has it on the truck. Generic (no buyer name / payout / internal terms),
+    scrubbed against the forbidden list as a backstop before it can post."""
+    msg = "🚚 Your package is out for delivery today — it should arrive soon!"
+    if any(w in msg.lower() for w in config.CUSTOMER_FORBIDDEN_WORDS):
+        return "🚚 Your package is out for delivery today!"
     return msg
 
 

@@ -94,8 +94,11 @@ async def _delivery(req):
     portal / carrier aggregator (EasyPost · Shippo · AfterShip) POSTs here when a
     tracked package is delivered; the bot flips the ticket to delivered and — ONLY if
     config.DELIVERY_TRACKING is on — posts a customer-safe 'arrived!' note in that
-    ticket + DMs Kevin. Body: {channel_id? | tracking?, status?='delivered',
-    delivered_at?, carrier?}; resolves by channel_id, else by tracking number. The bot
+    ticket + DMs Kevin. Body: {channel_id? | tracking?, status? (out_for_delivery |
+    delivered; default delivered), delivered_at?, out_for_delivery_at?, carrier?};
+    resolves by channel_id, else by tracking number. status 'out_for_delivery' posts a
+    customer-safe 'out for delivery today' heads-up (gated, no Kevin DM); 'delivered'
+    posts the 'arrived' note + DMs Kevin; any other status is acked + ignored. The bot
     holds NO carrier credentials and makes no outbound carrier calls. Always 200 on the
     delivered path (even when no ticket matches) so a webhook can't retry-storm."""
     if not config.BOT_API_KEY or req.headers.get("x-bot-key") != config.BOT_API_KEY:
@@ -107,12 +110,27 @@ async def _delivery(req):
     if not isinstance(body, dict):                   # valid JSON but not an object (e.g. [] / null)
         return web.json_response({"error": "body must be a JSON object"}, status=400)
     from . import tracking
-    status = str(body.get("status", "delivered")).lower()
+    status = str(body.get("status", "delivered")).lower().replace(" ", "_")
     channel_id = body.get("channel_id")
     tracking_num = body.get("tracking") or body.get("tracking_num") or body.get("trackingNumber")
     if channel_id is None and not tracking_num:
         return web.json_response({"error": "need channel_id or tracking"}, status=400)
-    if status != "delivered":                       # only 'delivered' acts; ack the rest
+
+    if status == "out_for_delivery":                # intermediate: the 'on the truck today' heads-up
+        res = tracking.mark_out_for_delivery(channel_id=channel_id, tracking_num=tracking_num,
+                                             at=body.get("out_for_delivery_at"))
+        posted = False
+        if res.get("found") and not res.get("already"):
+            try:
+                from . import bot as botmod
+                posted = await botmod.notify_out_for_delivery(res["channel_id"], res.get("user", ""))
+            except Exception as e:
+                print(f"[web] out-for-delivery notify failed (non-fatal): {e}")
+        return _cors(web.json_response(
+            {**res, "stage": "out_for_delivery", "posted": posted,
+             "messaging_enabled": config.DELIVERY_TRACKING}))
+
+    if status != "delivered":                       # only out_for_delivery + delivered act; ack the rest
         return _cors(web.json_response({"ok": True, "ignored": status}))
     res = tracking.mark_delivered(channel_id=channel_id, tracking_num=tracking_num,
                                   delivered_at=body.get("delivered_at"),
@@ -125,7 +143,7 @@ async def _delivery(req):
         except Exception as e:
             print(f"[web] delivery notify failed (non-fatal): {e}")
     return _cors(web.json_response(
-        {**res, "posted": posted, "messaging_enabled": config.DELIVERY_TRACKING}))
+        {**res, "stage": "delivered", "posted": posted, "messaging_enabled": config.DELIVERY_TRACKING}))
 
 
 async def start():
