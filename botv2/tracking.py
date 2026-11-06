@@ -287,6 +287,56 @@ def counts() -> dict:
     }
 
 
+def _as_date(s):
+    """Parse an ISO date or datetime string to a date (first 10 chars); None if blank/bad."""
+    if not s:
+        return None
+    try:
+        return date.fromisoformat(str(s)[:10])
+    except ValueError:
+        return None
+
+
+def stale_tickets(today) -> dict:
+    """PURE — takes `today` (a date) so it's deterministic for tests (never calls
+    date.today() itself). Flags tickets stuck too long in a stage, for Kevin's daily
+    nudge. Three MUTUALLY-EXCLUSIVE buckets, each item {user, channel_id, days}, oldest
+    (most-stuck) first:
+      quoted_stale  — quoted but never shipped (no owed entry) > config.STALE_QUOTED_DAYS
+      transit_stale — shipped (owed + unpaid) but not delivered  > config.STALE_TRANSIT_DAYS
+      unpaid_stale  — delivered but still unpaid                 > config.STALE_UNPAID_DAYS
+    Age is measured from each stage's own timestamp: the quote date, the ship date, and
+    the delivered_at respectively. KEVIN-ONLY data (names + channels) — never customer-facing."""
+    owed = {r.get("channel_id"): r for r in state.load("owed", list)}
+    quoted_stale, transit_stale, unpaid_stale = [], [], []
+    for t in state.load("tickets", list):
+        cid = t.get("channel_id")
+        user = t.get("user", "")
+        o = owed.get(cid)
+        delivered = (t.get("delivery") or {}).get("status") == "delivered"
+        if o is None:                                  # never shipped → age from the quote
+            qd = _as_date(t.get("quoted_at")) or _as_date(t.get("date"))
+            days = (today - qd).days if qd else None
+            if days is not None and days > config.STALE_QUOTED_DAYS:
+                quoted_stale.append({"user": user, "channel_id": cid, "days": days})
+        elif o.get("paid"):
+            continue                                   # paid → nothing stuck
+        elif not delivered:                            # in transit too long → age from ship date
+            sd = _as_date(o.get("date")) or _as_date(t.get("date"))
+            days = (today - sd).days if sd else None
+            if days is not None and days > config.STALE_TRANSIT_DAYS:
+                transit_stale.append({"user": user, "channel_id": cid, "days": days})
+        else:                                          # delivered, unpaid → age from delivered_at
+            dd = _as_date((t.get("delivery") or {}).get("delivered_at"))
+            days = (today - dd).days if dd else None
+            if days is not None and days > config.STALE_UNPAID_DAYS:
+                unpaid_stale.append({"user": user, "channel_id": cid, "days": days})
+    for b in (quoted_stale, transit_stale, unpaid_stale):
+        b.sort(key=lambda x: x["days"], reverse=True)  # most-stuck first
+    return {"quoted_stale": quoted_stale, "transit_stale": transit_stale,
+            "unpaid_stale": unpaid_stale}
+
+
 def record_claim(channel_id, locked: int, total: int) -> None:
     """Record the auto-claim outcome on this ticket (allocation slots locked)."""
     _upsert("tickets", {"id": f"tk_{channel_id}",

@@ -91,6 +91,17 @@ LANES_BOARD = os.environ.get("BOTV2_LANES_BOARD", "").lower() in ("1", "true", "
 LANES_CHANNEL_ID = int(os.environ.get("BOTV2_LANES_CHANNEL_ID", "0") or "0")
 LANES_REFRESH_MIN = int(os.environ.get("BOTV2_LANES_REFRESH_MIN", "10") or "10")
 
+# ── Stale-ticket nudges (Kevin-facing daily "stuck tickets" digest) ────────────
+# When on, the bot DMs Kevin once a day (8 AM ET) a digest of tickets stuck too long
+# in a stage, so nothing slips with many simultaneous clients: quoted-but-never-shipped,
+# shipped-but-not-delivered, and delivered-but-still-unpaid, each past its threshold.
+# KEVIN-ONLY — the digest never reaches a customer. DEFAULT OFF (the loop only starts
+# when this is on).
+STALE_NUDGES = os.environ.get("BOTV2_STALE_NUDGES", "").lower() in ("1", "true", "yes")
+STALE_QUOTED_DAYS = int(os.environ.get("BOTV2_STALE_QUOTED_DAYS", "5"))    # quoted, never shipped
+STALE_TRANSIT_DAYS = int(os.environ.get("BOTV2_STALE_TRANSIT_DAYS", "5"))  # shipped, not delivered
+STALE_UNPAID_DAYS = int(os.environ.get("BOTV2_STALE_UNPAID_DAYS", "3"))    # delivered, still unpaid
+
 # ── Google Sheets (buying sheets) ──────────────────────────────────────────────
 GOOGLE_CREDENTIALS_JSON = os.environ.get("GOOGLE_CREDENTIALS_JSON")
 GOOGLE_CREDENTIALS_FILE = os.environ.get(

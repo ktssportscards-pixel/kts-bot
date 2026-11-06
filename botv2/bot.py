@@ -253,6 +253,43 @@ async def _lanes_board_loop():
                               f"board in the lanes channel may be stale; check the bot.")
             await asyncio.sleep(600)                  # back off 10 min, then re-arm
 
+def _stale_digest() -> str:
+    """Build Kevin's stale-ticket digest (or '' when nothing is stale). KEVIN-ONLY —
+    names + channels are fine here; this never reaches a customer."""
+    from datetime import date
+    s = tracking.stale_tickets(date.today())
+    sections = []
+
+    def block(title, items, verb):
+        if items:
+            sections.append("\n".join(
+                [title] + [f"  • **{i['user'] or '?'}** — {verb} {i['days']}d · <#{i['channel_id']}>"
+                           for i in items]))
+
+    block(f"🕒 **Quoted, never shipped** (>{config.STALE_QUOTED_DAYS}d):", s["quoted_stale"], "quoted")
+    block(f"🚚 **Shipped, not delivered** (>{config.STALE_TRANSIT_DAYS}d):", s["transit_stale"], "in transit")
+    block(f"💸 **Delivered, still unpaid** (>{config.STALE_UNPAID_DAYS}d):", s["unpaid_stale"], "sitting")
+    if not sections:
+        return ""
+    total = sum(len(v) for v in s.values())
+    return f"⚠️ **Stale-ticket check — {total} need a look:**\n\n" + "\n\n".join(sections)
+
+
+async def _stale_nudge_loop():
+    """Once-daily (8 AM ET) Kevin-ONLY DM of tickets stuck too long in a stage, so nothing
+    slips with many simultaneous clients. Guarded like the other loops; gated by
+    config.STALE_NUDGES (the loop is only started when that is on)."""
+    while True:
+        try:
+            await asyncio.sleep(_seconds_until_daily_et(8))
+            digest = _stale_digest()
+            if digest:
+                await ping_kevin(digest)
+            await asyncio.sleep(90)                # clear the minute, no re-fire
+        except Exception as e:
+            print(f"[bot] stale-nudge loop failed (non-fatal): {e}")
+            await asyncio.sleep(3600)              # back off an hour, then re-arm
+
 
 _web_runner = None
 _digest_started = False
@@ -279,6 +316,9 @@ async def on_ready():
         bot.loop.create_task(_heartbeat_loop())
         if config.LANES_BOARD and config.LANES_CHANNEL_ID:
             bot.loop.create_task(_lanes_board_loop())
+
+        if config.STALE_NUDGES:                     # Kevin-only stuck-ticket digest (gated, default off)
+            bot.loop.create_task(_stale_nudge_loop())
     try:
         await tickets.sweep_overflow(bot)
     except Exception as e:
