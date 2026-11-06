@@ -145,6 +145,18 @@ def test_lots_shipping():
     check(lots.proceed_or_hold_tail(8), "proceed tail: empty lot returns a 'not finalized' note")
     check(lots.has_lot(7) and not lots.has_lot(999), "has_lot")
 
+    # SHIP_ALL_DORAL override: every ship consolidates to the single Doral address (no VA).
+    from botv2 import config as _cfg
+    _saved_all_doral = _cfg.SHIP_ALL_DORAL
+    _cfg.SHIP_ALL_DORAL = True
+    try:
+        fresh(9); lots.add_slab_values(9, {"a": 500, "b": 800}, {"a": "pokemon", "b": "basketball"})
+        msg, gave, _ = shipping.compose_shipping(9)
+        check(gave and "Doral, FL" in msg and "Virginia" not in msg,
+              "SHIP_ALL_DORAL: mixed lot → Doral only (no VA)")
+    finally:
+        _cfg.SHIP_ALL_DORAL = _saved_all_doral
+
 
 # ── tracking + digest ─────────────────────────────────────────────────────────
 def test_tracking_digest():
