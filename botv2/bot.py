@@ -260,19 +260,79 @@ async def _render_lanes_board():
         await msg.edit(content=text)
 
 
+# Lanes board weekly window (ET), Python weekday(): Mon=0 … Sun=6.
+_LANES_OPEN_HOUR = 3     # Saturday 3 AM ET — board appears
+_LANES_CLOSE_HOUR = 3    # Monday 3 AM ET — board comes down
+
+
+def _now_et():
+    from datetime import datetime, timedelta, timezone
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo("America/New_York"))
+    except Exception:
+        return datetime.now(timezone(timedelta(hours=-5)))
+
+
+def _lanes_in_window(now=None) -> bool:
+    """True when the lanes board should be shown: Saturday 3 AM ET → Monday 3 AM ET."""
+    now = now or _now_et()
+    wd, hr = now.weekday(), now.hour
+    if wd == 5:                      # Saturday — open from 3 AM
+        return hr >= _LANES_OPEN_HOUR
+    if wd == 6:                      # Sunday — all day
+        return True
+    if wd == 0:                      # Monday — until 3 AM
+        return hr < _LANES_CLOSE_HOUR
+    return False                     # Tue–Fri — closed
+
+
+def _seconds_until_lanes_open() -> float:
+    from datetime import timedelta
+    now = _now_et()
+    days_ahead = (5 - now.weekday()) % 7         # days to the next Saturday
+    target = (now + timedelta(days=days_ahead)).replace(
+        hour=_LANES_OPEN_HOUR, minute=0, second=0, microsecond=0)
+    if target <= now:
+        target += timedelta(days=7)
+    return max(60.0, (target - now).total_seconds())
+
+
+async def _remove_lanes_board():
+    """Delete the pinned board (if posted) + clear its saved id, so the board disappears
+    when the weekly window is closed and reposts fresh when it reopens."""
+    st = state.load("lanes_board", dict)
+    mid = st.get("message_id")
+    if not mid:
+        return
+    try:
+        channel = bot.get_channel(config.LANES_CHANNEL_ID) or await bot.fetch_channel(config.LANES_CHANNEL_ID)
+        msg = await channel.fetch_message(int(mid))
+        await msg.delete()
+    except Exception as e:
+        print(f"[bot] lanes board remove (non-fatal): {e}")
+    state.save("lanes_board", {})                    # clear → reposts fresh next window
+
+
 async def _lanes_board_loop():
-    """Refresh the customer-safe 'lanes' board every LANES_REFRESH_MIN minutes while the
-    rush is on. Guarded like the other loops: a fetch/edit failure alerts Kevin + backs
-    off, never crashing the task. No-op unless enabled + a channel is set."""
+    """Keep the customer-safe 'lanes' board current during the weekly buying window
+    (config.LANES_SCHEDULE: Sat 3 AM → Mon 3 AM ET). Inside the window it posts/refreshes
+    every LANES_REFRESH_MIN min; outside it removes the board and sleeps until the next
+    open. Guarded: a failure alerts Kevin + backs off, never crashing the task. No-op
+    unless enabled + a channel is set."""
     if not (config.LANES_BOARD and config.LANES_CHANNEL_ID):
         return
     while True:
         try:
-            await _render_lanes_board()
-            await asyncio.sleep(max(60, config.LANES_REFRESH_MIN * 60))
+            if (not config.LANES_SCHEDULE) or _lanes_in_window():
+                await _render_lanes_board()
+                await asyncio.sleep(max(60, config.LANES_REFRESH_MIN * 60))
+            else:
+                await _remove_lanes_board()                       # window closed → take it down
+                await asyncio.sleep(min(_seconds_until_lanes_open(), 3600))
         except Exception as e:
             print(f"[bot] lanes board failed (non-fatal): {e}")
-            await alert_kevin("lanes_board", f"⚠️ lanes board refresh failed: {e} — the live "
+            await alert_kevin("lanes_board", f"⚠️ lanes board loop failed: {e} — the live "
                               f"board in the lanes channel may be stale; check the bot.")
             await asyncio.sleep(600)                  # back off 10 min, then re-arm
 

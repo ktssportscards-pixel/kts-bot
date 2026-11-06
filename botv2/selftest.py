@@ -683,13 +683,39 @@ def test_audit_fixes():
           "fix: snowflake ids -> strings, non-snowflake ints untouched")
 
 
+# ── lanes board weekly schedule window (Sat 3 AM -> Mon 3 AM ET) ──────────────────
+def test_lanes_schedule():
+    section("lanes schedule window")
+    from datetime import datetime, timedelta
+    from botv2 import bot as b
+
+    base = datetime(2026, 1, 5, 0, 0)                 # any anchor; derive weekdays via weekday()
+
+    def at(target_wd, hr):
+        d = base
+        while d.weekday() != target_wd:
+            d += timedelta(days=1)
+        return d.replace(hour=hr)
+
+    check(not b._lanes_in_window(at(2, 12)), "wed -> closed")
+    check(not b._lanes_in_window(at(4, 23)), "fri night -> closed")
+    check(not b._lanes_in_window(at(5, 2)), "sat 2am -> closed")
+    check(b._lanes_in_window(at(5, 3)), "sat 3am -> open")
+    check(b._lanes_in_window(at(5, 18)), "sat evening -> open")
+    check(b._lanes_in_window(at(6, 12)), "sun -> open")
+    check(b._lanes_in_window(at(0, 2)), "mon 2am -> still open")
+    check(not b._lanes_in_window(at(0, 3)), "mon 3am -> closed")
+    check(not b._lanes_in_window(at(0, 10)), "mon 10am -> closed")
+    check(0 < b._seconds_until_lanes_open() <= 7 * 86400, "until-open is within a week")
+
+
 def main():
     print("botv2 selftest:")
     for t in (test_certs, test_pricing, test_lots_shipping, test_tracking_digest,
               test_payout_flow, test_vip_commands_client, test_psa_folder_guard,
               test_alerts_status, test_analytics, test_delivery, test_register_tracking,
               test_lanes_board, test_stale_tickets, test_delivery_ofd,
-              test_webserver_auth, test_audit_fixes):
+              test_webserver_auth, test_audit_fixes, test_lanes_schedule):
         t()
     if _fails:
         print(f"\nFAILED ({len(_fails)}):")

@@ -83,6 +83,11 @@ REGISTER_TRACKING_ENDPOINT = PORTAL_BASE_URL.rstrip("/") + "/bot/register-tracki
 LANES_BOARD = os.environ.get("BOTV2_LANES_BOARD", "").lower() in ("1", "true", "yes")
 LANES_CHANNEL_ID = int(os.environ.get("BOTV2_LANES_CHANNEL_ID", "0") or "0")
 LANES_REFRESH_MIN = int(os.environ.get("BOTV2_LANES_REFRESH_MIN", "10") or "10")
+# Weekly auto-schedule: when ON (default), the board auto-POSTS when the buying window opens
+# and REMOVES itself when it closes, so BOTV2_LANES_BOARD can stay on permanently. Window is
+# Saturday 3 AM -> Monday 3 AM ET (the buying weekend). Set BOTV2_LANES_SCHEDULE=0 to ignore
+# the schedule (board shows whenever LANES_BOARD is on).
+LANES_SCHEDULE = os.environ.get("BOTV2_LANES_SCHEDULE", "1").lower() in ("1", "true", "yes")
 
 # ── Stale-ticket nudges (Kevin-facing daily "stuck tickets" digest) ────────────
 # When on, the bot DMs Kevin once a day (8 AM ET) a digest of tickets stuck too long
