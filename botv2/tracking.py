@@ -13,15 +13,16 @@ from . import config, state
 log = logging.getLogger("botv2.tracking")
 
 
-def _upsert(store_name: str, rec: dict) -> None:
+def _upsert(store_name: str, rec: dict) -> bool:
+    """Insert or merge `rec` (matched by id) into a store. Returns the save result (True on
+    persist, False on a failed write) so a caller that must gate on durability can check it."""
     data = state.load(store_name, list)
     for i, r in enumerate(data):
         if r.get("id") == rec["id"]:
             data[i] = {**r, **rec}
-            state.save(store_name, data)
-            return
+            return state.save(store_name, data)
     data.append(rec)
-    state.save(store_name, data)
+    return state.save(store_name, data)
 
 
 # ── per-cert money ledger (the source of truth for the owed balance) ─────────
@@ -728,7 +729,6 @@ def record_quote(channel_id, snapshot: dict, channel_name: str = "",
     the Triumph-value reconciliation (portal diffs each against the approved value)."""
     if not snapshot:
         return
-    clear_voided(channel_id)                         # a fresh quote reactivates a previously-voided channel
     cur = next((r for r in state.load("tickets", list)
                 if r.get("id") == f"tk_{channel_id}"), None)
     existing_owed = next((r for r in state.load("owed", list)
@@ -798,7 +798,8 @@ def record_quote(channel_id, snapshot: dict, channel_name: str = "",
     }
     if review:
         rec["review_overlaps"] = review
-    _upsert("tickets", rec)
+    if _upsert("tickets", rec):                       # only reactivate the channel (clear the voided
+        clear_voided(channel_id)                      # guard) once the replacement quote DURABLY persists
 
 
 def counts() -> dict:

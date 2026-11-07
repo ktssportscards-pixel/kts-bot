@@ -1153,6 +1153,23 @@ def test_void():
           "void: marker-save failure bails (ok=False, ticket NOT removed)")
     check(any(r["id"] == "tk_981" for r in tracking.state.load("tickets", list)),
           "void: ticket intact when the voided marker couldn't persist")
+    # a fresh quote whose ticket-save FAILS must NOT clear the guard (no durable replacement quote)
+    tracking.state.save("tickets", [])
+    tracking.state.save("owed", [])
+    tracking.state.save("voided", [])
+    tracking.record_quote(982, {"username": "rq", "comp": 50, "payout": 45, "cards": 1,
+                                "certs": {"rq1": 50}, "cert_offers": {"rq1": 45}}, channel_name="rq")
+    tracking.void_ticket(982)
+    check(tracking.is_voided(982), "void: guard set before the failed-requote case")
+    _os4 = tracking.state.save
+    tracking.state.save = lambda name, data: False if name == "tickets" else _os4(name, data)
+    try:
+        tracking.record_quote(982, {"username": "rq", "comp": 50, "payout": 45, "cards": 1,
+                                    "certs": {"rq2": 50}, "cert_offers": {"rq2": 45}}, channel_name="rq")
+    finally:
+        tracking.state.save = _os4
+    check(tracking.is_voided(982),
+          "void: a fresh quote that fails to persist keeps the cancellation guard")
     tracking.state.save("tickets", [])
     tracking.state.save("owed", [])
     tracking.state.save("channel_sheet", {})
