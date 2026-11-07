@@ -144,26 +144,24 @@ async def handle(bot, message) -> bool:
                                  f"${float(r.get('payout', 0) or 0):,.2f}, {r.get('date', '')}")
                 await _dm_kevin_result(message, channel, "\n".join(lines))
                 return True
-        # Status / force gate.
+        # Status / force gate — applies ONLY when a ticket actually exists (a real balance needs
+        # force). With no ticket we still call the idempotent purge below, so a re-run clears
+        # residual state left by a prior partial void instead of stalling at "nothing to void".
         rows = tracking.find_tickets(channel_id=cid)
-        if not rows:
-            await _dm_kevin_result(message, channel, f"ℹ️ No ticket on record for channel `{cid}`.")
-            return True
-        st = rows[0].get("status", "quoted")
-        if st in ("accepted", "paid") and not force:
+        if rows and rows[0].get("status", "quoted") in ("accepted", "paid") and not force:
             await _dm_kevin_result(message, channel,
-                f"🛑 Channel `{cid}` is **{st}** — a real balance of "
+                f"🛑 Channel `{cid}` is **{rows[0].get('status', 'quoted')}** — a real balance of "
                 f"${float(rows[0].get('payout', 0) or 0):,.2f}. Voiding it drops that balance. "
                 f"Re-run as `!void id:{cid} force` if you really mean it.")
             return True
-        # Void it, then clear the in-memory lot + last-quote so a still-open channel can't
-        # re-book it, and (best-effort) trash the Drive buying sheet.
-        res = tracking.void_ticket(cid)
+        res = tracking.void_ticket(cid)          # idempotent full purge (runs even with no ticket)
         vcid = res.get("channel_id", cid)
-        if res.get("ticket_removed"):
-            # Quote is dead — clear the in-memory lot + last-quote + sheet cache so a still-open
-            # channel can't re-book it, and best-effort trash the Drive sheet. Done even if a
-            # later cache write is still pending (ok False), so nothing can reconstruct the quote.
+        # Quote is dead (ticket_removed) OR there's residual cleanup identity → clear the in-memory
+        # lot/last-quote/sheet-cache and best-effort trash the Drive sheet (all idempotent), even if
+        # a trailing cache write is still pending, so nothing can reconstruct the cancelled quote.
+        did_cleanup = res.get("ticket_removed") or res.get("sheet_url") or res.get("had_owed")
+        trashed = None
+        if did_cleanup:
             lots.drop(vcid)
             botmod._last_quote.pop(vcid, None)
             botmod._last_quote.pop(cid, None)
@@ -172,13 +170,13 @@ async def handle(bot, message) -> bool:
                 botmod._channel_sheet.pop(str(cid), None)
             except Exception:
                 pass
-            trashed = None
             if res.get("sheet_url"):
                 try:
                     trashed = await asyncio.to_thread(sheets.trash_sheet, res["sheet_url"])
                 except Exception as e:
                     print(f"[cmd] !void sheet trash failed: {e}")
                     trashed = False
+        if res.get("ticket_removed"):
             out = [f"🗑️ **Voided** {res.get('user') or '?'}'s ticket "
                    f"(`{vcid}`, was **{res.get('status')}**): {res.get('cards', 0)} cards, "
                    f"${float(res.get('payout', 0) or 0):,.2f}.",
@@ -194,7 +192,12 @@ async def handle(bot, message) -> bool:
             await _dm_kevin_result(message, channel, "\n".join(out))
             return True
         if not res.get("found"):
-            await _dm_kevin_result(message, channel, f"ℹ️ Nothing to void for channel `{cid}` (already gone).")
+            if did_cleanup:
+                await _dm_kevin_result(message, channel,
+                    f"🧹 Channel `{cid}` had no live ticket, but I cleared leftover state from an "
+                    f"earlier partial void (sheet cache / owed / lot). It's fully clean now.")
+            else:
+                await _dm_kevin_result(message, channel, f"ℹ️ Nothing to void for channel `{cid}` (already gone).")
             return True
         # found but the ticket was NOT removed → an owed/ticket write failed before anything was
         # removed (ticket still intact).
