@@ -643,9 +643,13 @@ def void_ticket(channel_id) -> dict:
     # 0) cancellation intent FIRST — persist the voided marker BEFORE deleting any reconstruction
     #    anchor (ticket ledger / in-memory lot / Drive sheet), and bail if it can't persist, so we
     #    never remove the anchors while the durable guard is missing. Only when a real ticket exists.
-    if row is not None and not mark_voided(channel_id):
-        summary["ok"] = False
-        return summary
+    if row is not None:
+        if not mark_voided(channel_id):              # channel guard (ship gate; cleared on re-quote)
+            summary["ok"] = False
+            return summary
+        if not mark_void_cutoff(channel_id, datetime.utcnow().isoformat() + "+00:00"):  # permanent rebuild cutoff
+            summary["ok"] = False
+            return summary
     # 1) owed — removing it before the ticket means a failed write never leaves an orphaned
     #    owed row behind a deleted ticket. Bail (everything intact) if it won't persist.
     owed = state.load("owed", list)
@@ -717,6 +721,40 @@ def is_voided(channel_id) -> bool:
         return str(channel_id) in state.load(_VOIDED, list)
     except Exception:
         return False
+
+
+# Cancellation CUTOFF (Fix B): the per-channel marker above is cleared when a fresh quote
+# reactivates the channel — but an older cancelled buying sheet whose Drive trash failed is still
+# discoverable by rebuild_from_sheets (username/time based), so a ship after a successful re-quote
+# could resurrect the cancelled lot from it. Record a per-channel cancellation TIME and have
+# rebuild rebuild ONLY from sheets created STRICTLY AFTER it: a pre-cancellation sheet is excluded
+# while a legitimate post-requote sheet is kept. PERMANENT (not cleared by a fresh quote) and a
+# strict boundary — independent of rebuild's ±10-min channel-creation tolerance (which would leak).
+_VOID_CUTOFF = "void_cutoff"
+
+
+def mark_void_cutoff(channel_id, ts: str) -> bool:
+    """Record (or advance to) the channel's cancellation cutoff `ts` (ISO UTC). Returns True if
+    durably stored (including when an equal/later cutoff is already set)."""
+    try:
+        data = state.load(_VOID_CUTOFF, dict)
+        key = str(channel_id)
+        if data.get(key, "") >= ts:
+            return True
+        data[key] = ts
+        return bool(state.save(_VOID_CUTOFF, data))
+    except Exception as e:
+        print(f"[tracking] mark_void_cutoff failed (non-fatal): {e}")
+        return False
+
+
+def void_cutoff_of(channel_id) -> str:
+    """The channel's cancellation cutoff (ISO UTC), or '' if none — rebuild_from_sheets skips any
+    sheet created at/before it."""
+    try:
+        return state.load(_VOID_CUTOFF, dict).get(str(channel_id), "")
+    except Exception:
+        return ""
 
 
 def record_quote(channel_id, snapshot: dict, channel_name: str = "",

@@ -136,6 +136,21 @@ def rebuild_from_sheets(cid, username, days=4, created_after=None) -> bool:
             orderBy="createdTime asc", pageSize=50,
             fields="files(id,name,createdTime)").execute().get("files", [])
         files = [f for f in files if f["name"].split(" discord")[0].strip() == username]
+        from . import tracking                        # lazy import to avoid a circular import at load
+        cutoff = tracking.void_cutoff_of(cid)          # Fix B: after a cancellation, rebuild ONLY from sheets
+        if cutoff:                                     # created strictly AFTER it, so a cancelled sheet whose
+            try:                                       # Drive trash failed (created before) can't resurrect it
+                cut = datetime.fromisoformat(cutoff.replace("Z", "+00:00"))
+            except Exception:
+                cut = None
+            if cut is not None:
+                def _after_cutoff(f):
+                    try:
+                        return datetime.fromisoformat(
+                            str(f.get("createdTime", "")).replace("Z", "+00:00")) > cut
+                    except Exception:
+                        return True                    # undatable sheet → keep (never drop a legit one)
+                files = [f for f in files if _after_cutoff(f)]
         if not files:
             return False
         gc = sheets.get_gspread_client()

@@ -1170,10 +1170,26 @@ def test_void():
         tracking.state.save = _os4
     check(tracking.is_voided(982),
           "void: a fresh quote that fails to persist keeps the cancellation guard")
+    # Fix B: void records a per-channel cancellation CUTOFF (permanent, survives a fresh quote) so
+    # rebuild_from_sheets rebuilds only from sheets created strictly after it.
+    tracking.state.save("tickets", [])
+    tracking.state.save("voided", [])
+    tracking.state.save("void_cutoff", {})
+    tracking.state.save("channel_sheet", {"983": "https://docs.google.com/spreadsheets/d/SHEET983/edit"})
+    tracking.record_quote(983, {"username": "fb", "comp": 50, "payout": 45, "cards": 1,
+                                "certs": {"fb1": 50}, "cert_offers": {"fb1": 45}}, channel_name="fb")
+    tracking.void_ticket(983)
+    cutoff1 = tracking.void_cutoff_of(983)
+    check(bool(cutoff1), "void: records a per-channel cancellation cutoff")
+    tracking.record_quote(983, {"username": "fb", "comp": 50, "payout": 45, "cards": 1,
+                                "certs": {"fb2": 50}, "cert_offers": {"fb2": 45}}, channel_name="fb")
+    check(tracking.void_cutoff_of(983) == cutoff1,
+          "void: cancellation cutoff is permanent — survives a fresh quote (reactivated channel)")
     tracking.state.save("tickets", [])
     tracking.state.save("owed", [])
     tracking.state.save("channel_sheet", {})
     tracking.state.save("voided", [])
+    tracking.state.save("void_cutoff", {})
 
 
 def main():
