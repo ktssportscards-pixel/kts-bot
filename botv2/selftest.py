@@ -1137,6 +1137,22 @@ def test_void():
     tracking.record_quote(980, {"username": "vmark", "comp": 100, "payout": 90, "cards": 1,
                                 "certs": {"vm2": 100}, "cert_offers": {"vm2": 90}}, channel_name="vmark")
     check(not tracking.is_voided(980), "void: a fresh quote clears the voided marker (channel reactivated)")
+    # marker save failure must bail (ok False) WITHOUT removing the ticket — never delete the
+    # reconstruction anchor while the durable guard is missing (Codex marker-persistence boundary).
+    tracking.state.save("tickets", [{"id": "tk_981", "channel_id": 981, "user": "mf",
+                                     "status": "quoted", "cards": 1, "payout": 30}])
+    tracking.state.save("owed", [])
+    tracking.state.save("voided", [])
+    _os3 = tracking.state.save
+    tracking.state.save = lambda name, data: False if name == "voided" else _os3(name, data)
+    try:
+        mf = tracking.void_ticket(981)
+    finally:
+        tracking.state.save = _os3
+    check(mf.get("ok") is False and not mf.get("ticket_removed"),
+          "void: marker-save failure bails (ok=False, ticket NOT removed)")
+    check(any(r["id"] == "tk_981" for r in tracking.state.load("tickets", list)),
+          "void: ticket intact when the voided marker couldn't persist")
     tracking.state.save("tickets", [])
     tracking.state.save("owed", [])
     tracking.state.save("channel_sheet", {})

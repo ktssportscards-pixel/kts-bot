@@ -639,8 +639,14 @@ def void_ticket(channel_id) -> dict:
         "payout": round(float((row or {}).get("payout", 0) or 0), 2),
         "had_owed": False, "sheet_url": sheet_url,
     }
-    # 1) owed FIRST — removing it before the ticket means a failed write never leaves an
-    #    orphaned owed row behind a deleted ticket. Bail (everything intact) if it won't persist.
+    # 0) cancellation intent FIRST — persist the voided marker BEFORE deleting any reconstruction
+    #    anchor (ticket ledger / in-memory lot / Drive sheet), and bail if it can't persist, so we
+    #    never remove the anchors while the durable guard is missing. Only when a real ticket exists.
+    if row is not None and not mark_voided(channel_id):
+        summary["ok"] = False
+        return summary
+    # 1) owed — removing it before the ticket means a failed write never leaves an orphaned
+    #    owed row behind a deleted ticket. Bail (everything intact) if it won't persist.
     owed = state.load("owed", list)
     had_owed = any(r.get("id") == f"owed_{channel_id}" for r in owed)
     summary["had_owed"] = had_owed
@@ -657,7 +663,6 @@ def void_ticket(channel_id) -> dict:
             summary["ok"] = False
             return summary
         summary["ticket_removed"] = True
-        mark_voided(channel_id)                      # durable guard vs Drive-sheet resurrection (below)
     # 3) channel_sheet cache LAST — only once the ticket is gone. A cache-write failure is still
     #    an incomplete void (ok=False), but it is recoverable: a retry re-enters here (even with
     #    the ticket already gone) and removes the entry. The ticket/owed are already consistent.
@@ -678,16 +683,21 @@ def void_ticket(channel_id) -> dict:
 _VOIDED = "voided"
 
 
-def mark_voided(channel_id) -> None:
-    """Record that this channel's quote was voided (best-effort; never fatal to the void)."""
+def mark_voided(channel_id) -> bool:
+    """Persist cancellation intent. Returns True if the marker is durably set (including already
+    present), False if a needed save did not persist. void_ticket records this BEFORE deleting any
+    reconstruction anchor (ticket ledger / lot / sheet) and bails if it fails — so a cancelled
+    quote never loses its durable guard while its anchors are being removed."""
     try:
         data = state.load(_VOIDED, list)
         key = str(channel_id)
-        if key not in data:
-            data.append(key)
-            state.save(_VOIDED, data)
+        if key in data:
+            return True
+        data.append(key)
+        return bool(state.save(_VOIDED, data))
     except Exception as e:
         print(f"[tracking] mark_voided failed (non-fatal): {e}")
+        return False
 
 
 def clear_voided(channel_id) -> None:
