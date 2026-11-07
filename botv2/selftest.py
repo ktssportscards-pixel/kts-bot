@@ -595,6 +595,7 @@ def test_webserver_auth():
     section("webserver auth")
     from botv2 import webserver
     from botv2 import config as cfg
+    from botv2 import tracking
 
     class _Req:
         def __init__(self, key=None, query=None, body=None):
@@ -630,6 +631,20 @@ def test_webserver_auth():
         check(isinstance(stat.get("flags"), dict) and "delivery_tracking" in stat["flags"]
               and "ship_all_doral" in stat["flags"] and "lanes_schedule" in stat["flags"],
               "status: non-secret flags readout present")
+        # /void (void-from-app) — auth + happy path + idempotency
+        check(st(webserver._void(_Req(body={"user": "nobody"}))) == 401, "auth: /void rejects a missing key")
+        tracking.state.save("tickets", []); tracking.state.save("owed", []); tracking.state.save("channel_sheet", {})
+        tracking.record_quote(951, {"username": "void_web", "comp": 100, "payout": 90, "cards": 1,
+                                    "certs": {"wv1": 100}, "cert_offers": {"wv1": 90}}, channel_name="void_web")
+        vr = _j.loads(loop.run_until_complete(
+            webserver._void(_Req(key="selftestkey", body={"user": "void_web"}))).body.decode())
+        check(vr.get("voided") is True and vr.get("channel_id") == "951",
+              "void: HTTP voids a quoted ticket by user (channel_id as JS-safe string)")
+        check(not tracking.find_tickets(channel_id=951), "void: ticket row gone after HTTP void")
+        nf = _j.loads(loop.run_until_complete(
+            webserver._void(_Req(key="selftestkey", body={"user": "void_web"}))).body.decode())
+        check(nf.get("voided") is False and nf.get("reason") == "not_found",
+              "void: idempotent (second void → not_found)")
         cfg.BOT_API_KEY = ""                          # fails closed when no key is configured
         check(st(webserver._ops(_Req(key="anything"))) == 401,
               "auth: fails closed when BOT_API_KEY is unset")
@@ -1073,6 +1088,24 @@ def test_void():
     # sheets.trash_sheet guard (empty id → False, no network)
     from botv2 import sheets as _sheets
     check(_sheets.trash_sheet("") is False, "void: trash_sheet('') fails soft, no network")
+    # void_ticket ATOMICITY (Codex C5): an owed-save failure must NOT delete the ticket — bail
+    # ok=False with everything intact so a retry recovers (never orphan owed behind a gone ticket).
+    tracking.state.save("tickets", [{"id": "tk_970", "channel_id": 970, "user": "atom",
+                                     "status": "accepted", "cards": 1, "payout": 50}])
+    tracking.state.save("owed", [{"id": "owed_970", "channel_id": 970, "paid": False, "payout": 50}])
+    _orig_save = tracking.state.save
+    tracking.state.save = lambda name, data: False if name == "owed" else _orig_save(name, data)
+    try:
+        rfail = tracking.void_ticket(970)
+    finally:
+        tracking.state.save = _orig_save
+    check(rfail.get("found") is True and rfail.get("ok") is False, "void: owed-save failure → found, ok=False")
+    check(any(r["id"] == "tk_970" for r in tracking.state.load("tickets", list)),
+          "void: ticket intact after failed owed save (recoverable)")
+    check(any(r["id"] == "owed_970" for r in tracking.state.load("owed", list)),
+          "void: owed intact after failed owed save (never orphaned behind a deleted ticket)")
+    check(tracking.void_ticket(970).get("ok") is True, "void: retry completes cleanly after the transient failure")
+    check(not any(r["id"] == "tk_970" for r in tracking.state.load("tickets", list)), "void: retry removed the ticket")
     tracking.state.save("tickets", [])
     tracking.state.save("owed", [])
     tracking.state.save("channel_sheet", {})

@@ -162,6 +162,11 @@ async def handle(bot, message) -> bool:
         if not res.get("found"):
             await _dm_kevin_result(message, channel, f"ℹ️ Nothing to void for channel `{cid}` (already gone).")
             return True
+        if not res.get("ok", True):
+            await _dm_kevin_result(message, channel,
+                f"⚠️ Couldn't fully void channel `{cid}` — a storage write failed partway. Nothing was "
+                f"left half-removed and the ticket is still intact; re-run the same command to finish.")
+            return True
         vcid = res.get("channel_id", cid)
         lots.drop(vcid)
         botmod._last_quote.pop(vcid, None)

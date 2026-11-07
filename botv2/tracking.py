@@ -268,6 +268,10 @@ def record_accepted_ship(channel_id, snapshot: dict):
             e = ledger.get(cert)
             if isinstance(e, dict) and e.get("status") == "accepted":
                 ledger[cert] = {**e, "status": "paid"}
+        carried = ledger.get(_CARRIED)               # legacy carried lots the paid owed covered are settled too
+        if isinstance(carried, list):
+            ledger[_CARRIED] = [{**lot, "status": "paid"} if lot.get("status") == "accepted" else lot
+                                for lot in carried]
 
     # COMBINE-ALL-QUOTES: shipping the lot accepts the FULL union of still-quoted BUY cards the
     # ticket accumulated across EVERY quote message — not just this message's snapshot. A card
@@ -602,42 +606,52 @@ def void_ticket(channel_id) -> dict:
     tracking, delivery sub-record and review flag — all gone with the row), any `owed`
     row, and the `channel_sheet` cache entry. Returns a summary of what was removed —
     {found, channel_id, user, channel_name, status, cards, payout, had_owed, sheet_url} —
-    or {found: False} if there was no ticket. The CALLER drops the in-memory lot, clears
-    bot._last_quote, and (best-effort) trashes the Drive sheet at sheet_url; this function
-    only touches the persisted stores. Idempotent (a second call finds nothing)."""
+    or {found: False} if there was no ticket. `ok` is True only when every store write
+    persisted; ok=False means a write failed partway — the function BAILS with the ticket
+    row left intact so a re-run recovers.
+
+    ORDER is a safety property: remove `owed` FIRST and the `tickets` row LAST, so a
+    persistence failure can never orphan an owed row behind an already-deleted ticket (the
+    ticket is the anchor a retry keys on). The CALLER drops the in-memory lot, clears
+    bot._last_quote, and (best-effort) trashes the Drive sheet at sheet_url — but ONLY on
+    ok=True; this function only touches the persisted stores. Idempotent (a second call
+    finds nothing)."""
     tk_id = f"tk_{channel_id}"
     tickets = state.load("tickets", list)
     row = next((r for r in tickets if r.get("id") == tk_id), None)
     if row is None:
         return {"found": False, "channel_id": channel_id}
     summary = {
-        "found": True,
+        "found": True, "ok": True,
         "channel_id": row.get("channel_id", channel_id),
         "user": row.get("user", ""),
         "channel_name": row.get("channel_name", ""),
         "status": row.get("status", "quoted"),
         "cards": row.get("cards", 0),
         "payout": round(float(row.get("payout", 0) or 0), 2),
+        "had_owed": False, "sheet_url": "",
     }
-    # 1) tickets store — the row carries the ledger, tracking, delivery and review, so
-    #    dropping it removes all of those in one move.
-    state.save("tickets", [r for r in tickets if r.get("id") != tk_id])
-    # 2) owed store — present only once shipped.
+    # 1) owed store FIRST — removing it before the ticket means a failed write never leaves
+    #    an orphaned owed row behind a deleted ticket. Bail (ticket intact) if it won't persist.
     owed = state.load("owed", list)
     had_owed = any(r.get("id") == f"owed_{channel_id}" for r in owed)
-    if had_owed:
-        state.save("owed", [r for r in owed if r.get("id") != f"owed_{channel_id}"])
     summary["had_owed"] = had_owed
-    # 3) channel->sheet cache — hand the url back so the caller can trash the sheet.
+    if had_owed and not state.save("owed", [r for r in owed if r.get("id") != f"owed_{channel_id}"]):
+        summary["ok"] = False
+        return summary                               # ticket + owed both intact → a retry recovers
+    # 2) channel->sheet cache — hand the url back so the caller can trash the sheet.
     cs = state.load("channel_sheet", dict)
-    sheet_url, removed = "", False
+    removed = False
     for key in {str(channel_id), str(summary["channel_id"])}:
         if key in cs:
-            sheet_url = cs.pop(key) or sheet_url
+            summary["sheet_url"] = cs.pop(key) or summary["sheet_url"]
             removed = True
     if removed:
-        state.save("channel_sheet", cs)
-    summary["sheet_url"] = sheet_url
+        state.save("channel_sheet", cs)              # non-fatal: the url is already captured
+    # 3) tickets row LAST (the anchor). If this fails, owed is already gone (idempotent) so a
+    #    retry re-finds the ticket + re-removes owed (no-op) + deletes it. Report ok=False.
+    if not state.save("tickets", [r for r in tickets if r.get("id") != tk_id]):
+        summary["ok"] = False
     return summary
 
 

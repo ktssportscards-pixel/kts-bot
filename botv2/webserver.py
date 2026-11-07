@@ -192,6 +192,86 @@ async def _delivery(req):
         {**res, "stage": "delivered", "posted": posted, "messaging_enabled": config.DELIVERY_TRACKING})
 
 
+async def _void(req):
+    """Void-from-app: the authenticated HTTP twin of the Kevin-only !void command, so the
+    portal Ops board can trigger a TRUE cancel (not just a dismiss). AUTHENTICATED with
+    x-bot-key (fails closed when BOT_API_KEY unset). Body: {user | channel_id, force?}.
+    Removes the ticket row (ledger/tracking/delivery/review), any owed row, the
+    channel_sheet cache, the in-memory lot + _last_quote, and best-effort trashes the
+    Drive buying sheet (recoverable). Idempotent; 'quoted' voids freely, 'accepted'/'paid'
+    need force. WHO may call is the portal's responsibility; this endpoint only checks the
+    bot key. Contract: portal-interface/void-contract.md (code wins on drift)."""
+    if not _authed(req):
+        return _unauthorized()
+    try:
+        body = await req.json()
+    except Exception:
+        return web.json_response({"error": "bad json"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response({"error": "body must be a JSON object"}, status=400)
+    import asyncio
+    from . import tracking, lots, sheets, bot as botmod
+    force = bool(body.get("force"))
+    # Resolve the target → a channel_id (mirrors the !void command's resolution).
+    cid = None
+    raw_cid = body.get("channel_id")
+    user = body.get("user")
+    if raw_cid is not None:
+        s = str(raw_cid).strip()
+        if not s.lstrip("-").isdigit():
+            return web.json_response({"error": "channel_id must be a numeric id"}, status=400)
+        cid = int(s)
+    elif user:
+        uname = str(user).lstrip("@").strip()
+        quoted = tracking.find_tickets(user=uname, status="quoted")
+        if len(quoted) == 1:
+            cid = quoted[0].get("channel_id")
+        elif not quoted:
+            return _json({"voided": False, "reason": "not_found"})
+        else:
+            return _json({"voided": False, "reason": "ambiguous",
+                          "matches": [{"channel_id": r.get("channel_id"),
+                                       "channel_name": r.get("channel_name", ""),
+                                       "cards": r.get("cards", 0)} for r in quoted]})
+    else:
+        return web.json_response({"error": "need user or channel_id"}, status=400)
+    # Status / force gate (a real balance needs force).
+    rows = tracking.find_tickets(channel_id=cid)
+    if not rows:
+        return _json({"voided": False, "reason": "not_found"})
+    st = rows[0].get("status", "quoted")
+    if st in ("accepted", "paid") and not force:
+        return _json({"voided": False, "reason": "needs_force", "status": st})
+    # Void, then clear the in-memory lot + last-quote + sheet cache so a still-open channel
+    # can't re-book it, and best-effort trash the Drive buying sheet. Mirrors the !void caller.
+    res = tracking.void_ticket(cid)
+    if not res.get("found"):
+        return _json({"voided": False, "reason": "not_found"})
+    if not res.get("ok", True):                      # a store write failed partway — nothing half-removed; retry recovers
+        return _json({"voided": False, "reason": "persist_failed",
+                      "channel_id": res.get("channel_id", cid)})
+    vcid = res.get("channel_id", cid)
+    lots.drop(vcid)
+    botmod._last_quote.pop(vcid, None)
+    botmod._last_quote.pop(cid, None)
+    try:
+        botmod._channel_sheet.pop(str(vcid), None)
+        botmod._channel_sheet.pop(str(cid), None)
+    except Exception:
+        pass
+    sheet_trashed = False
+    if res.get("sheet_url"):
+        try:
+            sheet_trashed = bool(await asyncio.to_thread(sheets.trash_sheet, res["sheet_url"]))
+        except Exception as e:
+            print(f"[web] /void sheet trash failed (non-fatal): {e}")
+            sheet_trashed = False
+    return _json({"voided": True, "channel_id": vcid, "user": res.get("user", ""),
+                  "status": res.get("status", "quoted"), "cards": res.get("cards", 0),
+                  "payout": round(float(res.get("payout", 0) or 0), 2),
+                  "had_owed": bool(res.get("had_owed")), "sheet_trashed": sheet_trashed})
+
+
 async def start():
     """Start the web server on $PORT. Returns the AppRunner (keep a reference)."""
     app = web.Application()
@@ -202,6 +282,7 @@ async def start():
         web.get("/status", _status),
         web.get("/analytics", _analytics),
         web.post("/delivery", _delivery),
+        web.post("/void", _void),
     ])
     runner = web.AppRunner(app)
     await runner.setup()
