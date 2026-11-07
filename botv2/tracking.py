@@ -621,6 +621,12 @@ def void_ticket(channel_id) -> dict:
     row = next((r for r in tickets if r.get("id") == tk_id), None)
     if row is None:
         return {"found": False, "channel_id": channel_id}
+    # Capture the sheet url by READING the cache now — do NOT delete it until the ticket is
+    # actually gone (step 3), so a failed ticket write never strands the sheet-cleanup
+    # identity (a retry still sees it and can still trash the Drive sheet).
+    keys = {str(channel_id), str(row.get("channel_id", channel_id))}
+    cs = state.load("channel_sheet", dict)
+    sheet_url = next((cs[k] for k in keys if cs.get(k)), "")
     summary = {
         "found": True, "ok": True,
         "channel_id": row.get("channel_id", channel_id),
@@ -629,29 +635,28 @@ def void_ticket(channel_id) -> dict:
         "status": row.get("status", "quoted"),
         "cards": row.get("cards", 0),
         "payout": round(float(row.get("payout", 0) or 0), 2),
-        "had_owed": False, "sheet_url": "",
+        "had_owed": False, "sheet_url": sheet_url,
     }
-    # 1) owed store FIRST — removing it before the ticket means a failed write never leaves
-    #    an orphaned owed row behind a deleted ticket. Bail (ticket intact) if it won't persist.
+    # 1) owed FIRST — removing it before the ticket means a failed write never leaves an
+    #    orphaned owed row behind a deleted ticket. Bail (everything intact) if it won't persist.
     owed = state.load("owed", list)
     had_owed = any(r.get("id") == f"owed_{channel_id}" for r in owed)
     summary["had_owed"] = had_owed
     if had_owed and not state.save("owed", [r for r in owed if r.get("id") != f"owed_{channel_id}"]):
         summary["ok"] = False
-        return summary                               # ticket + owed both intact → a retry recovers
-    # 2) channel->sheet cache — hand the url back so the caller can trash the sheet.
-    cs = state.load("channel_sheet", dict)
-    removed = False
-    for key in {str(channel_id), str(summary["channel_id"])}:
-        if key in cs:
-            summary["sheet_url"] = cs.pop(key) or summary["sheet_url"]
-            removed = True
-    if removed:
-        state.save("channel_sheet", cs)              # non-fatal: the url is already captured
-    # 3) tickets row LAST (the anchor). If this fails, owed is already gone (idempotent) so a
-    #    retry re-finds the ticket + re-removes owed (no-op) + deletes it. Report ok=False.
+        return summary                               # ticket + owed + cache all intact → retry recovers
+    # 2) tickets row NEXT (the anchor). Bail if it won't persist: owed already gone is
+    #    idempotent, and the channel_sheet (hence sheet_url) is still intact for a retry.
     if not state.save("tickets", [r for r in tickets if r.get("id") != tk_id]):
         summary["ok"] = False
+        return summary
+    # 3) channel_sheet cache LAST — only once the ticket is gone. A cache-write failure is
+    #    still an incomplete void (ok=False), but the ticket/owed are already consistently removed.
+    if any(k in cs for k in keys):
+        for k in keys:
+            cs.pop(k, None)
+        if not state.save("channel_sheet", cs):
+            summary["ok"] = False
     return summary
 
 

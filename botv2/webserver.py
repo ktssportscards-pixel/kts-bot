@@ -211,17 +211,25 @@ async def _void(req):
         return web.json_response({"error": "body must be a JSON object"}, status=400)
     import asyncio
     from . import tracking, lots, sheets, bot as botmod
-    force = bool(body.get("force"))
-    # Resolve the target → a channel_id (mirrors the !void command's resolution).
-    cid = None
+    # STRICT force: only a real JSON boolean true forces. A non-boolean (e.g. the string
+    # "false", which is truthy via bool()) is rejected so it can never authorize a destructive
+    # void of a real balance.
+    if "force" in body and not isinstance(body["force"], bool):
+        return web.json_response({"error": "force must be a boolean"}, status=400)
+    force = body.get("force") is True
     raw_cid = body.get("channel_id")
     user = body.get("user")
+    # EXACTLY ONE target.
+    if (raw_cid is not None) == bool(user):
+        return web.json_response({"error": "provide exactly one of user or channel_id"}, status=400)
+    # Resolve the target → a channel_id (mirrors the !void command's resolution).
+    cid = None
     if raw_cid is not None:
-        s = str(raw_cid).strip()
-        if not s.lstrip("-").isdigit():
-            return web.json_response({"error": "channel_id must be a numeric id"}, status=400)
-        cid = int(s)
-    elif user:
+        # channel_id must be a STRING snowflake (a JSON number loses 64-bit precision in JS).
+        if not isinstance(raw_cid, str) or not raw_cid.strip().lstrip("-").isdigit():
+            return web.json_response({"error": "channel_id must be a numeric string"}, status=400)
+        cid = int(raw_cid.strip())
+    else:
         uname = str(user).lstrip("@").strip()
         quoted = tracking.find_tickets(user=uname, status="quoted")
         if len(quoted) == 1:
@@ -230,11 +238,9 @@ async def _void(req):
             return _json({"voided": False, "reason": "not_found"})
         else:
             return _json({"voided": False, "reason": "ambiguous",
-                          "matches": [{"channel_id": r.get("channel_id"),
+                          "matches": [{"channel_id": str(r.get("channel_id")),
                                        "channel_name": r.get("channel_name", ""),
                                        "cards": r.get("cards", 0)} for r in quoted]})
-    else:
-        return web.json_response({"error": "need user or channel_id"}, status=400)
     # Status / force gate (a real balance needs force).
     rows = tracking.find_tickets(channel_id=cid)
     if not rows:
@@ -247,9 +253,9 @@ async def _void(req):
     res = tracking.void_ticket(cid)
     if not res.get("found"):
         return _json({"voided": False, "reason": "not_found"})
-    if not res.get("ok", True):                      # a store write failed partway — nothing half-removed; retry recovers
+    if not res.get("ok", True):                      # a store write failed partway; the ticket is retained → retry recovers
         return _json({"voided": False, "reason": "persist_failed",
-                      "channel_id": res.get("channel_id", cid)})
+                      "channel_id": str(res.get("channel_id", cid))})
     vcid = res.get("channel_id", cid)
     lots.drop(vcid)
     botmod._last_quote.pop(vcid, None)
@@ -266,7 +272,7 @@ async def _void(req):
         except Exception as e:
             print(f"[web] /void sheet trash failed (non-fatal): {e}")
             sheet_trashed = False
-    return _json({"voided": True, "channel_id": vcid, "user": res.get("user", ""),
+    return _json({"voided": True, "channel_id": str(vcid), "user": res.get("user", ""),
                   "status": res.get("status", "quoted"), "cards": res.get("cards", 0),
                   "payout": round(float(res.get("payout", 0) or 0), 2),
                   "had_owed": bool(res.get("had_owed")), "sheet_trashed": sheet_trashed})
