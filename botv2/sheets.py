@@ -130,6 +130,23 @@ def save_tracking(sheet_url: str, tracking: str) -> None:
     urllib.request.urlopen(req, timeout=15)
 
 
+def trash_sheet(sheet_url_or_id: str) -> bool:
+    """Move a buying sheet to Drive Trash (recoverable) by URL or file id. Best-effort:
+    returns True on success, False if it couldn't (the !void caller then tells Kevin to
+    trash it by hand). Used to fully retire an erroneous quote's sheet so a later
+    ship-rebuild (rebuild_from_sheets) or reconcile can't pick those cards back up."""
+    sid = (_sheet_id_from_url(sheet_url_or_id) if "/d/" in str(sheet_url_or_id)
+           else str(sheet_url_or_id or "").strip())
+    if not sid:
+        return False
+    try:
+        get_drive_service().files().update(fileId=sid, body={"trashed": True}).execute()
+        return True
+    except Exception as e:
+        print(f"[sheets] trash_sheet failed (non-fatal): {e}")
+        return False
+
+
 def fill_buying_sheet(sheet_id: str, rows, sheet_name: str = None) -> list:
     """Write portal rows into the buying sheet the Apps Script just made. Columns:
       A = PSA/CGC   C = CardLadder link   D = name   E = grade   F = category

@@ -47,6 +47,16 @@ def mark_rebuilt(cid) -> None:
     _entry(cid)["rebuilt"] = True
 
 
+def drop(cid) -> bool:
+    """Forget a channel's running lot entirely (used by the !void command so a killed
+    quote can't be rebuilt/shipped). Returns True if there was a lot to drop; pops both
+    the raw key and its str form defensively (callers pass channel.id as an int)."""
+    gone = _lots.pop(cid, None) is not None
+    if _lots.pop(str(cid), None) is not None:
+        gone = True
+    return gone
+
+
 def singles_by_game(cid) -> dict:
     s = (_lots.get(cid) or {}).get("singles") or {}
     return {"one piece": float(s.get("one piece", 0)), "pokemon": float(s.get("pokemon", 0))}

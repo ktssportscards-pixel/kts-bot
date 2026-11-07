@@ -1037,6 +1037,47 @@ def test_owed_accumulation():
           "card_detail lock: Σ card_detail.offer == owed union — the portal's reconcile stays in parity")
 
 
+def test_void():
+    section("void command")
+    tracking.state.save("tickets", [])
+    tracking.state.save("owed", [])
+    tracking.state.save("channel_sheet", {"900": "https://docs.google.com/spreadsheets/d/SHEET900/edit"})
+    # a quoted (unshipped) ticket
+    tracking.record_quote(900, {"username": "void_vic", "comp": 500, "payout": 455, "cards": 2,
+                                "certs": {"z1": 300, "z2": 200},
+                                "cert_offers": {"z1": 270, "z2": 185}}, channel_name="void_vic")
+    check(any(r["id"] == "tk_900" for r in tracking.state.load("tickets", list)), "void: quoted ticket recorded")
+    found = tracking.find_tickets(user="@Void_Vic", status="quoted")
+    check(len(found) == 1 and found[0]["channel_id"] == 900, "void: find by username (case-insensitive)+status")
+    check(tracking.find_tickets(user="void_vic", status="accepted") == [], "void: status filter excludes non-matching")
+    res = tracking.void_ticket(900)
+    check(res["found"] and res["user"] == "void_vic" and res["status"] == "quoted", "void: summary for quoted ticket")
+    check(res["cards"] == 2 and res["payout"] == 455.0 and res["had_owed"] is False, "void: summary totals, no owed")
+    check(res["sheet_url"].endswith("SHEET900/edit"), "void: sheet url handed back")
+    check(not any(r["id"] == "tk_900" for r in tracking.state.load("tickets", list)), "void: tickets row removed")
+    check("900" not in tracking.state.load("channel_sheet", dict), "void: channel_sheet entry removed")
+    check(tracking.void_ticket(900)["found"] is False, "void: idempotent second call")
+    # a SHIPPED ticket → owed row present → void removes owed too
+    tracking.record_accepted_ship(901, {"username": "ship_sly", "comp": 300, "payout": 285, "cards": 1,
+                                         "certs": {"s1": 300}, "cert_offers": {"s1": 285}})
+    check(any(r["id"] == "owed_901" for r in tracking.state.load("owed", list)), "void: shipped ticket has owed row")
+    res2 = tracking.void_ticket(901)
+    check(res2["found"] and res2["status"] == "accepted" and res2["had_owed"] is True, "void: shipped summary + had_owed")
+    check(not any(r["id"] == "owed_901" for r in tracking.state.load("owed", list)), "void: owed row removed")
+    check(not any(r["id"] == "tk_901" for r in tracking.state.load("tickets", list)), "void: shipped tickets row removed")
+    # lots.drop
+    lots.add_slab_values(902, {"c1": 100.0}, {"c1": "pokemon"})
+    check(lots.has_lot(902), "void: lot present before drop")
+    check(lots.drop(902) and not lots.has_lot(902), "void: lots.drop clears the lot")
+    check(lots.drop(902) is False, "void: lots.drop idempotent")
+    # sheets.trash_sheet guard (empty id → False, no network)
+    from botv2 import sheets as _sheets
+    check(_sheets.trash_sheet("") is False, "void: trash_sheet('') fails soft, no network")
+    tracking.state.save("tickets", [])
+    tracking.state.save("owed", [])
+    tracking.state.save("channel_sheet", {})
+
+
 def main():
     print("botv2 selftest:")
     for t in (test_certs, test_pricing, test_lots_shipping, test_tracking_digest,
@@ -1044,7 +1085,7 @@ def main():
               test_alerts_status, test_analytics, test_delivery, test_register_tracking,
               test_lanes_board, test_stale_tickets, test_delivery_ofd,
               test_webserver_auth, test_audit_fixes, test_lanes_schedule,
-              test_owed_accumulation):
+              test_owed_accumulation, test_void):
         t()
     if _fails:
         print(f"\nFAILED ({len(_fails)}):")

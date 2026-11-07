@@ -554,6 +554,68 @@ def resolve_review(channel_id) -> list:
     return cleared
 
 
+def find_tickets(channel_id=None, user=None, status=None) -> list:
+    """Find ticket rows by channel_id (exact) or username (case-insensitive, @-stripped),
+    optionally restricted to a status ('quoted' | 'accepted' | 'paid'). Read-only — used by
+    the !void command to resolve a target and gate on status."""
+    uname = (user or "").lstrip("@").strip().lower() or None
+    out = []
+    for r in state.load("tickets", list):
+        if channel_id is not None and str(r.get("channel_id")) != str(channel_id):
+            continue
+        if uname is not None and (r.get("user") or "").lstrip("@").strip().lower() != uname:
+            continue
+        if status is not None and r.get("status", "quoted") != status:
+            continue
+        out.append(r)
+    return out
+
+
+def void_ticket(channel_id) -> dict:
+    """Completely remove a ticket's bot-side state so its quote can never be accepted,
+    shipped, or paid: delete the `tickets` row (which carries the per-cert ledger,
+    tracking, delivery sub-record and review flag — all gone with the row), any `owed`
+    row, and the `channel_sheet` cache entry. Returns a summary of what was removed —
+    {found, channel_id, user, channel_name, status, cards, payout, had_owed, sheet_url} —
+    or {found: False} if there was no ticket. The CALLER drops the in-memory lot, clears
+    bot._last_quote, and (best-effort) trashes the Drive sheet at sheet_url; this function
+    only touches the persisted stores. Idempotent (a second call finds nothing)."""
+    tk_id = f"tk_{channel_id}"
+    tickets = state.load("tickets", list)
+    row = next((r for r in tickets if r.get("id") == tk_id), None)
+    if row is None:
+        return {"found": False, "channel_id": channel_id}
+    summary = {
+        "found": True,
+        "channel_id": row.get("channel_id", channel_id),
+        "user": row.get("user", ""),
+        "channel_name": row.get("channel_name", ""),
+        "status": row.get("status", "quoted"),
+        "cards": row.get("cards", 0),
+        "payout": round(float(row.get("payout", 0) or 0), 2),
+    }
+    # 1) tickets store — the row carries the ledger, tracking, delivery and review, so
+    #    dropping it removes all of those in one move.
+    state.save("tickets", [r for r in tickets if r.get("id") != tk_id])
+    # 2) owed store — present only once shipped.
+    owed = state.load("owed", list)
+    had_owed = any(r.get("id") == f"owed_{channel_id}" for r in owed)
+    if had_owed:
+        state.save("owed", [r for r in owed if r.get("id") != f"owed_{channel_id}"])
+    summary["had_owed"] = had_owed
+    # 3) channel->sheet cache — hand the url back so the caller can trash the sheet.
+    cs = state.load("channel_sheet", dict)
+    sheet_url, removed = "", False
+    for key in {str(channel_id), str(summary["channel_id"])}:
+        if key in cs:
+            sheet_url = cs.pop(key) or sheet_url
+            removed = True
+    if removed:
+        state.save("channel_sheet", cs)
+    summary["sheet_url"] = sheet_url
+    return summary
+
+
 def record_quote(channel_id, snapshot: dict, channel_name: str = "",
                  card_detail: list = None, passed: list = None) -> None:
     """Record/refresh a ticket at QUOTE time (status 'quoted') so OPEN tickets show on

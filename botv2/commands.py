@@ -5,7 +5,30 @@ Handled BEFORE the ticket gate so `!adopt` works in a channel the gate doesn't y
 recognize (an overflow ticket). Unknown commands fall through to normal processing
 (which simply ignores non-cert text), so this never swallows a real message.
 """
+import asyncio
+
 from . import config, tickets, tracking
+
+
+async def _dm_kevin_result(message, channel, text) -> None:
+    """DM Kevin a command result. If typed in a guild channel, delete the command first
+    (it may name a seller / carry $ figures) and stay silent there — no customer-facing
+    ack. Falls back to a terse channel notice only if the DM itself fails."""
+    in_guild = getattr(channel, "guild", None) is not None
+    if in_guild:
+        try:
+            await message.delete()
+        except Exception:
+            pass
+    try:
+        await message.author.send(text)
+    except Exception as e:
+        print(f"[cmd] result DM failed: {e}")
+        if in_guild:
+            try:
+                await channel.send("⚠️ Couldn't DM you — open your DMs to the bot and retry.")
+            except Exception:
+                pass
 
 
 async def handle(bot, message) -> bool:
@@ -33,6 +56,7 @@ async def handle(bot, message) -> bool:
                      "• `!adopt` — treat this channel as a ticket\n"
                      "• `!paid` — mark this ticket's lot paid\n"
                      "• `!resolve` — clear a ticket's ⚠️ review flag after you've checked it (money unchanged)\n"
+                     "• `!void <user | id:channel>` — kill a quote so it can't be accepted/shipped/paid (off-hours/error); add `force` for a shipped ticket\n"
                      "• `!bands` — DM you the live allocation board\n"
                      "• `!lanes` — DM you the customer-safe lanes board (preview before it goes live)\n"
                      "• `!stats [days]` — DM you volume + payout analytics\n"
@@ -68,6 +92,102 @@ async def handle(bot, message) -> bool:
                                f"The owed amount is unchanged — pay it when you're ready.")
         else:
             await channel.send("ℹ️ Nothing to resolve — this ticket has no review flag.")
+        return True
+
+    if cmd == "void":
+        # Kill a quote so it can never be accepted/shipped/paid — the bot-side twin of the
+        # portal's remove-submission control. Works by username (the seller's OPEN quote)
+        # or an explicit `id:<channel_id>`, runnable from a DM even after the ticket
+        # channel is deleted. A shipped/paid ticket (a real balance) needs `force`.
+        if not is_kevin:
+            return True
+        from . import lots, sheets, bot as botmod
+        a = parts[1:]
+        force = any(w.lower() == "force" for w in a)
+        target = next((w for w in a if w.lower() != "force"), None)
+        if not target:
+            await _dm_kevin_result(message, channel,
+                "**!void** — kill a quote so it can't be accepted, shipped, or paid.\n"
+                "• `!void <username>` — voids that seller's OPEN (quoted) ticket\n"
+                "• `!void id:<channel_id>` — voids one specific ticket\n"
+                "• add `force` to void a shipped/paid ticket (drops a real balance)\n"
+                "Best run in a DM with me.")
+            return True
+        # Resolve the target → a channel_id (or send a disambiguation / error and stop).
+        cid = None
+        if target.lower().startswith("id:"):
+            raw = target[3:]
+            if not raw.lstrip("-").isdigit():
+                await _dm_kevin_result(message, channel, f"⚠️ `{target}` isn't a valid channel id.")
+                return True
+            cid = int(raw)
+        elif target.lstrip("-").isdigit():
+            cid = int(target)
+        else:
+            uname = target.lstrip("@")
+            quoted = tracking.find_tickets(user=uname, status="quoted")
+            if len(quoted) == 1:
+                cid = quoted[0].get("channel_id")
+            elif not quoted:
+                others = tracking.find_tickets(user=uname)
+                if others:
+                    await _dm_kevin_result(message, channel,
+                        f"ℹ️ No OPEN (quoted) ticket for **{uname}** — their {len(others)} ticket(s) are "
+                        f"already shipped/paid. To void one of those, use `!void id:<channel_id> force`.")
+                else:
+                    await _dm_kevin_result(message, channel, f"ℹ️ No ticket on record for **{uname}**.")
+                return True
+            else:
+                lines = [f"⚠️ **{uname}** has {len(quoted)} open quotes — pick one with `!void id:<channel_id>`:"]
+                for r in quoted:
+                    lines.append(f"• `id:{r.get('channel_id')}` — {r.get('cards', 0)} cards, "
+                                 f"${float(r.get('payout', 0) or 0):,.2f}, {r.get('date', '')}")
+                await _dm_kevin_result(message, channel, "\n".join(lines))
+                return True
+        # Status / force gate.
+        rows = tracking.find_tickets(channel_id=cid)
+        if not rows:
+            await _dm_kevin_result(message, channel, f"ℹ️ No ticket on record for channel `{cid}`.")
+            return True
+        st = rows[0].get("status", "quoted")
+        if st in ("accepted", "paid") and not force:
+            await _dm_kevin_result(message, channel,
+                f"🛑 Channel `{cid}` is **{st}** — a real balance of "
+                f"${float(rows[0].get('payout', 0) or 0):,.2f}. Voiding it drops that balance. "
+                f"Re-run as `!void id:{cid} force` if you really mean it.")
+            return True
+        # Void it, then clear the in-memory lot + last-quote so a still-open channel can't
+        # re-book it, and (best-effort) trash the Drive buying sheet.
+        res = tracking.void_ticket(cid)
+        if not res.get("found"):
+            await _dm_kevin_result(message, channel, f"ℹ️ Nothing to void for channel `{cid}` (already gone).")
+            return True
+        vcid = res.get("channel_id", cid)
+        lots.drop(vcid)
+        botmod._last_quote.pop(vcid, None)
+        botmod._last_quote.pop(cid, None)
+        try:
+            botmod._channel_sheet.pop(str(vcid), None)
+            botmod._channel_sheet.pop(str(cid), None)
+        except Exception:
+            pass
+        trashed = None
+        if res.get("sheet_url"):
+            try:
+                trashed = await asyncio.to_thread(sheets.trash_sheet, res["sheet_url"])
+            except Exception as e:
+                print(f"[cmd] !void sheet trash failed: {e}")
+                trashed = False
+        out = [f"🗑️ **Voided** {res.get('user') or '?'}'s ticket "
+               f"(`{vcid}`, was **{res.get('status')}**): {res.get('cards', 0)} cards, "
+               f"${float(res.get('payout', 0) or 0):,.2f}.",
+               "Removed: quote record" + (" + owed balance" if res.get("had_owed") else "")
+               + " + sheet cache + running lot."]
+        if res.get("sheet_url"):
+            out.append("🗑️ Buying sheet moved to Drive trash (recoverable)." if trashed
+                       else f"⚠️ Couldn't auto-trash the buying sheet — do it by hand: {res['sheet_url']}")
+        out.append("It can no longer be accepted, shipped, or paid.")
+        await _dm_kevin_result(message, channel, "\n".join(out))
         return True
 
     if cmd == "bands":
