@@ -131,19 +131,43 @@ def save_tracking(sheet_url: str, tracking: str) -> None:
 
 
 def trash_sheet(sheet_url_or_id: str) -> bool:
-    """Move a buying sheet to Drive Trash (recoverable) by URL or file id. Best-effort:
-    returns True on success, False if it couldn't (the !void caller then tells Kevin to
-    trash it by hand). Used to fully retire an erroneous quote's sheet so a later
-    ship-rebuild (rebuild_from_sheets) or reconcile can't pick those cards back up."""
+    """Move a buying sheet to Drive Trash (recoverable) by URL or file id. Returns True if
+    trashed, False if it couldn't (the !void caller then tells Kevin to trash it by hand).
+    Used to retire a voided/erroneous quote's sheet so it doesn't clutter Drive and a later
+    ship-rebuild (rebuild_from_sheets) or reconcile can't pick those cards back up.
+
+    The buying sheets are OWNED by Kevin's Google account (the Apps Script creates them as
+    him), and in his My Drive a non-owner can't trash a file — so the bot's own service
+    account (a shared EDITOR) can't do it. We therefore ask the Apps Script to trash it
+    (action=trash_sheet): it runs AS the owner, so setTrashed works. The service-account
+    Drive API is kept only as a fallback (it succeeds only if the SA happens to own the file)."""
     sid = (_sheet_id_from_url(sheet_url_or_id) if "/d/" in str(sheet_url_or_id)
            else str(sheet_url_or_id or "").strip())
     if not sid:
         return False
+    # Primary: Apps Script runs as the sheet's OWNER, so it can actually trash it.
+    try:
+        data = json.dumps({"action": "trash_sheet", "sheet_id": sid}).encode()
+        req = urllib.request.Request(config.APPS_SCRIPT_URL, data=data,
+                                     headers={"Content-Type": "application/json",
+                                              "User-Agent": "KTS-Bot/2.0"})
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            body = resp.read().decode()
+        try:
+            ok = bool(json.loads(body).get("success"))
+        except Exception:
+            ok = ("trashed" in body.lower()) or ('"success":true' in body.replace(" ", "").lower())
+        if ok:
+            return True
+        print(f"[sheets] Apps Script trash_sheet non-success: {body[:200]}")
+    except Exception as e:
+        print(f"[sheets] Apps Script trash_sheet failed: {e}")
+    # Fallback: service-account Drive API (only works if the SA owns the file).
     try:
         get_drive_service().files().update(fileId=sid, body={"trashed": True}).execute()
         return True
     except Exception as e:
-        print(f"[sheets] trash_sheet failed (non-fatal): {e}")
+        print(f"[sheets] trash_sheet SA fallback failed (non-fatal): {e}")
         return False
 
 
