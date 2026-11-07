@@ -1106,6 +1106,25 @@ def test_void():
           "void: owed intact after failed owed save (never orphaned behind a deleted ticket)")
     check(tracking.void_ticket(970).get("ok") is True, "void: retry completes cleanly after the transient failure")
     check(not any(r["id"] == "tk_970" for r in tracking.state.load("tickets", list)), "void: retry removed the ticket")
+    # cache-write failure at the FINAL step: the quote still dies (ticket_removed) so the caller
+    # clears memory + trashes — but ok=False and a retry completes the leftover cache cleanup.
+    tracking.state.save("tickets", [{"id": "tk_971", "channel_id": 971, "user": "catom",
+                                     "status": "quoted", "cards": 1, "payout": 40}])
+    tracking.state.save("owed", [])
+    tracking.state.save("channel_sheet", {"971": "https://docs.google.com/spreadsheets/d/SHEET971/edit"})
+    _orig_save2 = tracking.state.save
+    tracking.state.save = lambda name, data: False if name == "channel_sheet" else _orig_save2(name, data)
+    try:
+        cfail = tracking.void_ticket(971)
+    finally:
+        tracking.state.save = _orig_save2
+    check(cfail.get("ticket_removed") is True and cfail.get("ok") is False,
+          "void: cache-write failure → ticket_removed True (quote dead) + ok=False")
+    check(cfail.get("sheet_url", "").endswith("SHEET971/edit"), "void: sheet_url returned despite cache-write failure")
+    check(not any(r["id"] == "tk_971" for r in tracking.state.load("tickets", list)), "void: ticket gone after cache-fail")
+    retry971 = tracking.void_ticket(971)
+    check(retry971.get("ok") is True and "971" not in tracking.state.load("channel_sheet", dict),
+          "void: retry after cache-fail completes the cache cleanup")
     tracking.state.save("tickets", [])
     tracking.state.save("owed", [])
     tracking.state.save("channel_sheet", {})

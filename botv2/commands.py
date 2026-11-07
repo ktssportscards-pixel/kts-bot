@@ -159,40 +159,48 @@ async def handle(bot, message) -> bool:
         # Void it, then clear the in-memory lot + last-quote so a still-open channel can't
         # re-book it, and (best-effort) trash the Drive buying sheet.
         res = tracking.void_ticket(cid)
+        vcid = res.get("channel_id", cid)
+        if res.get("ticket_removed"):
+            # Quote is dead — clear the in-memory lot + last-quote + sheet cache so a still-open
+            # channel can't re-book it, and best-effort trash the Drive sheet. Done even if a
+            # later cache write is still pending (ok False), so nothing can reconstruct the quote.
+            lots.drop(vcid)
+            botmod._last_quote.pop(vcid, None)
+            botmod._last_quote.pop(cid, None)
+            try:
+                botmod._channel_sheet.pop(str(vcid), None)
+                botmod._channel_sheet.pop(str(cid), None)
+            except Exception:
+                pass
+            trashed = None
+            if res.get("sheet_url"):
+                try:
+                    trashed = await asyncio.to_thread(sheets.trash_sheet, res["sheet_url"])
+                except Exception as e:
+                    print(f"[cmd] !void sheet trash failed: {e}")
+                    trashed = False
+            out = [f"🗑️ **Voided** {res.get('user') or '?'}'s ticket "
+                   f"(`{vcid}`, was **{res.get('status')}**): {res.get('cards', 0)} cards, "
+                   f"${float(res.get('payout', 0) or 0):,.2f}.",
+                   "Removed: quote record" + (" + owed balance" if res.get("had_owed") else "")
+                   + " + sheet cache + running lot."]
+            if res.get("sheet_url"):
+                out.append("🗑️ Buying sheet moved to Drive trash (recoverable)." if trashed
+                           else f"⚠️ Couldn't auto-trash the buying sheet — do it by hand: {res['sheet_url']}")
+            out.append("It can no longer be accepted, shipped, or paid.")
+            if not res.get("ok", True):
+                out.append("(Minor: the sheet-cache entry didn't clear on the first write — harmless; "
+                           "re-run `!void` once to tidy it. The quote is fully dead regardless.)")
+            await _dm_kevin_result(message, channel, "\n".join(out))
+            return True
         if not res.get("found"):
             await _dm_kevin_result(message, channel, f"ℹ️ Nothing to void for channel `{cid}` (already gone).")
             return True
-        if not res.get("ok", True):
-            await _dm_kevin_result(message, channel,
-                f"⚠️ Couldn't fully void channel `{cid}` — a storage write failed partway. Nothing was "
-                f"left half-removed and the ticket is still intact; re-run the same command to finish.")
-            return True
-        vcid = res.get("channel_id", cid)
-        lots.drop(vcid)
-        botmod._last_quote.pop(vcid, None)
-        botmod._last_quote.pop(cid, None)
-        try:
-            botmod._channel_sheet.pop(str(vcid), None)
-            botmod._channel_sheet.pop(str(cid), None)
-        except Exception:
-            pass
-        trashed = None
-        if res.get("sheet_url"):
-            try:
-                trashed = await asyncio.to_thread(sheets.trash_sheet, res["sheet_url"])
-            except Exception as e:
-                print(f"[cmd] !void sheet trash failed: {e}")
-                trashed = False
-        out = [f"🗑️ **Voided** {res.get('user') or '?'}'s ticket "
-               f"(`{vcid}`, was **{res.get('status')}**): {res.get('cards', 0)} cards, "
-               f"${float(res.get('payout', 0) or 0):,.2f}.",
-               "Removed: quote record" + (" + owed balance" if res.get("had_owed") else "")
-               + " + sheet cache + running lot."]
-        if res.get("sheet_url"):
-            out.append("🗑️ Buying sheet moved to Drive trash (recoverable)." if trashed
-                       else f"⚠️ Couldn't auto-trash the buying sheet — do it by hand: {res['sheet_url']}")
-        out.append("It can no longer be accepted, shipped, or paid.")
-        await _dm_kevin_result(message, channel, "\n".join(out))
+        # found but the ticket was NOT removed → an owed/ticket write failed before anything was
+        # removed (ticket still intact).
+        await _dm_kevin_result(message, channel,
+            f"⚠️ Couldn't void channel `{cid}` — a storage write failed before anything was removed "
+            f"(the ticket is still intact). Re-run the same command to retry.")
         return True
 
     if cmd == "bands":

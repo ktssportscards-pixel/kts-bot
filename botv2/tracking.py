@@ -619,22 +619,24 @@ def void_ticket(channel_id) -> dict:
     tk_id = f"tk_{channel_id}"
     tickets = state.load("tickets", list)
     row = next((r for r in tickets if r.get("id") == tk_id), None)
-    if row is None:
-        return {"found": False, "channel_id": channel_id}
-    # Capture the sheet url by READING the cache now — do NOT delete it until the ticket is
-    # actually gone (step 3), so a failed ticket write never strands the sheet-cleanup
-    # identity (a retry still sees it and can still trash the Drive sheet).
-    keys = {str(channel_id), str(row.get("channel_id", channel_id))}
+    # Do NOT early-return when the ticket is absent: a prior void may have deleted the ticket
+    # but failed on a later write, leaving residual owed/channel_sheet. This is an idempotent
+    # FULL PURGE — it clears whatever bot-side state remains for the channel, so a retry (even
+    # with the ticket already gone) completes the cleanup rather than stalling at not_found.
+    cid_val = (row or {}).get("channel_id", channel_id)
+    keys = {str(channel_id), str(cid_val)}
     cs = state.load("channel_sheet", dict)
-    sheet_url = next((cs[k] for k in keys if cs.get(k)), "")
+    sheet_url = next((cs[k] for k in keys if cs.get(k)), "")   # READ now; delete LAST (step 3)
     summary = {
-        "found": True, "ok": True,
-        "channel_id": row.get("channel_id", channel_id),
-        "user": row.get("user", ""),
-        "channel_name": row.get("channel_name", ""),
-        "status": row.get("status", "quoted"),
-        "cards": row.get("cards", 0),
-        "payout": round(float(row.get("payout", 0) or 0), 2),
+        "found": row is not None,                    # a ticket existed at call time
+        "ok": True,
+        "ticket_removed": False,                     # set True once THIS call deletes the ticket row
+        "channel_id": cid_val,
+        "user": (row or {}).get("user", ""),
+        "channel_name": (row or {}).get("channel_name", ""),
+        "status": (row or {}).get("status", "quoted"),
+        "cards": (row or {}).get("cards", 0),
+        "payout": round(float((row or {}).get("payout", 0) or 0), 2),
         "had_owed": False, "sheet_url": sheet_url,
     }
     # 1) owed FIRST — removing it before the ticket means a failed write never leaves an
@@ -646,12 +648,18 @@ def void_ticket(channel_id) -> dict:
         summary["ok"] = False
         return summary                               # ticket + owed + cache all intact → retry recovers
     # 2) tickets row NEXT (the anchor). Bail if it won't persist: owed already gone is
-    #    idempotent, and the channel_sheet (hence sheet_url) is still intact for a retry.
-    if not state.save("tickets", [r for r in tickets if r.get("id") != tk_id]):
-        summary["ok"] = False
-        return summary
-    # 3) channel_sheet cache LAST — only once the ticket is gone. A cache-write failure is
-    #    still an incomplete void (ok=False), but the ticket/owed are already consistently removed.
+    #    idempotent, and the channel_sheet (hence sheet_url) is still intact for a retry. Once
+    #    this succeeds the quote is DEAD — ticket_removed tells the caller to clear in-memory
+    #    state + trash the sheet NOW (even if the cache write below later fails), so a ship can
+    #    never reconstruct the cancelled quote.
+    if row is not None:
+        if not state.save("tickets", [r for r in tickets if r.get("id") != tk_id]):
+            summary["ok"] = False
+            return summary
+        summary["ticket_removed"] = True
+    # 3) channel_sheet cache LAST — only once the ticket is gone. A cache-write failure is still
+    #    an incomplete void (ok=False), but it is recoverable: a retry re-enters here (even with
+    #    the ticket already gone) and removes the entry. The ticket/owed are already consistent.
     if any(k in cs for k in keys):
         for k in keys:
             cs.pop(k, None)

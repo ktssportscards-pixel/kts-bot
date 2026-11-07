@@ -251,31 +251,34 @@ async def _void(req):
     # Void, then clear the in-memory lot + last-quote + sheet cache so a still-open channel
     # can't re-book it, and best-effort trash the Drive buying sheet. Mirrors the !void caller.
     res = tracking.void_ticket(cid)
+    vcid = res.get("channel_id", cid)
+    if res.get("ticket_removed"):
+        # the quote is DEAD — clear in-memory state + trash the sheet NOW, even if the cache
+        # write is still pending (ok False), so a ship can't reconstruct the cancelled quote.
+        lots.drop(vcid)
+        botmod._last_quote.pop(vcid, None)
+        botmod._last_quote.pop(cid, None)
+        try:
+            botmod._channel_sheet.pop(str(vcid), None)
+            botmod._channel_sheet.pop(str(cid), None)
+        except Exception:
+            pass
+        sheet_trashed = False
+        if res.get("sheet_url"):
+            try:
+                sheet_trashed = bool(await asyncio.to_thread(sheets.trash_sheet, res["sheet_url"]))
+            except Exception as e:
+                print(f"[web] /void sheet trash failed (non-fatal): {e}")
+                sheet_trashed = False
+        return _json({"voided": True, "channel_id": str(vcid), "user": res.get("user", ""),
+                      "status": res.get("status", "quoted"), "cards": res.get("cards", 0),
+                      "payout": round(float(res.get("payout", 0) or 0), 2),
+                      "had_owed": bool(res.get("had_owed")), "sheet_trashed": sheet_trashed,
+                      "cache_cleanup_pending": not res.get("ok", True)})
     if not res.get("found"):
         return _json({"voided": False, "reason": "not_found"})
-    if not res.get("ok", True):                      # a store write failed partway; the ticket is retained → retry recovers
-        return _json({"voided": False, "reason": "persist_failed",
-                      "channel_id": str(res.get("channel_id", cid))})
-    vcid = res.get("channel_id", cid)
-    lots.drop(vcid)
-    botmod._last_quote.pop(vcid, None)
-    botmod._last_quote.pop(cid, None)
-    try:
-        botmod._channel_sheet.pop(str(vcid), None)
-        botmod._channel_sheet.pop(str(cid), None)
-    except Exception:
-        pass
-    sheet_trashed = False
-    if res.get("sheet_url"):
-        try:
-            sheet_trashed = bool(await asyncio.to_thread(sheets.trash_sheet, res["sheet_url"]))
-        except Exception as e:
-            print(f"[web] /void sheet trash failed (non-fatal): {e}")
-            sheet_trashed = False
-    return _json({"voided": True, "channel_id": str(vcid), "user": res.get("user", ""),
-                  "status": res.get("status", "quoted"), "cards": res.get("cards", 0),
-                  "payout": round(float(res.get("payout", 0) or 0), 2),
-                  "had_owed": bool(res.get("had_owed")), "sheet_trashed": sheet_trashed})
+    # found but the ticket was NOT removed → an owed/ticket write failed, ticket intact → retry
+    return _json({"voided": False, "reason": "persist_failed", "channel_id": str(vcid)})
 
 
 async def start():
