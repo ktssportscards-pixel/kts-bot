@@ -257,6 +257,18 @@ def record_accepted_ship(channel_id, snapshot: dict):
     ledger = _migrate_ledger((ticket or {}).get("ledger") or {}, existing)
     carried_certs = _carried_certs(ledger)
 
+    # self-heal a partial mark_paid: if the owed row was acknowledged PAID but the ticket
+    # ledger's paid-flag write didn't persist (owed saved, ledger save failed — see
+    # mark_paid's ordering note), the certs that paid row covered are settled. Restore
+    # their paid status so this re-ship can't reopen them. A no-op in the normal case
+    # (a fully-persisted payment already left them 'paid'); genuinely new certs below
+    # still open a fresh unpaid lot.
+    if existing and existing.get("paid"):
+        for cert in (existing.get("cert_payout") or existing.get("certs") or {}):
+            e = ledger.get(cert)
+            if isinstance(e, dict) and e.get("status") == "accepted":
+                ledger[cert] = {**e, "status": "paid"}
+
     # COMBINE-ALL-QUOTES: shipping the lot accepts the FULL union of still-quoted BUY cards the
     # ticket accumulated across EVERY quote message — not just this message's snapshot. A card
     # merely absent from the final message is NOT withdrawn: its allocation slot was claimed the
@@ -505,11 +517,34 @@ def delivery_kevin_message(user: str = "", number: str = "") -> str:
 
 
 def mark_paid(channel_id) -> bool:
-    """Flip the owed entry for a channel to paid. Returns True if found. Also marks
-    the ticket ledger's accepted cards as paid, so they are KEPT but can never be
-    re-queued by a later re-ship or an overlapping new lot (per-cert paid state)."""
-    # 1) ledger: accepted → paid (new; retains the cards so a re-ship stays settled),
-    #    including every accepted carried lot
+    """Flip the owed entry for a channel to paid. Returns True only on a PERSISTED
+    payment. Also marks the ticket ledger's accepted cards as paid, so they are KEPT
+    but can never be re-queued by a later re-ship or an overlapping new lot.
+
+    Write ORDER is a safety property, not incidental: persist the OWED row FIRST — it
+    is the payment-driving projection Kevin actually pays off (/owed, packets) — and
+    BAIL if it doesn't persist, changing nothing else. That guarantees we never end
+    with the ticket ledger reading 'paid' while owed still reads 'unpaid', the mismatch
+    that risks a DOUBLE-PAY off the owed store. Only after owed is safely saved do we
+    mark the ledger paid (the secondary projection that keeps the cards from being
+    re-queued). A failure on that second write leaves owed=paid — the safe direction:
+    record_accepted_ship preserves an already-paid owed row, so the payment is neither
+    lost nor silently reopened."""
+    # 1) owed row FIRST (also covers legacy rows with no ledger). If there's no owed
+    #    row, or the write doesn't persist, change nothing else and report failure.
+    data = state.load("owed", list)
+    hit = False
+    for r in data:
+        if r.get("id") == f"owed_{channel_id}":
+            r["paid"] = True
+            r["paid_date"] = date.today().isoformat()
+            hit = True
+    if not hit:
+        return False
+    if not state.save("owed", data):
+        return False
+    # 2) ledger: accepted → paid (retains the cards so a re-ship stays settled),
+    #    including every accepted carried lot. Secondary to the owed write above.
     for t in state.load("tickets", list):
         if t.get("id") == f"tk_{channel_id}" and t.get("ledger"):
             led = {}
@@ -523,17 +558,7 @@ def mark_paid(channel_id) -> bool:
                     led[c] = e
             _upsert("tickets", {"id": f"tk_{channel_id}", "ledger": led})
             break
-    # 2) owed row: unchanged external behaviour (also covers legacy rows with no ledger)
-    data = state.load("owed", list)
-    hit = False
-    for r in data:
-        if r.get("id") == f"owed_{channel_id}":
-            r["paid"] = True
-            r["paid_date"] = date.today().isoformat()
-            hit = True
-    if hit:
-        state.save("owed", data)
-    return hit
+    return True
 
 
 def resolve_review(channel_id) -> list:
