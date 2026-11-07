@@ -657,6 +657,7 @@ def void_ticket(channel_id) -> dict:
             summary["ok"] = False
             return summary
         summary["ticket_removed"] = True
+        mark_voided(channel_id)                      # durable guard vs Drive-sheet resurrection (below)
     # 3) channel_sheet cache LAST — only once the ticket is gone. A cache-write failure is still
     #    an incomplete void (ok=False), but it is recoverable: a retry re-enters here (even with
     #    the ticket already gone) and removes the entry. The ticket/owed are already consistent.
@@ -666,6 +667,45 @@ def void_ticket(channel_id) -> dict:
         if not state.save("channel_sheet", cs):
             summary["ok"] = False
     return summary
+
+
+# ── durable void marker ─────────────────────────────────────────────────────────
+# The Drive sheet trash on void is best-effort; if it fails (or a crash/concurrent ship
+# races it), rebuild_from_sheets could resurrect the cancelled lot from the un-trashed
+# buying sheet (it queries trashed=false sheets by username). This persisted marker is the
+# belt-and-suspenders: void sets it, a fresh quote clears it, and _handle_ship refuses to
+# rebuild a voided channel — so a cancelled quote can't reconstruct through ANY boundary.
+_VOIDED = "voided"
+
+
+def mark_voided(channel_id) -> None:
+    """Record that this channel's quote was voided (best-effort; never fatal to the void)."""
+    try:
+        data = state.load(_VOIDED, list)
+        key = str(channel_id)
+        if key not in data:
+            data.append(key)
+            state.save(_VOIDED, data)
+    except Exception as e:
+        print(f"[tracking] mark_voided failed (non-fatal): {e}")
+
+
+def clear_voided(channel_id) -> None:
+    """A fresh quote reactivates the channel — drop any voided marker so a later rebuild works."""
+    try:
+        data = state.load(_VOIDED, list)
+        key = str(channel_id)
+        if key in data:
+            state.save(_VOIDED, [x for x in data if x != key])
+    except Exception as e:
+        print(f"[tracking] clear_voided failed (non-fatal): {e}")
+
+
+def is_voided(channel_id) -> bool:
+    try:
+        return str(channel_id) in state.load(_VOIDED, list)
+    except Exception:
+        return False
 
 
 def record_quote(channel_id, snapshot: dict, channel_name: str = "",
@@ -678,6 +718,7 @@ def record_quote(channel_id, snapshot: dict, channel_name: str = "",
     the Triumph-value reconciliation (portal diffs each against the approved value)."""
     if not snapshot:
         return
+    clear_voided(channel_id)                         # a fresh quote reactivates a previously-voided channel
     cur = next((r for r in state.load("tickets", list)
                 if r.get("id") == f"tk_{channel_id}"), None)
     existing_owed = next((r for r in state.load("owed", list)

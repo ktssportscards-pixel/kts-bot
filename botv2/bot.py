@@ -69,8 +69,11 @@ async def alert_kevin(key: str, text: str) -> bool:
 async def _handle_ship(channel) -> None:
     """Customer said 'ship'/'proceed' — give the routed address(es) or the hold."""
     # If a redeploy wiped the in-memory lot, rebuild it from the customer's buying
-    # sheets first so sports/OP route correctly (else shipping fails open to VA).
-    if not lots.has_lot(channel.id):
+    # sheets first so sports/OP route correctly (else shipping fails open to VA). NEVER
+    # rebuild a voided channel — its buying sheet may have survived a best-effort trash
+    # failure, and resurrecting that lot would undo the cancellation (a fresh quote clears
+    # the marker, so a legitimate re-submit still rebuilds).
+    if not lots.has_lot(channel.id) and not tracking.is_voided(channel.id):
         uname = tickets.sanitize_channel_name(channel.name) or channel.name
         try:
             await asyncio.to_thread(lots.rebuild_from_sheets, channel.id, uname, 4,

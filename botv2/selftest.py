@@ -1125,9 +1125,22 @@ def test_void():
     retry971 = tracking.void_ticket(971)
     check(retry971.get("ok") is True and "971" not in tracking.state.load("channel_sheet", dict),
           "void: retry after cache-fail completes the cache cleanup")
+    # durable voided marker: set on void (blocks a ship-time Drive-sheet rebuild), cleared by a
+    # fresh quote so a legitimate re-submit still rebuilds.
+    tracking.state.save("tickets", [])
+    tracking.state.save("owed", [])
+    tracking.state.save("voided", [])
+    tracking.record_quote(980, {"username": "vmark", "comp": 100, "payout": 90, "cards": 1,
+                                "certs": {"vm1": 100}, "cert_offers": {"vm1": 90}}, channel_name="vmark")
+    vmres = tracking.void_ticket(980)
+    check(vmres.get("ticket_removed") and tracking.is_voided(980), "void: sets a durable voided marker")
+    tracking.record_quote(980, {"username": "vmark", "comp": 100, "payout": 90, "cards": 1,
+                                "certs": {"vm2": 100}, "cert_offers": {"vm2": 90}}, channel_name="vmark")
+    check(not tracking.is_voided(980), "void: a fresh quote clears the voided marker (channel reactivated)")
     tracking.state.save("tickets", [])
     tracking.state.save("owed", [])
     tracking.state.save("channel_sheet", {})
+    tracking.state.save("voided", [])
 
 
 def main():
