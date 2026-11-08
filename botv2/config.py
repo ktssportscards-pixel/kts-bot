@@ -109,6 +109,10 @@ GOOGLE_CREDENTIALS_FILE = os.environ.get(
 APPS_SCRIPT_URL = os.environ.get(
     "APPS_SCRIPT_URL",
     "https://script.google.com/macros/s/AKfycbxPenrARSCnPZ6Ddwaokcz24Fwvcobgp0ybvvzJR49cCJ_DUcNoprRXDPpyTJA0rJ71Cg/exec")
+# Shared secret the bot sends in the trash_sheet POST body; the Apps Script web app
+# requires it (Script Property BOT_SHARED_SECRET) before trashing anything. Unset →
+# the Apps Script fails closed (unauthorized), the bot falls back / tells Kevin.
+APPS_SCRIPT_SHARED_SECRET = os.environ.get("APPS_SCRIPT_SHARED_SECRET", "")
 # v1's shared PSA buying-sheet folder. v2 must NOT create sheets here while v1 is
 # live: v1's folder-wide sweeps (boss CSV, customer lookup, stalled requote) have no
 # owner filter and would ingest v2's sheets.

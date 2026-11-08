@@ -147,19 +147,26 @@ def trash_sheet(sheet_url_or_id: str) -> bool:
         return False
     # Primary: Apps Script runs as the sheet's OWNER, so it can actually trash it.
     try:
-        data = json.dumps({"action": "trash_sheet", "sheet_id": sid}).encode()
+        data = json.dumps({"action": "trash_sheet", "sheet_id": sid,
+                           "secret": config.APPS_SCRIPT_SHARED_SECRET}).encode()
         req = urllib.request.Request(config.APPS_SCRIPT_URL, data=data,
                                      headers={"Content-Type": "application/json",
                                               "User-Agent": "KTS-Bot/2.0"})
         with urllib.request.urlopen(req, timeout=20) as resp:
-            body = resp.read().decode()
+            body = resp.read(10000).decode("utf-8", "replace")   # bounded read
+        # STRICT: only a JSON object that explicitly confirms THIS exact sheet was
+        # trashed counts. No substring fallback — bool("false") is True and a denial
+        # like "...was NOT trashed..." contains "trashed"; those were the fail-open holes.
+        ok = False
         try:
-            ok = bool(json.loads(body).get("success"))
+            j = json.loads(body)
+            ok = (isinstance(j, dict) and j.get("success") is True
+                  and j.get("trashed") is True and j.get("sheet_id") == sid)
         except Exception:
-            ok = ("trashed" in body.lower()) or ('"success":true' in body.replace(" ", "").lower())
+            ok = False
         if ok:
             return True
-        print(f"[sheets] Apps Script trash_sheet non-success: {body[:200]}")
+        print("[sheets] Apps Script trash_sheet non-success")   # generic; no body echoed
     except Exception as e:
         print(f"[sheets] Apps Script trash_sheet failed: {e}")
     # Fallback: service-account Drive API (only works if the SA owns the file).

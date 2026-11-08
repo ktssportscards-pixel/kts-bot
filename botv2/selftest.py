@@ -1088,6 +1088,41 @@ def test_void():
     # sheets.trash_sheet guard (empty id → False, no network)
     from botv2 import sheets as _sheets
     check(_sheets.trash_sheet("") is False, "void: trash_sheet('') fails soft, no network")
+    # strict trash-response parser (Codex blocker 3): only a JSON object that explicitly
+    # confirms THIS sheet was trashed is success; every fail-open shape must fall through to
+    # the (mocked-dead) SA fallback → False. No real network, no real Drive.
+    _orig_urlopen = _sheets.urllib.request.urlopen
+    _orig_drive = _sheets.get_drive_service
+    def _no_sa():
+        raise RuntimeError("no SA in test")
+    def _mk_urlopen(body_str):
+        class _R:
+            def read(self, n=-1):
+                return body_str.encode()
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+        return lambda req, timeout=20: _R()
+    _sheets.get_drive_service = _no_sa
+    try:
+        _TID = "SHEETZ123_-abc"
+        _sheets.urllib.request.urlopen = _mk_urlopen(
+            '{"success":true,"trashed":true,"sheet_id":"%s"}' % _TID)
+        check(_sheets.trash_sheet(_TID) is True, "trash: strict parser accepts exact success")
+        for _fb in ['{"success":"false","trashed":true,"sheet_id":"%s"}' % _TID,  # string 'false' is truthy
+                    '{"success":1,"trashed":1,"sheet_id":"%s"}' % _TID,            # truthy non-bool
+                    'the file was NOT trashed',                                   # denial contains "trashed"
+                    '{"success":true,"trashed":true}',                            # missing sheet_id
+                    '{"success":true,"trashed":true,"sheet_id":"OTHERID"}',       # wrong sheet_id
+                    '{"success":true,"trashed":false,"sheet_id":"%s"}' % _TID,    # not actually trashed
+                    '[true]', 'true', 'null', '{"success":true}', '<html>e</html>']:
+            _sheets.urllib.request.urlopen = _mk_urlopen(_fb)
+            check(_sheets.trash_sheet(_TID) is False,
+                  "trash: strict parser rejects fail-open body %r" % _fb[:30])
+    finally:
+        _sheets.urllib.request.urlopen = _orig_urlopen
+        _sheets.get_drive_service = _orig_drive
     # void_ticket ATOMICITY (Codex C5): an owed-save failure must NOT delete the ticket — bail
     # ok=False with everything intact so a retry recovers (never orphan owed behind a gone ticket).
     tracking.state.save("tickets", [{"id": "tk_970", "channel_id": 970, "user": "atom",
