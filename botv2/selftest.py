@@ -1862,8 +1862,9 @@ def test_handlers_and_void_races():
             check(any((URL % 9100) in d and "normalq" in d for d in h.kevin.dms),
                   "quote: Kevin's summary carries the sheet link")
 
-            # 2) tracking in a normal ticket: stored, Kevin told, no warning suffix
-            del h.kevin.dms[:]
+            # 2) tracking in a normal (shipped) ticket: stored, Kevin told, no warning suffix
+            h.say("ship")
+            del h.kevin.dms[:], h.channel.sent[:]
             h.say("1Z999AA10123456784")
             check("noted" in h.channel.sent[-1] and any("Tracking from" in d and "⚠️" not in d for d in h.kevin.dms),
                   "tracking: normal ticket → ack + Kevin DM without a warning")
@@ -2275,6 +2276,56 @@ def test_ship_booking():
     tracking.record_tracking(9211, "1ZEARLYEARLYEARLY3")
     tracking.record_accepted_ship(9211, lot("p1"))
     check(owed_row(9211)["tracking"] == "1ZEARLYEARLYEARLY3", "first lot: a number dropped before 'ship' is kept")
+
+    # 6) Kevin-only visibility (no booking, no payout change):
+    for st in ("tickets", "owed"):
+        tracking.state.save(st, [])
+    # (a) tracking / delivery for cards that were quoted but never booked as owed
+    with _BotHarness(9220, name="neversaidship", rows=buy, sheet_url=URL % 9220) as h:
+        h.say("12345678 23456789")
+        check(tracking.unbooked_quoted(9220) == (2, 180.0), "unbooked_quoted: 2 quoted cards, $180")
+        del h.kevin.dms[:]
+        h.say("1Z999AA10123456784")                      # tracking, but nobody said ship
+        check(owed_row(9220) is None, "a tracking drop still books nothing (unchanged)")
+        check(any("2 quoted card(s) ($180.00)" in d and "NOT booked" in d for d in h.kevin.dms),
+              "tracking for an unbooked lot: Kevin is told it is not in the payout queue")
+        del h.kevin.dms[:]
+        asyncio.run(botmod.notify_delivered(9220, "neversaidship"))
+        check(any("Delivered" in d and "NOT booked" in d for d in h.kevin.dms),
+              "delivered for an unbooked lot: Kevin's delivery DM says so too")
+        h.say("ship")
+        del h.kevin.dms[:]
+        check(tracking.unbooked_quoted(9220) == (0, 0.0), "after 'ship' nothing is left unbooked")
+        asyncio.run(botmod.notify_delivered(9220, "neversaidship"))
+        check(h.kevin.dms and "NOT booked" not in h.kevin.dms[-1], "a booked lot gets the plain delivery DM")
+    # (b) a re-quote that retracts an earlier BUY tells Kevin which cards were removed
+    flip = {"pass": False}
+
+    def rq(cert_list):
+        return all_pass(cert_list) if flip["pass"] else buy(cert_list)
+    with _BotHarness(9221, name="retract", rows=rq, sheet_url=URL % 9221) as h:
+        h.say("12345678 23456789")
+        flip["pass"] = True
+        del h.kevin.dms[:]
+        h.say("12345678")
+        check(any("REMOVED 1 previously quoted card(s)" in d and "12345678" in d for d in h.kevin.dms),
+              "re-quote PASS of a quoted card: Kevin is told it was removed from the lot")
+        check(tracking.unbooked_quoted(9221) == (1, 90.0), "…and only the other card is still quoted")
+    check(tracking.record_quote(9222, {}) == [], "record_quote with no snapshot returns an empty list")
+    # (c) `!owe`: the same card owed in two of one seller's tickets is flagged even at different totals
+    tracking.state.save("owed", [
+        {"id": "owed_9230", "channel_id": 9230, "user": "twotix", "paid": False, "payout": 90.0, "cards": 1,
+         "date": "2026-11-06", "cert_payout": {"77777777": 90.0}},
+        {"id": "owed_9231", "channel_id": 9231, "user": "TwoTix", "paid": False, "payout": 200.0, "cards": 2,
+         "date": "2026-11-07", "cert_payout": {"77777777": 90.0, "88888888": 110.0}},
+        {"id": "owed_9232", "channel_id": 9232, "user": "someoneelse", "paid": False, "payout": 90.0, "cards": 1,
+         "date": "2026-11-07", "cert_payout": {"77777777": 90.0}}])
+    packets = tracking.build_owe_packets()
+    check(packets.count("SAME CARD in another unpaid entry") == 2 and "77777777" in packets,
+          "!owe: the same cert in two unpaid entries of one seller is flagged on both (different totals)")
+    check("SAME CARD" not in tracking.build_payment_packet(
+        next(o for o in tracking.state.load("owed", list) if o["id"] == "owed_9232")),
+          "!owe: another seller's entry is not flagged")
 
     for st in ("tickets", "owed", "channel_sheet", "channel_sheets", "voided", "void_cutoff"):
         tracking.state.save(st, {} if st in ("channel_sheet", "channel_sheets", "void_cutoff") else [])

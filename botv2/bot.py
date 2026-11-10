@@ -191,7 +191,13 @@ async def _handle_tracking(channel, tnum) -> None:
                               f"⚠️ tracking sheet-save failed (#{channel.name}): {e} — "
                               f"the number is noted below; add it to the sheet by hand.")
     if noted:
-        warn = ""
+        # Booking as owed happens only on a ship/proceed message. A tracking number for cards
+        # that are still merely QUOTED means a package is coming for a lot that is not in the
+        # payout queue (no digest line, no `!owe` packet) — tell Kevin; never auto-book here.
+        n_q, amt_q = tracking.unbooked_quoted(channel.id)
+        warn = (f" — ⚠️ {n_q} quoted card(s) (${amt_q:,.2f}) on this ticket are NOT booked as owed "
+                f"(no ship/proceed was handled). `ship` in the ticket books them."
+                if n_q else "")
     elif tracking.is_voided(channel.id):
         warn = (" — ⚠️ this channel's quote was VOIDED: no ticket/owed on record, so the number "
                 "is NOT stored and nothing is booked.")
@@ -223,7 +229,15 @@ async def notify_delivered(channel_id, user: str = "") -> bool:
             await alert_kevin("delivery_post",
                               f"⚠️ delivery: couldn't post the 'arrived' note to channel "
                               f"{channel_id}: {e} — let the customer know by hand if needed.")
-    await ping_kevin(tracking.delivery_kevin_message(user, number))   # always (Kevin's own DM)
+    kmsg = tracking.delivery_kevin_message(user, number)
+    try:
+        n_q, amt_q = tracking.unbooked_quoted(int(channel_id))
+    except Exception:
+        n_q, amt_q = 0, 0.0
+    if n_q:                                            # delivered, but never booked as owed
+        kmsg += (f" ⚠️ {n_q} quoted card(s) (${amt_q:,.2f}) on this ticket are NOT booked as owed — "
+                 f"no ship/proceed was handled, so they're not in the payout queue.")
+    await ping_kevin(kmsg)                             # always (Kevin's own DM)
     return posted
 
 
@@ -634,7 +648,7 @@ async def _handle_message(message) -> None:
         "certs": _lot_values(quote.accepted),
         "cert_offers": {r.cert: r.offer for r in quote.accepted},   # per-cert, for owed accumulation
     }
-    tracking.record_quote(
+    retracted = tracking.record_quote(
         channel.id, _last_quote[channel.id], channel_name=channel.name,
         card_detail=[{"cert": r.cert, "value": r.comp_value, "offer": r.offer,
                       "offer_pct": r.offer_pct, "category": r.category,
@@ -650,6 +664,13 @@ async def _handle_message(message) -> None:
     # messages — one over Discord's 2,000-char cap is rejected whole, which used to abort
     # this handler here: no quote for the customer, no sheet, no summary for Kevin.
     await textsplit.send_chunked(channel, pricing.customer_message(quote, proceed_override=proceed))
+    if retracted:
+        # The customer was just told these don't fit — but they HAD an earlier BUY quote on
+        # them. Make the retraction visible to Kevin (the summary only shows "rejected").
+        await ping_kevin(f"ℹ️ #{channel.name}: this re-quote REMOVED {len(retracted)} previously quoted "
+                         f"card(s) from the lot (now declined): "
+                         + ", ".join(certs.cert_label(c) for c in retracted)
+                         + ". They won't be booked if the customer ships on the earlier quote.")
 
     # Auto-claim: reserve Triumph allocation for the BUYs the instant we quote them,
     # to lock a slot before the team pools fill. DOUBLE-GATED — the portal's own kill

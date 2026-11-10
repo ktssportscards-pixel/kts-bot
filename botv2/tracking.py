@@ -615,6 +615,18 @@ def mark_paid(channel_id) -> bool:
     return True
 
 
+def unbooked_quoted(channel_id) -> tuple:
+    """(cards, payout) of cards on this ticket that are still only QUOTED — priced, but not
+    booked as owed because no ship/proceed message was ever handled. (0, 0.0) if none / no
+    ticket. Read-only: used to warn Kevin when a package is clearly on its way for a lot
+    that is not in the payout queue."""
+    t = next((r for r in state.load("tickets", list) if r.get("id") == f"tk_{channel_id}"), None)
+    if not t:
+        return 0, 0.0
+    payout, _comp, cards = _sum_ledger(t.get("ledger") or {}, ("quoted",))
+    return cards, payout
+
+
 def owed_entry(channel_id):
     """The owed row for this channel (paid or not), or None."""
     return next((r for r in state.load("owed", list) if r.get("id") == f"owed_{channel_id}"), None)
@@ -878,15 +890,17 @@ def void_cutoff_of(channel_id) -> str:
 
 
 def record_quote(channel_id, snapshot: dict, channel_name: str = "",
-                 card_detail: list = None, passed: list = None) -> None:
+                 card_detail: list = None, passed: list = None) -> list:
     """Record/refresh a ticket at QUOTE time (status 'quoted') so OPEN tickets show on
     the ops dashboard before they ship. Upserts the same id ship uses, so a later ship
     just flips it to 'accepted'; never downgrades an already-accepted ticket.
     `card_detail` = per-cert [{cert,value,offer,offer_pct,category,grader,grade,name}]
     (the quote value + what was paid, per card) — feeds the dashboard drill-down AND
-    the Triumph-value reconciliation (portal diffs each against the approved value)."""
+    the Triumph-value reconciliation (portal diffs each against the approved value).
+    Returns the certs this quote REMOVED from the lot (previously quoted, now in `passed`),
+    so the caller can tell Kevin a booked offer was retracted."""
     if not snapshot:
-        return
+        return []
     cur = next((r for r in state.load("tickets", list)
                 if r.get("id") == f"tk_{channel_id}"), None)
     existing_owed = next((r for r in state.load("owed", list)
@@ -958,6 +972,7 @@ def record_quote(channel_id, snapshot: dict, channel_name: str = "",
         rec["review_overlaps"] = review
     if _upsert("tickets", rec):                       # only reactivate the channel (clear the voided
         clear_voided(channel_id)                      # guard) once the replacement quote DURABLY persists
+    return dropped
 
 
 def counts() -> dict:
@@ -1178,6 +1193,17 @@ def build_payment_packet(entry: dict, all_unpaid: list = None) -> str:
     if len(dup) > 1:
         flags.append(f"⚠️ DUPLICATE? {len(dup)} unpaid entries for {user} at "
                      f"${amount:,.2f} — check it isn't logged twice before paying.")
+    # The equal-amount check misses the same CARD owed in two of a seller's tickets at
+    # different totals (the ledger is per ticket). Compare the cert lists too.
+    mine = set(entry.get("cert_payout") or entry.get("certs") or {})
+    shared = set()
+    for o in all_unpaid:
+        if o.get("id") != entry.get("id") and _payinfo_key(o.get("user")) == key:
+            shared |= mine & set(o.get("cert_payout") or o.get("certs") or {})
+    if shared:
+        flags.append(f"⚠️ SAME CARD in another unpaid entry for {user}: "
+                     + ", ".join(sorted(str(c) for c in shared))
+                     + " — check it isn't owed twice before paying.")
     if info:
         try:
             upd = datetime.strptime(info.get("updated", ""), "%Y-%m-%d").date()
