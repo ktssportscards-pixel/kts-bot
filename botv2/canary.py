@@ -112,6 +112,10 @@ def main():
                   + (f" — {le.get('key')} at {le.get('at')}" if fresh and isinstance(le, dict) else ""))
             if le and not fresh:
                 print(f"  ··  older last_error on record ({le.get('key')} at {le.get('at')}) — not failing on it")
+            # A live bot in mock-pricing mode quotes customers FAKE prices. (Bots older than the
+            # flag report nothing here → not a failure.)
+            check((d.get("flags") or {}).get("price_mock") is not True,
+                  "/status: the live bot is NOT in mock-pricing mode")
         except Exception as e:
             check(False, f"/status — {e}")
         if CERT:

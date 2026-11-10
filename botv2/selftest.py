@@ -2412,6 +2412,28 @@ def test_alerts_and_lanes():
           "alert_kevin: an undelivered alert (no Kevin id / DM failed) can fire again next time")
     alerts.reset()
 
+    # a scheduled digest that can't be delivered raises an alert instead of vanishing
+    with _BotHarness(8964) as h:
+        check(asyncio.run(botmod._send_digest("payout", "")) is True and not h.kevin.dms,
+              "digest: nothing owed → nothing sent, counts as success")
+        check(asyncio.run(botmod._send_digest("payout", "💰 Payout digest — 1 unpaid")) is True
+              and h.kevin.dms == ["💰 Payout digest — 1 unpaid"], "digest: delivered")
+        del h.kevin.dms[:]
+        fails = {"n": 0}
+        real_send = h.kevin.send
+
+        async def _flaky_send(text):                    # the digest DM fails, the short alert gets through
+            if text.startswith("💰"):
+                fails["n"] += 1
+                raise RuntimeError("discord 500")
+            await real_send(text)
+        h.kevin.send = _flaky_send
+        ok = asyncio.run(botmod._send_digest("payout", "💰 Payout digest — 30 unpaid"))
+        check(ok is False and fails["n"] == 1 and any("could NOT be delivered" in d and "!owe" in d for d in h.kevin.dms)
+              and (alerts.last_error() or {}).get("key") == "digest_send:payout",
+              "digest: a failed send alerts Kevin and is recorded for /status (it used to vanish silently)")
+    alerts.reset()
+
     # the on_message catch-all names the ticket and is rate-limited PER ticket
     with _BotHarness(8960, name="crashy") as h:
         real_handle = botmod._handle_message

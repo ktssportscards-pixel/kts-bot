@@ -311,6 +311,23 @@ def _seconds_until_daily_et(hour: int = 8, now=None) -> float:
     return _real_seconds_until(now, target)
 
 
+async def _send_digest(kind: str, digest: str) -> bool:
+    """DM Kevin a scheduled digest and CHECK that it went out. ping_kevin is best-effort and
+    used to be called blind here, so a digest Discord rejected (or closed DMs) simply never
+    arrived — no alert, nothing on /status. Nothing to send counts as success. On failure:
+    a short alert (it may fail the same way, but it is short and it is recorded for /status)."""
+    if not digest:
+        return True
+    if await ping_kevin(digest):
+        return True
+    await alert_kevin(f"digest_send:{kind}",
+                      f"⚠️ This {kind} digest could NOT be delivered to your DMs "
+                      f"({len(digest):,} characters). " +
+                      ("Run `!owe` for the unpaid queue." if kind == "payout"
+                       else "Run `!stalecheck` to see it."))
+    return False
+
+
 async def _payout_digest_loop():
     """DM Kevin the unpaid-owed digest every Friday 9 AM ET (payouts run Fridays).
     The whole body is guarded so no single failure (scheduling, build, or send) can
@@ -318,9 +335,7 @@ async def _payout_digest_loop():
     while True:
         try:
             await asyncio.sleep(_seconds_until_friday_9am_et())
-            digest = payout_digest.build_digest()
-            if digest:
-                await ping_kevin(digest)
+            await _send_digest("payout", payout_digest.build_digest())
             await asyncio.sleep(90)                # clear the 9:00 minute, no re-fire
         except Exception as e:
             print(f"[bot] payout digest failed (non-fatal): {e}")
@@ -484,9 +499,7 @@ async def _stale_nudge_loop():
     while True:
         try:
             await asyncio.sleep(_seconds_until_daily_et(8))
-            digest = _stale_digest()
-            if digest:
-                await ping_kevin(digest)
+            await _send_digest("stale-ticket", _stale_digest())
             await asyncio.sleep(90)                # clear the minute, no re-fire
         except Exception as e:
             print(f"[bot] stale-nudge loop failed (non-fatal): {e}")
