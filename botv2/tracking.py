@@ -942,11 +942,17 @@ def stale_tickets(today) -> dict:
             "unpaid_stale": unpaid_stale}
 
 
-def record_claim(channel_id, locked: int, total: int) -> None:
-    """Record the auto-claim outcome on this ticket (allocation slots locked)."""
-    _upsert("tickets", {"id": f"tk_{channel_id}",
-                        "claimed": {"locked": int(locked), "total": int(total),
-                                    "at": datetime.now().isoformat(timespec="seconds")}})
+def record_claim(channel_id, locked: int, total: int) -> bool:
+    """Record the auto-claim outcome on this ticket (allocation slots locked). UPDATE-ONLY:
+    if the ticket row is gone (voided while the claim call was in flight) nothing is
+    written — an upsert here used to re-create a bare stub row for a voided channel."""
+    data = state.load("tickets", list)
+    for r in data:
+        if r.get("id") == f"tk_{channel_id}":
+            r["claimed"] = {"locked": int(locked), "total": int(total),
+                            "at": datetime.now().isoformat(timespec="seconds")}
+            return state.save("tickets", data)
+    return False
 
 
 def ops_view(channel_sheet: dict = None, detail: bool = False) -> list:

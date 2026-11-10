@@ -334,7 +334,15 @@ async def claim_certs(certs: list, idempotency_key: Optional[str] = None,
     on here; otherwise every BUY comes back skipped. Idempotent on (idempotencyKey,
     certId) so a retry can't double-claim. Per-cert issues ride as the row's
     skipped/error; raises PortalAuthError/PortalBadRequest on a 4xx, PortalUnavailable
-    when transient failures exhaust retries."""
+    when transient failures exhaust retries.
+
+    The bot-side half of that gate is enforced HERE as well as at the call site: with
+    config.AUTO_CLAIM off this returns every cert as skipped and makes no request at all
+    (the docstring promised that, but only bot._handle_message actually checked the flag —
+    a second caller would have gone straight to /bot/claim, which has no undo)."""
+    if not config.AUTO_CLAIM:
+        return [ClaimResult(cert_id=_digits(c), skipped="auto-claim is off (BOTV2_AUTO_CLAIM)")
+                for c in certs if str(c).strip()]
     return await _claim_call(config.CLAIM_ENDPOINT, certs, idempotency_key, session)
 
 

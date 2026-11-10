@@ -706,11 +706,28 @@ def test_vip_commands_client():
                                                  customer="topguy", rate_override={"basketball": 97}))
     check(len(rows) == 2 and all(r.cert for r in rows), "mock client w/ customer+override")
 
-    cr = asyncio.run(portal_client.claim_certs(["12345678"], idempotency_key="t"))
-    check(len(cr) == 1 and not cr[0].ok and "mock" in cr[0].skipped.lower(),
-          "claim client mock (nothing claims by default)")
-    ur = asyncio.run(portal_client.unclaim_certs(["12345678"]))
-    check(len(ur) == 1, "unclaim client mock")
+    # CLAIM SAFETY: with the bot-side flag off (the default, and forced off by this harness)
+    # the claim client itself must short-circuit — never even reach the request layer.
+    import botv2.config as _cfg
+    reached = []
+    real_claim_call = portal_client._claim_call
+
+    async def _spy_claim_call(endpoint, *a, **k):
+        reached.append(endpoint)
+        return await real_claim_call(endpoint, *a, **k)
+    portal_client._claim_call = _spy_claim_call
+    try:
+        check(_cfg.AUTO_CLAIM is False, "claim: BOTV2_AUTO_CLAIM is off in the selftest")
+        cr = asyncio.run(portal_client.claim_certs(["12345678", "cgc:6193949247"], idempotency_key="t"))
+        check(len(cr) == 2 and not any(r.ok or r.claimed for r in cr)
+              and all("off" in r.skipped.lower() for r in cr),
+              "claim client: flag off → every cert comes back skipped (nothing claims)")
+        check(_cfg.CLAIM_ENDPOINT not in reached,
+              "claim client: flag off → the /bot/claim request layer is never reached")
+        ur = asyncio.run(portal_client.unclaim_certs(["12345678"]))
+        check(len(ur) == 1 and reached == [_cfg.UNCLAIM_ENDPOINT], "unclaim client mock (the undo stays callable)")
+    finally:
+        portal_client._claim_call = real_claim_call
 
 
 # ── PSA folder isolation guard ──────────────────────────────────────────────────
@@ -1906,6 +1923,14 @@ def test_handlers_and_void_races():
     finally:
         sheets_mod.urllib.request.urlopen = real_urlopen
 
+    # 7) record_claim is update-only: it can never re-create a row for a voided channel
+    tracking.state.save("tickets", [{"id": "tk_9106", "channel_id": 9106, "user": "c", "status": "quoted"}])
+    check(tracking.record_claim(9106, 1, 2) is True
+          and tracking.find_tickets(channel_id=9106)[0]["claimed"]["locked"] == 1,
+          "record_claim: updates an existing ticket")
+    check(tracking.record_claim(9107, 1, 2) is False and not any(
+        r.get("id") == "tk_9107" for r in tracking.state.load("tickets", list)),
+          "record_claim: no ticket (voided mid-claim) → nothing is created")
     for st in ("tickets", "owed", "channel_sheet", "voided", "void_cutoff"):
         tracking.state.save(st, {} if st in ("channel_sheet", "void_cutoff") else [])
 
