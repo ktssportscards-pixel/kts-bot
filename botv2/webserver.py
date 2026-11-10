@@ -264,10 +264,9 @@ async def _void(req):
     vcid = res.get("channel_id", cid)
     removed = bool(res.get("ticket_removed"))
     bailed = bool(res.get("found")) and not removed
-    sheet_url, sheet_trashed, had_mem = "", False, False
+    sheet_url, sheet_trashed, had_mem, mem_sheet, by_hand = "", False, False, "", []
     if not bailed:
-        mem_sheet = ""
-        try:                                 # the in-memory cache can know a sheet the disk copy lost
+        try:                                 # the in-memory cache normally mirrors the disk copy
             mem_sheet = (botmod._channel_sheet.pop(str(vcid), None)
                          or botmod._channel_sheet.pop(str(cid), None) or "")
             botmod._channel_sheet.pop(str(cid), None)
@@ -276,7 +275,10 @@ async def _void(req):
         had_mem = bool(lots.drop(vcid)) | bool(lots.drop(cid))
         had_mem |= botmod._last_quote.pop(vcid, None) is not None
         had_mem |= botmod._last_quote.pop(cid, None) is not None
-        sheet_url = res.get("sheet_url") or mem_sheet
+        # The automatic trash acts on the PERSISTED pointer only (what void_ticket returned). A
+        # sheet only the in-memory cache knew (its cache-file write had failed) is reported for
+        # trashing by hand, never trashed from here.
+        sheet_url = res.get("sheet_url") or ""
         if sheet_url:
             try:
                 sheet_trashed = bool(await asyncio.to_thread(sheets.trash_sheet, sheet_url))
@@ -284,20 +286,24 @@ async def _void(req):
                 print(f"[web] /void sheet trash failed (non-fatal): {e}")
                 sheet_trashed = False
             if not sheet_trashed:
-                # The cache entry is already purged, so this response and Kevin's DM are the only
-                # places the link still exists — hand it to both (mirrors !void's "do it by hand").
-                try:
-                    await botmod.alert_kevin(
-                        f"void_trash:{vcid}",
-                        f"⚠️ Void from the app (channel `{vcid}`, {res.get('user') or '?'}): the ticket is "
-                        f"voided but I couldn't auto-trash its buying sheet — do it by hand: {sheet_url}")
-                except Exception as e:
-                    print(f"[web] /void trash-failure alert failed (non-fatal): {e}")
-    # had_sheet tells "trash failed" apart from "there was no sheet"; sheet_url is included only
+                by_hand.append(sheet_url)
+        if mem_sheet and mem_sheet != sheet_url:
+            by_hand.append(mem_sheet)
+        if by_hand:
+            # The cache entry is already purged, so this response and Kevin's DM are the only
+            # places the link still exists — hand it to both (mirrors !void's "do it by hand").
+            # ping_kevin, not alert_kevin: this is a to-do for Kevin, not a bot fault for /status.
+            try:
+                await botmod.ping_kevin(
+                    f"⚠️ Void from the app (channel `{vcid}`, {res.get('user') or '?'}): the quote is "
+                    f"dead but its buying sheet was NOT auto-trashed — do it by hand: " + " , ".join(by_hand))
+            except Exception as e:
+                print(f"[web] /void trash-failure DM failed (non-fatal): {e}")
+    # had_sheet tells "trash failed" apart from "there was no sheet"; sheet_url is present only
     # when a sheet still needs trashing by hand.
-    sheet_info = {"had_sheet": bool(sheet_url), "sheet_trashed": sheet_trashed}
-    if sheet_url and not sheet_trashed:
-        sheet_info["sheet_url"] = sheet_url
+    sheet_info = {"had_sheet": bool(sheet_url or mem_sheet), "sheet_trashed": sheet_trashed}
+    if by_hand:
+        sheet_info["sheet_url"] = by_hand[0]
     if removed:
         return _json({"voided": True, "channel_id": str(vcid), "user": res.get("user", ""),
                       "status": res.get("status", "quoted"), "cards": res.get("cards", 0),
@@ -307,8 +313,9 @@ async def _void(req):
     if bailed:
         # an owed/ticket/marker write failed with the ticket intact → nothing cleaned; retry.
         return _json({"voided": False, "reason": "persist_failed", "channel_id": str(vcid),
-                      "ticket_intact": True, "owed_removed": bool(res.get("owed_removed"))})
-    residual = bool(res.get("sheet_url") or res.get("had_owed") or had_mem or sheet_url)
+                      "ticket_intact": True, "owed_removed": bool(res.get("owed_removed")),
+                      "ship_blocked": bool(tracking.is_voided(vcid))})
+    residual = bool(res.get("sheet_url") or res.get("had_owed") or had_mem or mem_sheet)
     if not res.get("ok", True):
         # the residual purge itself didn't persist → safe to retry.
         return _json({"voided": False, "reason": "persist_failed", "channel_id": str(vcid),

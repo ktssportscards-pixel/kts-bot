@@ -1852,7 +1852,8 @@ def test_void_callers():
                 ok, dm = kevin_says("!void id:990")
             finally:
                 tracking.state.save = real
-            check(ok and has_ticket(990) and "STILL LIVE" in dm, "!void bail: ticket intact and Kevin is told so")
+            check(ok and has_ticket(990) and "STILL LIVE" in dm and "`ship` is ignored" in dm,
+                  "!void bail: ticket intact and Kevin is told so (incl. that ship is now blocked)")
             check(not trash_calls, "!void bail: the buying sheet is NOT trashed for a still-live ticket")
             check(lots.has_lot(990) and 990 in botmod._last_quote and botmod._channel_sheet.get("990"),
                   "!void bail: running lot, last quote and sheet cache are left alone")
@@ -1862,6 +1863,7 @@ def test_void_callers():
             finally:
                 tracking.state.save = real
             check(r.get("voided") is False and r.get("reason") == "persist_failed" and r.get("ticket_intact") is True
+                  and r.get("ship_blocked") is True
                   and not trash_calls and lots.has_lot(990) and 990 in botmod._last_quote,
                   "/void bail: persist_failed, nothing trashed, nothing dropped")
             # …and the retry (storage healthy again) completes the void and trashes exactly once.
@@ -1926,8 +1928,9 @@ def test_void_callers():
             check(r.get("voided") is True and r.get("sheet_trashed") is False and r.get("had_sheet") is True
                   and r.get("sheet_url") == URL % 993,
                   "/void trash failure: response says a sheet exists, wasn't trashed, and carries its link")
-            check(any((URL % 993) in d and "by hand" in d for d in h.kevin.dms),
-                  "/void trash failure: Kevin is DMed the link (it was silently dropped before)")
+            from botv2 import alerts as _alerts
+            check(any((URL % 993) in d and "by hand" in d for d in h.kevin.dms) and _alerts.last_error() is None,
+                  "/void trash failure: Kevin is DMed the link (it was silently dropped before); /status stays clean")
             trash_result[0] = True
             seed(994, "trashok")
             r = body_of(post({"channel_id": "994"}))
@@ -1967,13 +1970,45 @@ def test_void_callers():
             ok, dm = kevin_says("!void id:999")
             check("Nothing to void" in dm, "!void again: nothing left")
 
-            # a sheet the bot only remembers in memory (its cache save failed) is still trashed
+            # a sheet the bot only remembers in memory (its cache-file write failed) is NOT
+            # auto-trashed (the trash acts on the persisted pointer only) — but its link is handed over.
             del trash_calls[:]
             seed(1000, "memsheet", sheet=False)
             botmod._channel_sheet["1000"] = URL % 1000
             ok, dm = kevin_says("!void id:1000")
-            check(trash_calls == [URL % 1000] and "moved to Drive trash" in dm and "1000" not in botmod._channel_sheet,
-                  "!void: a sheet known only to the in-memory cache is still found and trashed")
+            check(not trash_calls and (URL % 1000) in dm and "by hand" in dm and "1000" not in botmod._channel_sheet,
+                  "!void: a sheet known only to the in-memory cache is reported for hand-trashing (link not lost)")
+            seed(1003, "memsheet2", sheet=False)
+            botmod._channel_sheet["1003"] = URL % 1003
+            del h.kevin.dms[:]
+            r = body_of(post({"channel_id": "1003"}))
+            check(not trash_calls and r.get("voided") is True and r.get("sheet_url") == URL % 1003
+                  and r.get("sheet_trashed") is False and any((URL % 1003) in d for d in h.kevin.dms),
+                  "/void: same — memory-only sheet is returned + DMed, never auto-trashed")
+
+            # typed in a guild channel: the command (it names a seller) is deleted BEFORE the slow
+            # Drive trash, and nothing is posted in that channel.
+            order = []
+            seed(1004, "guildvoid")
+            slow_trash = sheets_mod.trash_sheet
+
+            def _ordered_trash(url):
+                order.append("trash")
+                return True
+            sheets_mod.trash_sheet = _ordered_trash
+
+            class _OrderedMsg(_FakeMessage):
+                async def delete(self):
+                    order.append("delete")
+                    self.deleted = True
+            gm = _OrderedMsg(h.channel, "!void id:1004", author=h.kevin)
+            del h.channel.sent[:]
+            try:
+                asyncio.run(commands.handle(None, gm))
+            finally:
+                sheets_mod.trash_sheet = slow_trash
+            check(order == ["delete", "trash"] and gm.deleted and not h.channel.sent and not has_ticket(1004),
+                  "!void in a guild channel: command deleted first (once), then the trash; nothing posted there")
 
             # the 'accepted needs force' gate is unchanged
             seed(1001, "shipped", status="accepted", owed=True)
