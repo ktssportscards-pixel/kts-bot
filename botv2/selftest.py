@@ -1910,6 +1910,29 @@ def test_handlers_and_void_races():
         check(any("no ticket on record" in d for d in h.kevin.dms),
               "tracking with no ticket on record: Kevin is told the number isn't stored")
 
+    # 5b) "Shipped! <tracking #>" — agree-shaped AND a tracking drop: the number must not be lost.
+    with _BotHarness(9109, name="shippedtrk", rows=_rows, sheet_url=URL % 9109) as h:
+        h.say("12345678")
+        del h.channel.sent[:], h.kevin.dms[:]
+        h.say("Shipped! 1Z999AA10123456784")
+        t = tracking.find_tickets(channel_id=9109)[0]
+        check(not h.errors and t.get("status") == "accepted" and "Ship" in h.channel.sent[0],
+              "'Shipped! <#>': still handled as a ship (address + lot booked — unchanged)")
+        check(t.get("tracking") == "1Z999AA10123456784" and any("noted" in m for m in h.channel.sent)
+              and h.tracking_saves == [(URL % 9109, "1Z999AA10123456784")]
+              and any("Tracking from" in d for d in h.kevin.dms),
+              "'Shipped! <#>': the tracking number is now acked, stored and saved (it used to be dropped)")
+        owed = next(r for r in tracking.state.load("owed", list) if r["id"] == "owed_9109")
+        check(owed.get("tracking") == "1Z999AA10123456784" and owed.get("paid") is False,
+              "'Shipped! <#>': the number lands on the owed row the ship just booked")
+        # plain agree and plain tracking messages are unchanged
+        del h.channel.sent[:], h.tracking_saves[:]
+        h.say("proceed")
+        check(len(h.channel.sent) == 1 and "Ship" in h.channel.sent[0] and not h.tracking_saves,
+              "plain 'proceed': one address message, no tracking handling")
+        tracking.void_ticket(9109)
+    lots.drop(9109)
+
     # 6) save_tracking reads the Apps Script reply: an explicit failure is an error
     def _reply(body):
         class _R:

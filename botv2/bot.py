@@ -540,12 +540,15 @@ async def _handle_message(message) -> None:
             return
 
     if not cert_list:
+        # A short "Shipped! 1Z…" is BOTH agree-shaped and a tracking drop. It used to take the
+        # agree branch only, so the number was never acked, stored, saved to the sheet or
+        # registered. Do both — ship first (unchanged), so the owed row exists when the
+        # number is recorded. Messages that are only one or the other behave as before.
+        tnum = certs.extract_tracking(text)
         if shipping.looks_like_agree(text):
             await _handle_ship(channel)
-        else:
-            tnum = certs.extract_tracking(text)
-            if tnum:
-                await _handle_tracking(channel, tnum)
+        if tnum:
+            await _handle_tracking(channel, tnum)
         return
 
     # A lone bare 10-digit CGC candidate might be a phone/payment number — confirm
