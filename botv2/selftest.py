@@ -229,11 +229,10 @@ class _BotHarness:
         botmod._welcomed.add(self.cid)
         alerts.reset()
         if self.rows is not None:
-            rows = self.rows
-
             async def _price(cert_list, customer=None, rate_override=None, session=None):
                 self.price_args = {"certs": list(cert_list), "customer": customer,
                                    "rate_override": rate_override}
+                rows = self.rows                      # read at call time: a test may swap it mid-way
                 return rows(cert_list) if callable(rows) else rows
             portal_client.price_certs = _price
         if self.sheet_url is not None:
@@ -2052,6 +2051,118 @@ def test_handlers_and_void_races():
         tracking.state.save(st, {} if st in ("channel_sheet", "void_cutoff") else [])
 
 
+# ── the ship booking step: say what was booked, never half-book, never book "nothing" ──
+def test_ship_booking():
+    section("ship booking")
+    from botv2 import alerts, bot as botmod
+    URL = "https://docs.google.com/spreadsheets/d/BOOK%s/edit"
+    for st in ("tickets", "owed"):
+        tracking.state.save(st, [])
+
+    def buy(cert_list):
+        return [PricedRow(cert=c, cert_id=c, category="pokemon", market_value=100, value=100,
+                          decision="BUY", offer=90, card_name="Pikachu", grader="PSA", grade="10")
+                for c in cert_list]
+
+    def all_pass(cert_list):
+        return [PricedRow(cert=c, cert_id=c, category="basketball", market_value=450, value=450,
+                          decision="PASS", reason="out of band") for c in cert_list]
+
+    def owed_row(cid):
+        return next((r for r in tracking.state.load("owed", list) if r.get("id") == f"owed_{cid}"), None)
+
+    # 1) normal ship: Kevin's DM now says what the ship booked
+    with _BotHarness(9200, name="booker", rows=buy, sheet_url=URL % 9200) as h:
+        h.say("12345678 23456789")
+        del h.kevin.dms[:]
+        h.say("ship")
+        o = owed_row(9200)
+        check(o and o["payout"] == 180.0 and o["paid"] is False, "ship: lot booked as owed (unchanged)")
+        check(any("ship:" in d and "booked — owed on this ticket is now $180.00 (2 card(s))" in d for d in h.kevin.dms),
+              "ship: Kevin's DM states what was booked")
+
+    # 2) 'ship' after a quote with NOTHING accepted: no $0 'paid' row, ticket stays quoted
+    with _BotHarness(9201, name="nobuys", rows=all_pass, sheet_url=URL % 9201) as h:
+        h.say("12345678 23456789")
+        del h.kevin.dms[:], h.channel.sent[:]
+        h.say("ship anyway?")
+        t = tracking.find_tickets(channel_id=9201)[0]
+        check(owed_row(9201) is None and t.get("status") == "quoted",
+              "ship with nothing accepted: no owed row, ticket stays 'quoted' (it used to become "
+              "'accepted' with a $0 row marked paid)")
+        check(any("NOTHING BOOKED" in d for d in h.kevin.dms), "ship with nothing accepted: Kevin is told nothing was booked")
+        check(len(h.channel.sent) == 1 and "Ship" in h.channel.sent[0],
+              "ship with nothing accepted: the customer reply is UNCHANGED here (flagged for Kevin)")
+        check(len(tracking.find_tickets(user="nobuys", status="quoted")) == 1,
+              "…so the ticket can still be voided by username")
+        # a real quote afterwards books normally, with no phantom card
+        h.rows = buy
+        h.say("34567890")
+        h.say("ship")
+        t = tracking.find_tickets(channel_id=9201)[0]
+        check(owed_row(9201)["payout"] == 90.0 and t["cards"] == 1 and "_carried" not in (t.get("ledger") or {}),
+              "a later real lot on that ticket books exactly its own card (no phantom carried lot)")
+
+    # 3) a $0 'paid' row already on disk from before this fix is not carried as a phantom lot
+    tracking.state.save("tickets", [{"id": "tk_9202", "channel_id": 9202, "user": "oldzero",
+                                     "status": "accepted", "cards": 0, "payout": 0, "ledger": {}}])
+    tracking.state.save("owed", [{"id": "owed_9202", "channel_id": 9202, "user": "oldzero", "paid": True,
+                                  "payout": 0.0, "certs": {}, "cert_payout": {}, "cards": 0}])
+    tracking.record_quote(9202, {"username": "oldzero", "comp": 100, "payout": 90, "cards": 1,
+                                 "certs": {"z9": 100}, "cert_offers": {"z9": 90}}, channel_name="oldzero")
+    t = tracking.find_tickets(channel_id=9202)[0]
+    check("_carried" not in t["ledger"] and t["cards"] == 1,
+          "an old empty $0 owed row is not migrated into a phantom paid lot")
+    # …while a real legacy balance still is (exact total carried)
+    tracking.state.save("tickets", [])
+    tracking.state.save("owed", [{"id": "owed_9203", "channel_id": 9203, "user": "legacy", "paid": False,
+                                  "payout": 250.0, "comp": 300.0, "certs": {"L1": 300}, "cards": 1}])
+    tracking.record_quote(9203, {"username": "legacy", "comp": 100, "payout": 90, "cards": 1,
+                                 "certs": {"n1": 100}, "cert_offers": {"n1": 90}}, channel_name="legacy")
+    led = tracking.find_tickets(channel_id=9203)[0]["ledger"]
+    check(led.get("_carried") and led["_carried"][0]["offer"] == 250.0, "a real legacy balance is still carried verbatim")
+
+    # 4) a failed TICKET write at ship: nothing is half-booked, and Kevin is told
+    for st in ("tickets", "owed"):
+        tracking.state.save(st, [])
+    with _BotHarness(9204, name="diskfull", rows=buy, sheet_url=URL % 9204) as h:
+        h.say("12345678")
+        del h.kevin.dms[:]
+        real = tracking.state.save
+        tracking.state.save = lambda name, data: False if name == "tickets" else real(name, data)
+        try:
+            h.say("ship")
+        finally:
+            tracking.state.save = real
+        check(owed_row(9204) is None and tracking.find_tickets(channel_id=9204)[0]["status"] == "quoted",
+              "ship with a failed ticket write: NO owed row is written on top of a ledger that didn't save")
+        check(any("did NOT save" in d for d in h.kevin.dms)
+              and (alerts.last_error() or {}).get("key") == "ship_book:9204",
+              "ship with a failed write: Kevin is told the lot did not book (and /status records it)")
+        h.say("ship")                                       # storage healthy again → books
+        check(owed_row(9204) and owed_row(9204)["payout"] == 90.0, "ship again once storage works: booked")
+    # a failed OWED write is reported the same way
+    with _BotHarness(9205, name="owedfail", rows=buy, sheet_url=URL % 9205) as h:
+        h.say("12345678")
+        del h.kevin.dms[:]
+        real = tracking.state.save
+        tracking.state.save = lambda name, data: False if name == "owed" else real(name, data)
+        try:
+            h.say("ship")
+        finally:
+            tracking.state.save = real
+        check(owed_row(9205) is None and any("did NOT save" in d for d in h.kevin.dms),
+              "ship with a failed owed write: reported, not silent")
+    # ship in a ticket the bot never quoted: address posted (fail-open, unchanged), nothing booked, Kevin told
+    with _BotHarness(9206, name="neverquoted") as h:
+        h.say("ship")
+        check(h.channel.sent and owed_row(9206) is None and any("NOTHING BOOKED" in d for d in h.kevin.dms),
+              "ship with no quote on record: Kevin is told nothing was booked")
+    for st in ("tickets", "owed", "channel_sheet", "channel_sheets", "voided", "void_cutoff"):
+        tracking.state.save(st, {} if st in ("channel_sheet", "channel_sheets", "void_cutoff") else [])
+    alerts.reset()
+
+
 # ── alerts that name the ticket; the lanes board on Discord errors ─────────────
 def test_alerts_and_lanes():
     section("alert routing + lanes board errors")
@@ -2538,7 +2649,8 @@ def main():
               test_lanes_board, test_stale_tickets, test_delivery_resolution, test_delivery_ofd,
               test_webserver_auth, test_audit_fixes, test_lanes_schedule,
               test_owed_accumulation, test_void, test_void_callers, test_truthful_replies,
-              test_handlers_and_void_races, test_alerts_and_lanes, test_canary_error_age,
+              test_handlers_and_void_races, test_ship_booking, test_alerts_and_lanes,
+              test_canary_error_age,
               test_schedule_dst):
         t()
     check(not _net_attempts,

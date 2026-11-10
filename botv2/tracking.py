@@ -159,7 +159,11 @@ def _migrate_ledger(ledger: dict, existing_owed: dict) -> dict:
     owed row. Called at the top of BOTH record_quote and record_accepted_ship."""
     if ledger:
         return dict(ledger)
-    if existing_owed:
+    # Only a row that actually carries a balance (or a cert list) is a legacy lot worth
+    # carrying. An empty $0 row — what a "ship" on an all-declined quote used to write —
+    # is not: carrying it added a phantom paid lot (one extra "card") to the ticket.
+    if existing_owed and (existing_owed.get("certs")
+                          or float(existing_owed.get("payout", 0) or 0)):
         return _carried_from_legacy(existing_owed)
     return {}
 
@@ -228,7 +232,12 @@ def record_accepted_ship(channel_id, snapshot: dict):
 
     The owed balance ACCUMULATES per cert across unpaid lots and NEVER re-queues a
     paid card: a second lot shipped before the first is paid adds to the balance; a
-    re-ship of a paid card, or a later lot that re-lists one, leaves it paid. A card
+    re-ship of a paid card, or a later lot that re-lists one, leaves it paid.
+
+    RETURNS None when there was nothing to book (no snapshot, or no card was ever accepted
+    on the ticket), else the lot summary plus `persisted` (False if a store write failed —
+    then the lot is NOT reliably in the owed queue), `owed` (the outstanding balance now)
+    and `owed_cards`. A card
     quoted BUY and never explicitly PASSed is owed even if it's absent from the final
     message — a plain omission is NOT a withdrawal (its allocation slot was claimed at
     quote time; an explicit re-quoted PASS already dropped it at quote time). A legacy
@@ -315,6 +324,14 @@ def record_accepted_ship(channel_id, snapshot: dict):
         review.append(_UNKNOWN)
 
     review = sorted(set(review))
+    # NOTHING TO BOOK: no card on this ticket was ever quoted BUY, nothing is carried, and
+    # there is no owed row. A "ship" typed after an all-declined quote used to flip the ticket
+    # to 'accepted' and write a $0 owed row marked paid (the ticket then read shipped + paid,
+    # and `!void <user>` refused it). Write nothing; the caller tells Kevin nothing was booked.
+    if existing is None and not any(
+            c == _CARRIED or (isinstance(e, dict) and e.get("status") in ("accepted", "paid"))
+            for c, e in ledger.items()):
+        return None
     # ticket totals = the WHOLE accumulated lot (ledger union), so the ops dashboard + analytics
     # match the owed union rather than only this ship message's snapshot.
     t_payout, t_comp, t_cards = _sum_ledger(ledger, ("quoted", "accepted", "paid"))
@@ -322,15 +339,20 @@ def record_accepted_ship(channel_id, snapshot: dict):
           "comp": t_comp, "payout": t_payout, "cards": t_cards}
     if review:
         tk["review_overlaps"] = review
-    _upsert("tickets", tk)                            # ticket = latest snapshot + union totals + ledger
+    # Write ORDER + BAIL (the same rule mark_paid follows): the ticket ledger first, and if it
+    # doesn't persist, do NOT write the owed row. An owed row backed by a stored ledger that
+    # still says 'quoted' is how an already-paid balance gets re-opened by a later ship. Both
+    # results are reported so the caller can tell Kevin the lot did not book.
+    if not _upsert("tickets", tk):                    # ticket = latest snapshot + union totals + ledger
+        return {**base, "persisted": False, "owed": 0.0, "owed_cards": 0}
 
     owed_rec = _project_owed(channel_id, ledger, existing, base, ticket)
     if review:
         owed_rec["review_overlaps"] = review
         log.warning("owed ledger on channel %s needs review (overlap with a legacy "
                     "un-itemised balance — not re-counted): %s", channel_id, review)
-    _upsert("owed", owed_rec)
-    return base
+    ok = _upsert("owed", owed_rec)
+    return {**base, "persisted": bool(ok), "owed": owed_rec["payout"], "owed_cards": owed_rec["cards"]}
 
 
 def quoted_snapshot(channel_id):

@@ -139,13 +139,27 @@ async def _handle_ship(channel) -> None:
             return
     msg, gave, note = shipping.compose_shipping(channel.id)
     await channel.send(msg)
+    booked_note = ""
     if gave:
         # _last_quote is in-memory and is wiped by a redeploy; fall back to the PERSISTED
         # quoted ticket so a cert-less "ship" right after a redeploy still books the owed
         # entry (otherwise the shipped lot silently never enters the payout queue).
         snap = _last_quote.get(channel.id) or tracking.quoted_snapshot(channel.id)
-        tracking.record_accepted_ship(channel.id, snap)
-    await ping_kevin(f"🚚 #{channel.name} — ship: {note}")
+        booked = tracking.record_accepted_ship(channel.id, snap)
+        # Kevin's ship DM used to read the same whether or not anything was booked. Say what
+        # actually happened to the payout queue.
+        if booked is None:
+            booked_note = (" · ⚠️ NOTHING BOOKED — no accepted cards on record for this ticket "
+                           "(the address was still posted).")
+        elif not booked.get("persisted", True):
+            booked_note = (" · 🚨 the lot did NOT save (storage write failed) — it is NOT reliably in "
+                           "the owed queue. Fix storage, then have `ship` sent again in the ticket.")
+            alerts.record_error(f"ship_book:{channel.id}",
+                                f"ship booking did not persist for #{channel.name}")
+        else:
+            booked_note = (f" · booked — owed on this ticket is now ${float(booked.get('owed') or 0):,.2f} "
+                           f"({int(booked.get('owed_cards') or 0)} card(s)).")
+    await ping_kevin(f"🚚 #{channel.name} — ship: {note}{booked_note}")
 
 
 async def _handle_tracking(channel, tnum) -> None:
