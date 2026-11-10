@@ -119,13 +119,13 @@ async def handle(bot, message) -> bool:
             except Exception:
                 pass
 
-        async def reply(text):
+        async def tell(text):
             await _dm_kevin_result(message, channel, text, delete=False)
         a = parts[1:]
         force = any(w.lower() == "force" for w in a)
         target = next((w for w in a if w.lower() != "force"), None)
         if not target:
-            await reply(
+            await tell(
                 "**!void** — kill a quote so it can't be accepted, shipped, or paid.\n"
                 "• `!void <username>` — voids that seller's OPEN (quoted) ticket\n"
                 "• `!void id:<channel_id>` — voids one specific ticket\n"
@@ -139,12 +139,12 @@ async def handle(bot, message) -> bool:
         if is_id or raw.lstrip("-").isdigit():
             cid = tracking.parse_channel_id(raw)
             if cid is None:
-                await reply(f"⚠️ `{target}` isn't a valid channel id.")
+                await tell(f"⚠️ `{target}` isn't a valid channel id.")
                 return True
         else:
             uname = target.strip().lstrip("@").strip()
             if not uname:                 # "@" / "@ bob" — never let a blank name match every ticket
-                await reply(
+                await tell(
                     f"⚠️ `{target}` isn't a username. Use `!void <username>` (no space after the @) "
                     f"or `!void id:<channel_id>`.")
                 return True
@@ -154,11 +154,11 @@ async def handle(bot, message) -> bool:
             elif not quoted:
                 others = tracking.find_tickets(user=uname)
                 if others:
-                    await reply(
+                    await tell(
                         f"ℹ️ No OPEN (quoted) ticket for **{uname}** — their {len(others)} ticket(s) are "
                         f"already shipped/paid. To void one of those, use `!void id:<channel_id> force`.")
                 else:
-                    await reply(
+                    await tell(
                         f"ℹ️ No ticket on record for **{uname}**. (To finish cleaning up after an earlier "
                         f"partial void, use `!void id:<channel_id>` — a username can't find a ticket "
                         f"that's already gone.)")
@@ -168,7 +168,7 @@ async def handle(bot, message) -> bool:
                 for r in quoted:
                     lines.append(f"• `id:{r.get('channel_id')}` — {r.get('cards', 0)} cards, "
                                  f"${float(r.get('payout', 0) or 0):,.2f}, {r.get('date', '')}")
-                await reply("\n".join(lines))
+                await tell("\n".join(lines))
                 return True
         # Status / force gate — applies ONLY when a ticket actually exists (a real balance needs
         # force). With no ticket we still call the idempotent purge below, so a re-run clears
@@ -187,7 +187,7 @@ async def handle(bot, message) -> bool:
             else:
                 money = (f"**${float(o.get('payout', 0) or 0):,.2f} still owed (unpaid)**; "
                          f"ticket total ${total:,.2f}")
-            await reply(
+            await tell(
                 f"🛑 Channel `{cid}` has **shipped** — {money}. Voiding it deletes the whole ticket: "
                 f"the owed balance, the paid history and any newer open quote on it. "
                 f"Re-run as `!void id:{cid} force` if you really mean it.")
@@ -249,7 +249,7 @@ async def handle(bot, message) -> bool:
             if not res.get("ok", True):
                 out.append(f"(Minor: the sheet-cache entry didn't clear on the first write — harmless; "
                            f"re-run `!void id:{vcid}` once to tidy it. The quote is fully dead regardless.)")
-            await reply("\n".join(out))
+            await tell("\n".join(out))
             return True
         if bailed:
             # An owed/ticket/marker write failed → the ticket is still live. Say exactly what
@@ -259,7 +259,7 @@ async def handle(bot, message) -> bool:
                          if res.get("owed_removed") else " Nothing was removed.")
             ship_note = (" (The cancel guard did get set, so a customer `ship` is ignored on this "
                          "channel until you re-run or they re-quote.)" if tracking.is_voided(cid) else "")
-            await reply(
+            await tell(
                 f"⚠️ Couldn't void channel `{cid}` — a storage write failed, so the ticket is STILL LIVE."
                 f"{owed_note} The buying sheet and the running lot were left alone.{ship_note} "
                 f"Re-run the same command to retry.")
@@ -280,9 +280,9 @@ async def handle(bot, message) -> bool:
                 out.append("Everything else is clean; only the sheet(s) above still need trashing.")
             else:
                 out.append("It's fully clean now.")
-            await reply("\n".join(out))
+            await tell("\n".join(out))
         else:
-            await reply(f"ℹ️ Nothing to void for channel `{cid}` (already gone).")
+            await tell(f"ℹ️ Nothing to void for channel `{cid}` (already gone).")
         return True
 
     if cmd == "bands":
