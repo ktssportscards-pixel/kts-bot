@@ -2165,6 +2165,42 @@ def test_ship_booking():
         h.say("ship")
         check(h.channel.sent and owed_row(9206) is None and any("NOTHING BOOKED" in d for d in h.kevin.dms),
               "ship with no quote on record: Kevin is told nothing was booked")
+    # 5) a second lot on a ticket whose first lot was PAID must not inherit the first lot's
+    #    ship date / tracking number (Kevin's digest and `!owe` showed last time's).
+    for st in ("tickets", "owed"):
+        tracking.state.save(st, [])
+    lot = lambda cert: {"username": "repeat", "comp": 100, "payout": 90, "cards": 1,
+                        "certs": {cert: 100}, "cert_offers": {cert: 90}}
+    tracking.record_quote(9210, lot("r1"), channel_name="repeat")
+    tracking.record_accepted_ship(9210, lot("r1"))
+    tracking.record_tracking(9210, "1ZOLDOLDOLDOLDOLD1")
+    rows = tracking.state.load("owed", list)
+    rows[0]["date"] = "2026-10-01"                              # lot 1 shipped weeks ago
+    tracking.state.save("owed", rows)
+    check(tracking.mark_paid(9210) and owed_row(9210).get("paid_tracking") == "1ZOLDOLDOLDOLDOLD1",
+          "paid: the tracking number on file is remembered as the paid lot's")
+    tracking.record_quote(9210, lot("r2"), channel_name="repeat")
+    tracking.record_accepted_ship(9210, lot("r2"))
+    o = owed_row(9210)
+    check(o["paid"] is False and o["payout"] == 90.0 and o["cert_payout"] == {"r2": 90.0},
+          "second lot: only the new card is owed (unchanged)")
+    check(o["date"] != "2026-10-01" and o["tracking"] is None,
+          "second lot: fresh ship date and NO tracking yet (it used to show the paid lot's date + number)")
+    dig = payout_digest.build_digest()
+    check("no tracking yet" in dig and "1ZOLD" not in dig and "2026-10-01" not in dig,
+          "second lot: the digest line no longer shows last time's tracking/date")
+    tracking.record_accepted_ship(9210, lot("r2"))                  # idempotent re-ship
+    check(owed_row(9210)["tracking"] is None and owed_row(9210)["date"] == o["date"],
+          "second lot: a re-ship keeps the new date and still no stale number")
+    tracking.record_tracking(9210, "1ZNEWNEWNEWNEWNEW2")
+    tracking.record_accepted_ship(9210, lot("r2"))
+    check(owed_row(9210)["tracking"] == "1ZNEWNEWNEWNEWNEW2", "second lot: its own tracking number sticks")
+    # a number dropped BEFORE the first ship still lands on the owed row (not a reopen)
+    tracking.record_quote(9211, lot("p1"), channel_name="early")
+    tracking.record_tracking(9211, "1ZEARLYEARLYEARLY3")
+    tracking.record_accepted_ship(9211, lot("p1"))
+    check(owed_row(9211)["tracking"] == "1ZEARLYEARLYEARLY3", "first lot: a number dropped before 'ship' is kept")
+
     for st in ("tickets", "owed", "channel_sheet", "channel_sheets", "voided", "void_cutoff"):
         tracking.state.save(st, {} if st in ("channel_sheet", "channel_sheets", "void_cutoff") else [])
     alerts.reset()

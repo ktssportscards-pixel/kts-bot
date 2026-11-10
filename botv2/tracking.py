@@ -125,17 +125,27 @@ def _project_owed(channel_id, ledger: dict, existing_owed: dict, base: dict, tic
                 if c != _CARRIED and e.get("status") == "accepted"}
     eo = existing_owed or {}
     tk = ticket or {}
+    # A row that was fully PAID and now carries a new unpaid lot is a NEW shipment. It used to
+    # keep the paid lot's ship date and tracking number, so Kevin's digest / `!owe` showed the
+    # new balance with last time's date and number (and the stale check aged it from then).
+    reopened = bool(eo.get("paid")) and payout > 0
+    paid_trk = eo.get("paid_tracking")               # the number on file when it was last paid
+    trk = eo.get("tracking") or tk.get("tracking") or (tk.get("delivery") or {}).get("number")
+    if payout > 0 and trk and paid_trk and trk == paid_trk:
+        trk = None                                   # that number belongs to the already-paid lot
     row = {
         "id": f"owed_{channel_id}", "channel_id": channel_id,
         "user": base.get("user") or eo.get("user", ""),
-        "date": eo.get("date") or base.get("date"),
+        "date": base.get("date") if reopened else (eo.get("date") or base.get("date")),
         "status": "accepted",
         "paid": payout == 0,
         "certs": {c: e["comp"] for c, e in accepted.items()},
         "cert_payout": {c: e["offer"] for c, e in accepted.items()},
         "payout": payout, "comp": comp, "cards": cards,
-        "tracking": eo.get("tracking") or tk.get("tracking") or (tk.get("delivery") or {}).get("number"),
+        "tracking": trk,
     }
+    if paid_trk:
+        row["paid_tracking"] = paid_trk
     row["paid_date"] = eo.get("paid_date") if row["paid"] else None
     return row
 
@@ -580,6 +590,8 @@ def mark_paid(channel_id) -> bool:
         if r.get("id") == f"owed_{channel_id}":
             r["paid"] = True
             r["paid_date"] = date.today().isoformat()
+            if r.get("tracking"):                    # so a later lot on this ticket doesn't inherit it
+                r["paid_tracking"] = r["tracking"]
             hit = True
     if not hit:
         return False
