@@ -540,6 +540,17 @@ def test_pricing():
     check("filling up" in cmn.lower() and "allocation" not in cmn.lower(),
           "customer near-full nudge (soft, no backend word)")
     check("88% full" in pricing.kevin_summary(qn, "x"), "kevin per-card near-full tag")
+    # a BUY row with no usable offer is a malformed row → "re-check", never accepted at $0
+    good = PricedRow(cert="5", cert_id="5", category="pokemon", market_value=100, value=100, decision="BUY", offer=90)
+    for bad_offer in (None, 0, -5):
+        bad = PricedRow(cert="6", cert_id="6", category="pokemon", market_value=100, value=100,
+                        decision="BUY", offer=bad_offer)
+        qb = pricing.build_quote([good, bad])
+        check(qb.n_accepted == 1 and [r.cert for r in qb.unpriced] == ["6"] and abs(qb.payout_total - 90) < 0.01,
+              f"BUY with offer={bad_offer!r} is not accepted at $0 (goes to re-check)")
+        check("re-check" in pricing.customer_message(qb) and "no offer" in pricing.kevin_summary(qb, "x"),
+              f"BUY with offer={bad_offer!r}: customer asked to resend; Kevin's summary says why")
+    check(pricing.build_quote([good]).n_accepted == 1 and not good.error, "a well-formed BUY is untouched")
     brd = pricing.allocation_board(asyncio.run(portal_client.fetch_allocation()))
     check("Allocation board" in brd and "One Piece" in brd, "allocation board renders")
 

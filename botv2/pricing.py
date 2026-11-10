@@ -94,6 +94,13 @@ def build_quote(rows: list[PricedRow]) -> Quote:
     q = Quote()
     groups: dict[str, dict] = {}
     for r in rows:
+        if r.is_buy and not r.error and (r.offer is None or r.offer <= 0):
+            # A BUY with no (or a non-positive) offer is a malformed row, not a card we buy
+            # for $0. It used to be accepted at $0.00 — shown in the customer's totals, booked
+            # in the ledger at 0 (overwriting an earlier real offer) and owed $0 on ship.
+            # Treat it like a failed lookup: the customer is asked to resend it, the sheet
+            # shows the resend mark, and nothing is booked.
+            r.error = "BUY returned with no offer"
         if r.error:                      # transport/portal error for this cert
             q.unpriced.append(r)
         elif r.is_buy:
