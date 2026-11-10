@@ -1621,6 +1621,232 @@ def test_void():
     tracking.state.save("void_cutoff", {})
 
 
+# ── void CALLERS: !void (commands.handle) and POST /void (webserver._void) ──────
+def test_void_callers():
+    section("void callers (!void + POST /void)")
+    import json as _j
+    import botv2.config as cfg
+    from botv2 import bot as botmod, sheets as sheets_mod, webserver
+    URL = "https://docs.google.com/spreadsheets/d/SHEET%s/edit"
+
+    class _Req:
+        def __init__(self, body):
+            self.headers, self.query, self._body = {"x-bot-key": "selftestkey"}, {}, body
+
+        async def json(self):
+            return self._body
+
+    trash_calls, trash_result = [], [True]
+
+    def _trash(url):
+        trash_calls.append(url)
+        return trash_result[0]
+
+    def seed(cid, user, status="quoted", sheet=True, mem=True, owed=False):
+        """A ticket the way the live bot leaves one: store rows + the in-memory quote/lot/cache."""
+        rows = [r for r in tracking.state.load("tickets", list) if r.get("id") != f"tk_{cid}"]
+        rows.append({"id": f"tk_{cid}", "channel_id": cid, "user": user, "channel_name": user,
+                     "status": status, "cards": 2, "payout": 455.0})
+        tracking.state.save("tickets", rows)
+        if owed:
+            tracking.state.save("owed", tracking.state.load("owed", list)
+                                + [{"id": f"owed_{cid}", "channel_id": cid, "user": user,
+                                    "paid": False, "payout": 455.0}])
+        if sheet:
+            cs = tracking.state.load("channel_sheet", dict)
+            cs[str(cid)] = URL % cid
+            tracking.state.save("channel_sheet", cs)
+            botmod._channel_sheet[str(cid)] = URL % cid
+        if mem:
+            lots.add_slab_values(cid, {"m1": 300.0}, {"m1": "pokemon"})
+            botmod._last_quote[cid] = {"username": user, "comp": 500, "payout": 455, "cards": 2,
+                                       "certs": {"m1": 300}, "cert_offers": {"m1": 270}}
+
+    def has_ticket(cid):
+        return any(r.get("id") == f"tk_{cid}" for r in tracking.state.load("tickets", list))
+
+    def failing(store):
+        real = tracking.state.save
+        tracking.state.save = lambda name, data: False if name == store else real(name, data)
+        return real
+
+    for st in ("tickets", "owed", "channel_sheet", "voided", "void_cutoff"):
+        tracking.state.save(st, {} if st in ("channel_sheet", "void_cutoff") else [])
+    saved_key, saved_trash = cfg.BOT_API_KEY, sheets_mod.trash_sheet
+    cfg.BOT_API_KEY, sheets_mod.trash_sheet = "selftestkey", _trash
+    loop = asyncio.new_event_loop()
+    def post(body):
+        try:
+            return loop.run_until_complete(webserver._void(_Req(body)))
+        except Exception as e:                            # live: aiohttp would answer HTTP 500
+            from aiohttp import web as _web
+            return _web.json_response({"error": f"handler raised {e!r}"}, status=500)
+    body_of = lambda resp: _j.loads(resp.body.decode())
+    try:
+        with _BotHarness(8900) as h:
+            def kevin_says(text):
+                """Kevin types a command in a DM with the bot; returns what he was DMed back."""
+                del h.kevin.dms[:]
+                dm = _fake_channel(8901, "kevin-dm")
+                dm.guild = None
+                try:
+                    handled = asyncio.run(commands.handle(None, _FakeMessage(dm, text, author=h.kevin)))
+                except Exception as e:                    # live: on_message would catch + alert
+                    return False, f"<command raised {e!r}>"
+                return handled, "\n".join(h.kevin.dms)
+
+            # 1) A void that BAILS (tickets write fails → ticket still live) must clean up
+            #    NOTHING and trash NOTHING. (It used to drop the lot and trash the real sheet,
+            #    then report "nothing was removed".)
+            seed(990, "bailbob")
+            real = failing("tickets")
+            try:
+                ok, dm = kevin_says("!void id:990")
+            finally:
+                tracking.state.save = real
+            check(ok and has_ticket(990) and "STILL LIVE" in dm, "!void bail: ticket intact and Kevin is told so")
+            check(not trash_calls, "!void bail: the buying sheet is NOT trashed for a still-live ticket")
+            check(lots.has_lot(990) and 990 in botmod._last_quote and botmod._channel_sheet.get("990"),
+                  "!void bail: running lot, last quote and sheet cache are left alone")
+            real = failing("tickets")
+            try:
+                r = body_of(post({"channel_id": "990"}))
+            finally:
+                tracking.state.save = real
+            check(r.get("voided") is False and r.get("reason") == "persist_failed" and r.get("ticket_intact") is True
+                  and not trash_calls and lots.has_lot(990) and 990 in botmod._last_quote,
+                  "/void bail: persist_failed, nothing trashed, nothing dropped")
+            # …and the retry (storage healthy again) completes the void and trashes exactly once.
+            ok, dm = kevin_says("!void id:990")
+            check(not has_ticket(990) and trash_calls == [URL % 990] and "Voided" in dm
+                  and "moved to Drive trash" in dm and not lots.has_lot(990) and 990 not in botmod._last_quote,
+                  "!void retry: ticket gone, sheet trashed once, memory cleared")
+
+            # an owed-write bail: the reply must not claim the owed balance was touched
+            del trash_calls[:]
+            seed(991, "owedbob", status="quoted", owed=True)
+            real = failing("owed")
+            try:
+                ok, dm = kevin_says("!void id:991")
+            finally:
+                tracking.state.save = real
+            check("STILL LIVE" in dm and "Nothing was removed" in dm and not trash_calls and has_ticket(991)
+                  and any(r["id"] == "owed_991" for r in tracking.state.load("owed", list)),
+                  "!void bail on the owed write: nothing removed, said plainly")
+            real = failing("tickets")            # owed goes, then the ticket write fails
+            try:
+                ok, dm = kevin_says("!void id:991")
+            finally:
+                tracking.state.save = real
+            check("STILL LIVE" in dm and "owed balance WAS already removed" in dm and not trash_calls,
+                  "!void bail after the owed row went: Kevin is told the owed balance is already gone")
+            kevin_says("!void id:991")
+            del trash_calls[:]
+
+            # 2) A blank username must never resolve to "every open quote".
+            seed(992, "onlyopen", sheet=False, mem=False)
+            ok, dm = kevin_says("!void @")
+            check(ok and has_ticket(992) and "isn't a username" in dm,
+                  "!void @ : rejected (used to void the only open quote)")
+            ok, dm = kevin_says("!void @ onlyopen")
+            check(has_ticket(992) and "isn't a username" in dm, "!void '@ name' (stray space): rejected, nothing voided")
+            for blank in (" ", "@", "  @  "):
+                resp = post({"user": blank})
+                check(resp.status == 400 and has_ticket(992), f"/void user={blank!r}: 400, nothing voided")
+            check(tracking.find_tickets(user=" ", status="quoted") == [] and tracking.find_tickets(user="@") == []
+                  and len(tracking.find_tickets(status="quoted")) == 1,
+                  "find_tickets: a blank username matches nothing (no user filter still lists all)")
+
+            # 3) Channel ids: garbage is refused cleanly instead of raising.
+            for bad in ("--5", "²", "12 34", "id:", ""):
+                check(tracking.parse_channel_id(bad) is None, f"parse_channel_id rejects {bad!r}")
+            check(tracking.parse_channel_id(" 1492170401608896533 ") == 1492170401608896533
+                  and tracking.parse_channel_id("-5") == -5, "parse_channel_id accepts a real snowflake")
+            ok, dm = kevin_says("!void id:--5")
+            check(ok and "isn't a valid channel id" in dm, "!void id:--5 : clean error (used to raise ValueError)")
+            ok, dm = kevin_says("!void --5")
+            check(ok and "isn't a valid channel id" in dm, "!void --5 : clean error")
+            for bad in ("--5", "²", 123):
+                check(post({"channel_id": bad}).status == 400, f"/void channel_id={bad!r}: 400 (not a 500)")
+            check(has_ticket(992), "bad ids voided nothing")
+
+            # 4) /void when the sheet trash FAILS: the link must not be lost.
+            trash_result[0] = False
+            seed(993, "trashfail")
+            del h.kevin.dms[:]
+            r = body_of(post({"channel_id": "993"}))
+            check(r.get("voided") is True and r.get("sheet_trashed") is False and r.get("had_sheet") is True
+                  and r.get("sheet_url") == URL % 993,
+                  "/void trash failure: response says a sheet exists, wasn't trashed, and carries its link")
+            check(any((URL % 993) in d and "by hand" in d for d in h.kevin.dms),
+                  "/void trash failure: Kevin is DMed the link (it was silently dropped before)")
+            trash_result[0] = True
+            seed(994, "trashok")
+            r = body_of(post({"channel_id": "994"}))
+            check(r.get("voided") is True and r.get("sheet_trashed") is True and r.get("had_sheet") is True
+                  and "sheet_url" not in r, "/void trash ok: had_sheet + sheet_trashed, no link needed")
+            seed(995, "nosheet", sheet=False)
+            r = body_of(post({"channel_id": "995"}))
+            check(r.get("voided") is True and r.get("had_sheet") is False and r.get("sheet_trashed") is False,
+                  "/void with no sheet: had_sheet False tells it apart from a failed trash")
+
+            # 5) Residual cleanup (no ticket, leftover sheet cache): the reply is truthful.
+            del trash_calls[:]
+            trash_result[0] = False
+            tracking.state.save("channel_sheet", {"996": URL % 996})
+            ok, dm = kevin_says("!void id:996")
+            check((URL % 996) in dm and "by hand" in dm and "fully clean" not in dm,
+                  "!void residual + failed trash: gives the link, does NOT claim 'fully clean'")
+            trash_result[0] = True
+            tracking.state.save("channel_sheet", {"997": URL % 997})
+            ok, dm = kevin_says("!void id:997")
+            check("fully clean" in dm and trash_calls[-1] == URL % 997, "!void residual + trash ok: fully clean")
+            tracking.state.save("channel_sheet", {"998": URL % 998})
+            r = body_of(post({"channel_id": "998"}))
+            check(r.get("reason") == "not_found" and r.get("residual_cleaned") is True and r.get("sheet_trashed") is True,
+                  "/void residual: not_found + residual_cleaned (no longer looks like 'nothing happened')")
+            r = body_of(post({"channel_id": "998"}))
+            check(r.get("reason") == "not_found" and r.get("residual_cleaned") is False,
+                  "/void with truly nothing left: residual_cleaned False")
+
+            # 6) A quote that lives only in memory (its ticket row never persisted) must die too.
+            lots.add_slab_values(999, {"q1": 100.0}, {"q1": "pokemon"})
+            botmod._last_quote[999] = {"username": "memonly", "comp": 100, "payout": 90, "cards": 1,
+                                       "certs": {"q1": 100}, "cert_offers": {"q1": 90}}
+            ok, dm = kevin_says("!void id:999")
+            check(999 not in botmod._last_quote and not lots.has_lot(999) and "in-memory quote" in dm,
+                  "!void on a memory-only quote: the unsaved quote + lot are dropped (used to survive and stay shippable)")
+            ok, dm = kevin_says("!void id:999")
+            check("Nothing to void" in dm, "!void again: nothing left")
+
+            # a sheet the bot only remembers in memory (its cache save failed) is still trashed
+            del trash_calls[:]
+            seed(1000, "memsheet", sheet=False)
+            botmod._channel_sheet["1000"] = URL % 1000
+            ok, dm = kevin_says("!void id:1000")
+            check(trash_calls == [URL % 1000] and "moved to Drive trash" in dm and "1000" not in botmod._channel_sheet,
+                  "!void: a sheet known only to the in-memory cache is still found and trashed")
+
+            # the 'accepted needs force' gate is unchanged
+            seed(1001, "shipped", status="accepted", owed=True)
+            ok, dm = kevin_says("!void id:1001")
+            check(has_ticket(1001) and "force" in dm, "!void on a shipped ticket still needs force")
+            r = body_of(post({"channel_id": "1001"}))
+            check(r.get("reason") == "needs_force" and has_ticket(1001), "/void on a shipped ticket still needs force")
+            ok, dm = kevin_says("!void id:1001 force")
+            check(not has_ticket(1001) and "owed balance" in dm, "!void … force voids it and reports the owed balance")
+            # non-Kevin can't void
+            seed(1002, "guarded", sheet=False, mem=False)
+            dmch = _fake_channel(8902, "someone")
+            check(asyncio.run(commands.handle(None, _FakeMessage(dmch, "!void id:1002", author=_FakeUser(uid=5)))) is True
+                  and has_ticket(1002) and not dmch.sent, "!void from a non-Kevin user is swallowed, nothing voided")
+    finally:
+        cfg.BOT_API_KEY, sheets_mod.trash_sheet = saved_key, saved_trash
+        loop.close()
+        for st in ("tickets", "owed", "channel_sheet", "voided", "void_cutoff"):
+            tracking.state.save(st, {} if st in ("channel_sheet", "void_cutoff") else [])
+
+
 def main():
     print("botv2 selftest:")
     if _INHERITED_DATA_DIR:
@@ -1630,7 +1856,7 @@ def main():
               test_alerts_status, test_analytics, test_delivery, test_register_tracking,
               test_lanes_board, test_stale_tickets, test_delivery_ofd,
               test_webserver_auth, test_audit_fixes, test_lanes_schedule,
-              test_owed_accumulation, test_void):
+              test_owed_accumulation, test_void, test_void_callers):
         t()
     check(not _net_attempts,
           f"no test attempted a real network connection (attempts: {_net_attempts[:5]})")

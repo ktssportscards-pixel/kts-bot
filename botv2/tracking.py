@@ -6,6 +6,7 @@ up the payout flow. Writes are keyed by channel so a re-ship updates in place ra
 than duplicating. State-store backed, so it survives redeploys with a DATA_DIR volume.
 """
 import logging
+import re
 from datetime import date, datetime
 
 from . import config, state
@@ -584,11 +585,22 @@ def resolve_review(channel_id) -> list:
     return cleared
 
 
+def parse_channel_id(raw):
+    """A channel id typed by Kevin or sent by the portal → int, or None if it isn't one.
+    Plain ASCII digits only (an optional leading '-'): str.isdigit() also accepts things
+    int() can't parse ('²') and lstrip('-') let '--5' through, which crashed the caller."""
+    m = re.fullmatch(r"-?[0-9]{1,20}", str(raw if raw is not None else "").strip())
+    return int(m.group(0)) if m else None
+
+
 def find_tickets(channel_id=None, user=None, status=None) -> list:
     """Find ticket rows by channel_id (exact) or username (case-insensitive, @-stripped),
     optionally restricted to a status ('quoted' | 'accepted' | 'paid'). Read-only — used by
-    the !void command to resolve a target and gate on status."""
-    uname = (user or "").lstrip("@").strip().lower() or None
+    the !void command to resolve a target and gate on status. A username that is blank
+    once stripped ('', ' ', '@') matches NOTHING — it must never widen to every ticket."""
+    uname = str(user or "").strip().lstrip("@").strip().lower() or None
+    if user is not None and uname is None:
+        return []
     out = []
     for r in state.load("tickets", list):
         if channel_id is not None and str(r.get("channel_id")) != str(channel_id):
@@ -613,10 +625,18 @@ def void_ticket(channel_id) -> dict:
 
     ORDER is a safety property: remove `owed` FIRST and the `tickets` row LAST, so a
     persistence failure can never orphan an owed row behind an already-deleted ticket (the
-    ticket is the anchor a retry keys on). The CALLER drops the in-memory lot, clears
-    bot._last_quote, and (best-effort) trashes the Drive sheet at sheet_url — but ONLY on
-    ok=True; this function only touches the persisted stores. Idempotent (a second call
-    finds nothing)."""
+    ticket is the anchor a retry keys on). This function only touches the persisted
+    stores; the CALLER drops the in-memory lot, clears bot._last_quote and (best-effort)
+    trashes the Drive sheet at sheet_url. How the caller must read the summary:
+      * ticket_removed=True            → the quote is dead: clean up + trash (even if ok is
+                                         False — only the trailing cache write is pending).
+      * found=True, ticket_removed=False → the void BAILED with the ticket still live:
+                                         clean up NOTHING and trash NOTHING (sheet_url is
+                                         still returned, but it belongs to a live ticket).
+                                         `owed_removed` says whether the owed row already went.
+      * found=False                    → no ticket: any sheet_url / had_owed is residue of an
+                                         earlier partial void → finish the cleanup + trash.
+    Idempotent (a second call finds nothing)."""
     tk_id = f"tk_{channel_id}"
     tickets = state.load("tickets", list)
     row = next((r for r in tickets if r.get("id") == tk_id), None)
@@ -638,7 +658,7 @@ def void_ticket(channel_id) -> dict:
         "status": (row or {}).get("status", "quoted"),
         "cards": (row or {}).get("cards", 0),
         "payout": round(float((row or {}).get("payout", 0) or 0), 2),
-        "had_owed": False, "sheet_url": sheet_url,
+        "had_owed": False, "owed_removed": False, "sheet_url": sheet_url,
     }
     # 0) cancellation intent FIRST — persist the voided marker BEFORE deleting any reconstruction
     #    anchor (ticket ledger / in-memory lot / Drive sheet), and bail if it can't persist, so we
@@ -655,9 +675,11 @@ def void_ticket(channel_id) -> dict:
     owed = state.load("owed", list)
     had_owed = any(r.get("id") == f"owed_{channel_id}" for r in owed)
     summary["had_owed"] = had_owed
-    if had_owed and not state.save("owed", [r for r in owed if r.get("id") != f"owed_{channel_id}"]):
-        summary["ok"] = False
-        return summary                               # ticket + owed + cache all intact → retry recovers
+    if had_owed:
+        if not state.save("owed", [r for r in owed if r.get("id") != f"owed_{channel_id}"]):
+            summary["ok"] = False
+            return summary                           # ticket + owed + cache all intact → retry recovers
+        summary["owed_removed"] = True
     # 2) tickets row NEXT (the anchor). Bail if it won't persist: owed already gone is
     #    idempotent, and the channel_sheet (hence sheet_url) is still intact for a retry. Once
     #    this succeeds the quote is DEAD — ticket_removed tells the caller to clear in-memory

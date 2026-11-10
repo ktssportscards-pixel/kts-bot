@@ -115,16 +115,20 @@ async def handle(bot, message) -> bool:
             return True
         # Resolve the target → a channel_id (or send a disambiguation / error and stop).
         cid = None
-        if target.lower().startswith("id:"):
-            raw = target[3:]
-            if not raw.lstrip("-").isdigit():
+        is_id = target.lower().startswith("id:")
+        raw = target[3:] if is_id else target
+        if is_id or raw.lstrip("-").isdigit():
+            cid = tracking.parse_channel_id(raw)
+            if cid is None:
                 await _dm_kevin_result(message, channel, f"⚠️ `{target}` isn't a valid channel id.")
                 return True
-            cid = int(raw)
-        elif target.lstrip("-").isdigit():
-            cid = int(target)
         else:
-            uname = target.lstrip("@")
+            uname = target.strip().lstrip("@").strip()
+            if not uname:                 # "@" / "@ bob" — never let a blank name match every ticket
+                await _dm_kevin_result(message, channel,
+                    f"⚠️ `{target}` isn't a username. Use `!void <username>` (no space after the @) "
+                    f"or `!void id:<channel_id>`.")
+                return True
             quoted = tracking.find_tickets(user=uname, status="quoted")
             if len(quoted) == 1:
                 cid = quoted[0].get("channel_id")
@@ -135,7 +139,10 @@ async def handle(bot, message) -> bool:
                         f"ℹ️ No OPEN (quoted) ticket for **{uname}** — their {len(others)} ticket(s) are "
                         f"already shipped/paid. To void one of those, use `!void id:<channel_id> force`.")
                 else:
-                    await _dm_kevin_result(message, channel, f"ℹ️ No ticket on record for **{uname}**.")
+                    await _dm_kevin_result(message, channel,
+                        f"ℹ️ No ticket on record for **{uname}**. (To finish cleaning up after an earlier "
+                        f"partial void, use `!void id:<channel_id>` — a username can't find a ticket "
+                        f"that's already gone.)")
                 return True
             else:
                 lines = [f"⚠️ **{uname}** has {len(quoted)} open quotes — pick one with `!void id:<channel_id>`:"]
@@ -156,54 +163,81 @@ async def handle(bot, message) -> bool:
             return True
         res = tracking.void_ticket(cid)          # idempotent full purge (runs even with no ticket)
         vcid = res.get("channel_id", cid)
-        # Quote is dead (ticket_removed) OR there's residual cleanup identity → clear the in-memory
-        # lot/last-quote/sheet-cache and best-effort trash the Drive sheet (all idempotent), even if
-        # a trailing cache write is still pending, so nothing can reconstruct the cancelled quote.
-        did_cleanup = res.get("ticket_removed") or res.get("sheet_url") or res.get("had_owed")
-        trashed = None
-        if did_cleanup:
-            lots.drop(vcid)
-            botmod._last_quote.pop(vcid, None)
-            botmod._last_quote.pop(cid, None)
-            try:
-                botmod._channel_sheet.pop(str(vcid), None)
+        removed = bool(res.get("ticket_removed"))
+        # found-but-not-removed = the void BAILED on a storage write with the ticket still live.
+        # Then NOTHING may be cleaned up or trashed: the lot, the quote and the sheet all still
+        # belong to a live ticket (void_ticket still returns its sheet_url). Only a dead quote
+        # (removed) or a channel with no ticket at all (residue of an earlier partial void) is
+        # purged — in memory and in Drive — so nothing can reconstruct a cancelled quote.
+        bailed = bool(res.get("found")) and not removed
+        trashed, had_mem, sheet_url = None, False, ""
+        if not bailed:
+            mem_sheet = ""
+            try:                                   # the in-memory cache can know a sheet the disk
+                mem_sheet = (botmod._channel_sheet.pop(str(vcid), None)      # copy lost (failed save)
+                             or botmod._channel_sheet.pop(str(cid), None) or "")
                 botmod._channel_sheet.pop(str(cid), None)
             except Exception:
                 pass
-            if res.get("sheet_url"):
+            had_mem = bool(lots.drop(vcid)) | bool(lots.drop(cid))
+            had_mem |= botmod._last_quote.pop(vcid, None) is not None
+            had_mem |= botmod._last_quote.pop(cid, None) is not None
+            sheet_url = res.get("sheet_url") or mem_sheet
+            if sheet_url:
                 try:
-                    trashed = await asyncio.to_thread(sheets.trash_sheet, res["sheet_url"])
+                    trashed = await asyncio.to_thread(sheets.trash_sheet, sheet_url)
                 except Exception as e:
                     print(f"[cmd] !void sheet trash failed: {e}")
                     trashed = False
-        if res.get("ticket_removed"):
+        sheet_line = None
+        if sheet_url:
+            sheet_line = ("🗑️ Buying sheet moved to Drive trash (recoverable)." if trashed
+                          else f"⚠️ Couldn't auto-trash the buying sheet — do it by hand: {sheet_url}")
+        if removed:
             out = [f"🗑️ **Voided** {res.get('user') or '?'}'s ticket "
                    f"(`{vcid}`, was **{res.get('status')}**): {res.get('cards', 0)} cards, "
                    f"${float(res.get('payout', 0) or 0):,.2f}.",
                    "Removed: quote record" + (" + owed balance" if res.get("had_owed") else "")
                    + " + sheet cache + running lot."]
-            if res.get("sheet_url"):
-                out.append("🗑️ Buying sheet moved to Drive trash (recoverable)." if trashed
-                           else f"⚠️ Couldn't auto-trash the buying sheet — do it by hand: {res['sheet_url']}")
+            if sheet_line:
+                out.append(sheet_line)
             out.append("It can no longer be accepted, shipped, or paid.")
             if not res.get("ok", True):
-                out.append("(Minor: the sheet-cache entry didn't clear on the first write — harmless; "
-                           "re-run `!void` once to tidy it. The quote is fully dead regardless.)")
+                out.append(f"(Minor: the sheet-cache entry didn't clear on the first write — harmless; "
+                           f"re-run `!void id:{vcid}` once to tidy it. The quote is fully dead regardless.)")
             await _dm_kevin_result(message, channel, "\n".join(out))
             return True
-        if not res.get("found"):
-            if did_cleanup:
-                await _dm_kevin_result(message, channel,
-                    f"🧹 Channel `{cid}` had no live ticket, but I cleared leftover state from an "
-                    f"earlier partial void (sheet cache / owed / lot). It's fully clean now.")
-            else:
-                await _dm_kevin_result(message, channel, f"ℹ️ Nothing to void for channel `{cid}` (already gone).")
+        if bailed:
+            # An owed/ticket/marker write failed → the ticket is still live. Say exactly what
+            # did and didn't happen; nothing in memory or Drive was touched.
+            owed_note = (" Its owed balance WAS already removed before the failure — re-run now so the "
+                         "ticket doesn't sit on record as shipped with nothing owed."
+                         if res.get("owed_removed") else " Nothing was removed.")
+            await _dm_kevin_result(message, channel,
+                f"⚠️ Couldn't void channel `{cid}` — a storage write failed, so the ticket is STILL LIVE."
+                f"{owed_note} The buying sheet and the running lot were left alone. "
+                f"Re-run the same command to retry.")
             return True
-        # found but the ticket was NOT removed → an owed/ticket write failed before anything was
-        # removed (ticket still intact).
-        await _dm_kevin_result(message, channel,
-            f"⚠️ Couldn't void channel `{cid}` — a storage write failed before anything was removed "
-            f"(the ticket is still intact). Re-run the same command to retry.")
+        # No ticket on record.
+        residual = bool(res.get("sheet_url") or res.get("had_owed"))
+        if residual or had_mem or sheet_url:
+            cleared = [w for w, hit in (("sheet cache", bool(res.get("sheet_url"))),
+                                        ("owed balance", bool(res.get("owed_removed"))),
+                                        ("in-memory quote / lot", had_mem)) if hit]
+            out = [f"🧹 Channel `{cid}` had no live ticket, but I cleared leftover state"
+                   + (f" ({', '.join(cleared)})" if cleared else "") + "."]
+            if sheet_line:
+                out.append(sheet_line)
+            if not res.get("ok", True):
+                out.append(f"⚠️ A storage write failed during that cleanup — something is still on disk. "
+                           f"Re-run `!void id:{cid}` to finish.")
+            elif sheet_url and not trashed:
+                out.append("Everything else is clean; only the sheet above still needs trashing.")
+            else:
+                out.append("It's fully clean now.")
+            await _dm_kevin_result(message, channel, "\n".join(out))
+        else:
+            await _dm_kevin_result(message, channel, f"ℹ️ Nothing to void for channel `{cid}` (already gone).")
         return True
 
     if cmd == "bands":

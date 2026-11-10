@@ -200,7 +200,7 @@ async def _void(req):
     channel_sheet cache, the in-memory lot + _last_quote, and best-effort trashes the
     Drive buying sheet (recoverable). Idempotent; 'quoted' voids freely, 'accepted'/'paid'
     need force. WHO may call is the portal's responsibility; this endpoint only checks the
-    bot key. Contract: portal-interface/void-contract.md (code wins on drift)."""
+    bot key. Contract: portal-interface/portal-calls-bot.md § POST /void (code wins on drift)."""
     if not _authed(req):
         return _unauthorized()
     try:
@@ -226,11 +226,13 @@ async def _void(req):
     cid = None
     if raw_cid is not None:
         # channel_id must be a STRING snowflake (a JSON number loses 64-bit precision in JS).
-        if not isinstance(raw_cid, str) or not raw_cid.strip().lstrip("-").isdigit():
+        cid = tracking.parse_channel_id(raw_cid) if isinstance(raw_cid, str) else None
+        if cid is None:
             return web.json_response({"error": "channel_id must be a numeric string"}, status=400)
-        cid = int(raw_cid.strip())
     else:
-        uname = str(user).lstrip("@").strip()
+        uname = str(user).strip().lstrip("@").strip()
+        if not uname:                    # " " / "@" — never let a blank name match every ticket
+            return web.json_response({"error": "user must be a non-empty username"}, status=400)
         quoted = tracking.find_tickets(user=uname, status="quoted")
         if len(quoted) == 1:
             cid = quoted[0].get("channel_id")
@@ -247,39 +249,67 @@ async def _void(req):
     rows = tracking.find_tickets(channel_id=cid)
     if rows and rows[0].get("status", "quoted") in ("accepted", "paid") and not force:
         return _json({"voided": False, "reason": "needs_force", "status": rows[0].get("status", "quoted")})
-    # Idempotent full purge (runs even with no ticket → clears residual). Then, whenever the
-    # quote is (now) dead or we purged residual cleanup identity, clear the in-memory lot +
-    # last-quote + sheet cache and best-effort trash the Drive sheet — all idempotent, so a
-    # repeat call finishes a prior partial void. Mirrors the !void caller.
+    # Idempotent full purge (runs even with no ticket → clears residual). Mirrors the !void
+    # caller: when the quote is (now) dead, or there was no ticket at all, clear the in-memory
+    # lot + last-quote + sheet cache and best-effort trash the Drive sheet. When the void
+    # BAILED on a storage write with the ticket still live (found, not removed), touch nothing —
+    # the lot and the sheet still belong to a live ticket.
     res = tracking.void_ticket(cid)
     vcid = res.get("channel_id", cid)
-    sheet_trashed = False
-    if res.get("ticket_removed") or res.get("sheet_url") or res.get("had_owed"):
-        lots.drop(vcid)
-        botmod._last_quote.pop(vcid, None)
-        botmod._last_quote.pop(cid, None)
-        try:
-            botmod._channel_sheet.pop(str(vcid), None)
+    removed = bool(res.get("ticket_removed"))
+    bailed = bool(res.get("found")) and not removed
+    sheet_url, sheet_trashed, had_mem = "", False, False
+    if not bailed:
+        mem_sheet = ""
+        try:                                 # the in-memory cache can know a sheet the disk copy lost
+            mem_sheet = (botmod._channel_sheet.pop(str(vcid), None)
+                         or botmod._channel_sheet.pop(str(cid), None) or "")
             botmod._channel_sheet.pop(str(cid), None)
         except Exception:
             pass
-        if res.get("sheet_url"):
+        had_mem = bool(lots.drop(vcid)) | bool(lots.drop(cid))
+        had_mem |= botmod._last_quote.pop(vcid, None) is not None
+        had_mem |= botmod._last_quote.pop(cid, None) is not None
+        sheet_url = res.get("sheet_url") or mem_sheet
+        if sheet_url:
             try:
-                sheet_trashed = bool(await asyncio.to_thread(sheets.trash_sheet, res["sheet_url"]))
+                sheet_trashed = bool(await asyncio.to_thread(sheets.trash_sheet, sheet_url))
             except Exception as e:
                 print(f"[web] /void sheet trash failed (non-fatal): {e}")
                 sheet_trashed = False
-    if res.get("ticket_removed"):
+            if not sheet_trashed:
+                # The cache entry is already purged, so this response and Kevin's DM are the only
+                # places the link still exists — hand it to both (mirrors !void's "do it by hand").
+                try:
+                    await botmod.alert_kevin(
+                        f"void_trash:{vcid}",
+                        f"⚠️ Void from the app (channel `{vcid}`, {res.get('user') or '?'}): the ticket is "
+                        f"voided but I couldn't auto-trash its buying sheet — do it by hand: {sheet_url}")
+                except Exception as e:
+                    print(f"[web] /void trash-failure alert failed (non-fatal): {e}")
+    # had_sheet tells "trash failed" apart from "there was no sheet"; sheet_url is included only
+    # when a sheet still needs trashing by hand.
+    sheet_info = {"had_sheet": bool(sheet_url), "sheet_trashed": sheet_trashed}
+    if sheet_url and not sheet_trashed:
+        sheet_info["sheet_url"] = sheet_url
+    if removed:
         return _json({"voided": True, "channel_id": str(vcid), "user": res.get("user", ""),
                       "status": res.get("status", "quoted"), "cards": res.get("cards", 0),
                       "payout": round(float(res.get("payout", 0) or 0), 2),
-                      "had_owed": bool(res.get("had_owed")), "sheet_trashed": sheet_trashed,
+                      "had_owed": bool(res.get("had_owed")), **sheet_info,
                       "cache_cleanup_pending": not res.get("ok", True)})
-    if res.get("found") or not res.get("ok", True):
-        # the ticket existed but an owed/ticket write failed (ticket intact), or the residual
-        # purge itself didn't persist → safe to retry.
-        return _json({"voided": False, "reason": "persist_failed", "channel_id": str(vcid)})
-    return _json({"voided": False, "reason": "not_found"})
+    if bailed:
+        # an owed/ticket/marker write failed with the ticket intact → nothing cleaned; retry.
+        return _json({"voided": False, "reason": "persist_failed", "channel_id": str(vcid),
+                      "ticket_intact": True, "owed_removed": bool(res.get("owed_removed"))})
+    residual = bool(res.get("sheet_url") or res.get("had_owed") or had_mem or sheet_url)
+    if not res.get("ok", True):
+        # the residual purge itself didn't persist → safe to retry.
+        return _json({"voided": False, "reason": "persist_failed", "channel_id": str(vcid),
+                      "ticket_intact": False, **sheet_info})
+    # No ticket. residual_cleaned=True means this call DID remove leftover state from an
+    # earlier partial void (so "not_found" isn't mistaken for "nothing happened").
+    return _json({"voided": False, "reason": "not_found", "residual_cleaned": residual, **sheet_info})
 
 
 async def start():
