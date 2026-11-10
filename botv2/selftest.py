@@ -1011,6 +1011,28 @@ def test_stale_tickets():
     _ = config.STALE_QUOTED_DAYS  # thresholds exist (defaults 5/5/3; the bucketing above exercises them)
 
 # ── delivery: out-for-delivery intermediate stage ────────────────────────────────
+def test_delivery_resolution():
+    section("delivery event resolution")
+    tracking.state.save("tickets", [])
+    tracking.state.save("owed", [])
+    tracking.record_quote(6101, {"username": "dlv", "comp": 100, "payout": 90, "cards": 1,
+                                 "certs": {"d1": 100}, "cert_offers": {"d1": 90}}, channel_name="dlv")
+    tracking.record_tracking(6101, "1Z999AA10123456784")
+    # a channel_id that matches no ticket (e.g. rounded in transit) + the right tracking number
+    r = tracking.mark_out_for_delivery(channel_id=6101000, tracking_num="1Z999AA10123456784")
+    check(r["found"] is True and r["channel_id"] == 6101 and r["already"] is False,
+          "delivery: a wrong channel_id falls back to the tracking number (the event used to be dropped)")
+    r = tracking.mark_delivered(channel_id="not-a-ticket", tracking_num="1z999aa10123456784")
+    check(r["found"] is True and r["channel_id"] == 6101 and tracking.delivery_status(6101).get("status") == "delivered",
+          "delivery: same for 'delivered' (tracking match is case-insensitive)")
+    check(tracking.mark_delivered(channel_id=6101, tracking_num="SOMETHING-ELSE")["already"] is True,
+          "delivery: a channel_id that HAS a ticket still wins over the tracking number (idempotent)")
+    check(tracking.mark_delivered(channel_id=999999, tracking_num="NOPE")["found"] is False
+          and tracking.mark_delivered(channel_id=999999)["found"] is False,
+          "delivery: nothing matches → still a clean miss")
+    tracking.state.save("tickets", [])
+
+
 def test_delivery_ofd():
     section("delivery out-for-delivery")
     from botv2 import config
@@ -2500,7 +2522,7 @@ def main():
     for t in (test_harness_is_hermetic, test_textsplit, test_state_persistence, test_certs, test_pricing, test_lots_shipping, test_tracking_digest,
               test_payout_flow, test_vip_commands_client, test_psa_folder_guard,
               test_alerts_status, test_analytics, test_delivery, test_register_tracking,
-              test_lanes_board, test_stale_tickets, test_delivery_ofd,
+              test_lanes_board, test_stale_tickets, test_delivery_resolution, test_delivery_ofd,
               test_webserver_auth, test_audit_fixes, test_lanes_schedule,
               test_owed_accumulation, test_void, test_void_callers, test_truthful_replies,
               test_handlers_and_void_races, test_alerts_and_lanes, test_canary_error_age,

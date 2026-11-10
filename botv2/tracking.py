@@ -408,6 +408,22 @@ def find_channel_by_tracking(tracking_num: str):
     return None
 
 
+def _resolve_delivery_channel(channel_id, tracking_num):
+    """Which ticket a delivery event is about. A supplied channel_id that HAS a ticket wins.
+    Otherwise (no channel_id, or one that matches no ticket — e.g. an id that lost precision
+    in transit) fall back to the tracking number. It used to fall back only when channel_id
+    was missing, so an event carrying a wrong/rounded id AND a correct tracking number was
+    dropped silently. Only ever resolves to an EXISTING ticket row."""
+    if channel_id is not None and any(
+            r.get("id") == f"tk_{channel_id}" for r in state.load("tickets", list)):
+        return channel_id
+    if tracking_num:
+        found = find_channel_by_tracking(tracking_num)
+        if found is not None:
+            return found
+    return channel_id
+
+
 def mark_delivered(channel_id=None, tracking_num=None, delivered_at=None,
                    carrier=None) -> dict:
     """Flip a ticket's delivery sub-record to 'delivered' (idempotent). Resolve by
@@ -415,8 +431,7 @@ def mark_delivered(channel_id=None, tracking_num=None, delivered_at=None,
     number} so the caller can decide whether to post the customer 'arrived' note. The
     delivered state is recorded even when customer messaging is off (ops + Kevin see
     it); only the customer-facing post is gated by config.DELIVERY_TRACKING upstream."""
-    if channel_id is None and tracking_num:
-        channel_id = find_channel_by_tracking(tracking_num)
+    channel_id = _resolve_delivery_channel(channel_id, tracking_num)
     miss = {"found": False, "channel_id": channel_id, "already": False,
             "user": "", "number": (tracking_num or "")}
     if channel_id is None:
@@ -447,8 +462,7 @@ def mark_out_for_delivery(channel_id=None, tracking_num=None, at=None) -> dict:
     regresses a 'delivered'). Resolve by channel_id, else by tracking number. Returns
     {found, channel_id, already, user, number} — `already` is True when it's already
     out_for_delivery OR already delivered, so the caller won't re-post."""
-    if channel_id is None and tracking_num:
-        channel_id = find_channel_by_tracking(tracking_num)
+    channel_id = _resolve_delivery_channel(channel_id, tracking_num)
     miss = {"found": False, "channel_id": channel_id, "already": False,
             "user": "", "number": (tracking_num or "")}
     if channel_id is None:
