@@ -624,13 +624,40 @@ def find_tickets(channel_id=None, user=None, status=None) -> list:
     return out
 
 
+# ── every buying sheet built for a channel (reporting only) ─────────────────────────
+# bot.py's channel_sheet cache keeps ONE url per channel — the latest — but every cert
+# message builds its own sheet. This store remembers all of them, so a void can tell Kevin
+# which OTHER sheets of the cancelled ticket are still live in Drive. It is for reporting
+# only: the automatic trash still acts on the single latest pointer, exactly as before.
+_SHEETS = "channel_sheets"
+_SHEETS_PER_CHANNEL = 50
+
+
+def remember_sheet(channel_id, sheet_url) -> bool:
+    """Append a newly built buying sheet to the channel's list (deduped, newest last)."""
+    if not sheet_url:
+        return True
+    try:
+        data = state.load(_SHEETS, dict)
+        key = str(channel_id)
+        urls = [u for u in (data.get(key) or []) if u != sheet_url] + [sheet_url]
+        data[key] = urls[-_SHEETS_PER_CHANNEL:]
+        return bool(state.save(_SHEETS, data))
+    except Exception as e:
+        print(f"[tracking] remember_sheet failed (non-fatal): {e}")
+        return False
+
+
 def void_ticket(channel_id) -> dict:
     """Completely remove a ticket's bot-side state so its quote can never be accepted,
     shipped, or paid: delete the `tickets` row (which carries the per-cert ledger,
     tracking, delivery sub-record and review flag — all gone with the row), any `owed`
     row, and the `channel_sheet` cache entry. Returns a summary of what was removed —
-    {found, channel_id, user, channel_name, status, cards, payout, had_owed, sheet_url} —
-    or {found: False} if there was no ticket. `ok` is True only when every store write
+    {found, channel_id, user, channel_name, status, cards, payout, had_owed, sheet_url,
+    other_sheet_urls} — or {found: False} if there was no ticket. `sheet_url` is the latest
+    buying sheet (the one callers trash); `other_sheet_urls` are EARLIER sheets built for the
+    same channel, returned so the caller can tell Kevin they are still live (never trashed
+    automatically). `ok` is True only when every store write
     persisted; ok=False means a write failed partway — the function BAILS with the ticket
     row left intact so a re-run recovers.
 
@@ -659,6 +686,12 @@ def void_ticket(channel_id) -> dict:
     keys = {str(channel_id), str(cid_val)}
     cs = state.load("channel_sheet", dict)
     sheet_url = next((cs[k] for k in keys if cs.get(k)), "")   # READ now; delete LAST (step 3)
+    all_sheets = state.load(_SHEETS, dict)                      # READ now; delete LAST (step 3)
+    other_sheets = []
+    for k in keys:
+        for u in (all_sheets.get(k) or []):
+            if u and u != sheet_url and u not in other_sheets:
+                other_sheets.append(u)
     summary = {
         "found": row is not None,                    # a ticket existed at call time
         "ok": True,
@@ -670,6 +703,7 @@ def void_ticket(channel_id) -> dict:
         "cards": (row or {}).get("cards", 0),
         "payout": round(float((row or {}).get("payout", 0) or 0), 2),
         "had_owed": False, "owed_removed": False, "sheet_url": sheet_url,
+        "other_sheet_urls": other_sheets,
     }
     # 0) cancellation intent FIRST — persist the voided marker BEFORE deleting any reconstruction
     #    anchor (ticket ledger / in-memory lot / Drive sheet), and bail if it can't persist, so we
@@ -708,6 +742,11 @@ def void_ticket(channel_id) -> dict:
         for k in keys:
             cs.pop(k, None)
         if not state.save("channel_sheet", cs):
+            summary["ok"] = False
+    if any(k in all_sheets for k in keys):           # the sheet history goes with the cache
+        for k in keys:
+            all_sheets.pop(k, None)
+        if not state.save(_SHEETS, all_sheets):
             summary["ok"] = False
     return summary
 

@@ -228,7 +228,16 @@ async def handle(bot, message) -> bool:
             # automatic trash acts on the persisted pointer only, so hand Kevin the link.
             sheet_lines.append(f"⚠️ I also had a buying sheet on record for this channel that wasn't saved "
                                f"to disk — trash it by hand: {mem_sheet}")
-        by_hand = bool((sheet_url and not bailed and not trashed) or (mem_sheet and mem_sheet != sheet_url))
+        # Every cert message builds its own sheet; only the latest is trashed automatically.
+        # Never let Kevin believe the ticket's sheets are gone when earlier ones are still live.
+        others = [] if bailed else [u for u in (res.get("other_sheet_urls") or []) if u != mem_sheet]
+        if others:
+            sheet_lines.append(
+                f"📄 {len(others)} EARLIER buying sheet(s) were built for this ticket and are still live "
+                f"in Drive (only the latest is auto-trashed) — trash them by hand if they're dead too:\n"
+                + "\n".join(f"• {u}" for u in others))
+        by_hand = bool((sheet_url and not bailed and not trashed) or (mem_sheet and mem_sheet != sheet_url)
+                       or others)
         if removed:
             out = [f"🗑️ **Voided** {res.get('user') or '?'}'s ticket "
                    f"(`{vcid}`, was **{res.get('status')}**): {res.get('cards', 0)} cards, "
@@ -256,7 +265,7 @@ async def handle(bot, message) -> bool:
                 f"Re-run the same command to retry.")
             return True
         # No ticket on record.
-        residual = bool(res.get("sheet_url") or res.get("had_owed"))
+        residual = bool(res.get("sheet_url") or res.get("had_owed") or res.get("other_sheet_urls"))
         if residual or had_mem or mem_sheet:
             cleared = [w for w, hit in (("sheet cache", bool(res.get("sheet_url"))),
                                         ("owed balance", bool(res.get("owed_removed"))),
@@ -268,7 +277,7 @@ async def handle(bot, message) -> bool:
                 out.append(f"⚠️ A storage write failed during that cleanup — something is still on disk. "
                            f"Re-run `!void id:{cid}` to finish.")
             elif by_hand:
-                out.append("Everything else is clean; only the sheet above still needs trashing.")
+                out.append("Everything else is clean; only the sheet(s) above still need trashing.")
             else:
                 out.append("It's fully clean now.")
             await reply("\n".join(out))

@@ -1933,6 +1933,50 @@ def test_handlers_and_void_races():
         tracking.void_ticket(9109)
     lots.drop(9109)
 
+    # 5c) a ticket quoted over TWO messages has TWO buying sheets. A void trashes only the
+    #     latest (unchanged) — but it must tell Kevin the earlier one is still live. It used
+    #     to say "Buying sheet moved to Drive trash" and nothing else.
+    def _void_dm(h, cid):
+        del h.kevin.dms[:]
+        dm = _fake_channel(9198, "kevin-dm")
+        dm.guild = None
+        asyncio.run(commands.handle(None, _FakeMessage(dm, f"!void id:{cid}", author=h.kevin)))
+        return "\n".join(h.kevin.dms)
+    with _BotHarness(9110, name="twosheets", rows=_rows, sheet_url=URL % "9110A") as h:
+        h.say("12345678")
+        h.sheet_url = URL % "9110B"
+        h.say("23456789")
+        check(tracking.state.load("channel_sheets", dict).get("9110") == [URL % "9110A", URL % "9110B"]
+              and botmod._channel_sheet.get("9110") == URL % "9110B",
+              "sheets: every sheet built for a ticket is remembered (the cache still holds only the latest)")
+        dm = _void_dm(h, 9110)
+        check(h.trash_calls == [URL % "9110B"], "void: still auto-trashes ONLY the latest sheet (no new trash)")
+        check("moved to Drive trash" in dm and (URL % "9110A") in dm and "EARLIER buying sheet" in dm,
+              "void: Kevin is told the earlier sheet is still live, with its link")
+        check("9110" not in tracking.state.load("channel_sheets", dict)
+              and "9110" not in tracking.state.load("channel_sheet", dict),
+              "void: the sheet history is cleared with the cache")
+    with _BotHarness(9111, name="onesheet", rows=_rows, sheet_url=URL % "9111A") as h:
+        h.say("12345678")
+        dm = _void_dm(h, 9111)
+        check(h.trash_calls == [URL % "9111A"] and "EARLIER" not in dm and "moved to Drive trash" in dm,
+              "void: a single-sheet ticket reads exactly as before")
+    # a bailed void keeps the history (nothing is cleaned for a live ticket)
+    with _BotHarness(9112, name="bailsheets", rows=_rows, sheet_url=URL % "9112A") as h:
+        h.say("12345678")
+        h.sheet_url = URL % "9112B"
+        h.say("23456789")
+        real = tracking.state.save
+        tracking.state.save = lambda name, data: False if name == "tickets" else real(name, data)
+        try:
+            dm = _void_dm(h, 9112)
+        finally:
+            tracking.state.save = real
+        check("STILL LIVE" in dm and not h.trash_calls and "EARLIER" not in dm
+              and len(tracking.state.load("channel_sheets", dict).get("9112") or []) == 2,
+              "void bail: sheet history untouched, nothing reported as dead")
+        _void_dm(h, 9112)
+
     # 6) save_tracking reads the Apps Script reply: an explicit failure is an error
     def _reply(body):
         class _R:
@@ -2340,6 +2384,21 @@ def test_void_callers():
             check(r.get("voided") is True and r.get("had_sheet") is False and r.get("sheet_trashed") is False,
                   "/void with no sheet: had_sheet False tells it apart from a failed trash")
 
+            # 4b) /void of a ticket with an EARLIER sheet on record: reported, not trashed.
+            del trash_calls[:]
+            seed(1005, "multi")
+            tracking.remember_sheet(1005, URL % "1005old")
+            tracking.remember_sheet(1005, URL % 1005)
+            del h.kevin.dms[:]
+            r = body_of(post({"channel_id": "1005"}))
+            check(r.get("voided") is True and r.get("sheet_trashed") is True
+                  and r.get("other_sheet_urls") == [URL % "1005old"] and trash_calls == [URL % 1005],
+                  "/void: earlier sheets are listed in other_sheet_urls; only the latest is trashed")
+            check(any((URL % "1005old") in d and "EARLIER" in d for d in h.kevin.dms),
+                  "/void: Kevin is DMed the earlier sheet's link")
+            check(body_of(post({"channel_id": "994"})).get("other_sheet_urls") == [],
+                  "/void: other_sheet_urls is an empty list when there are none")
+
             # 5) Residual cleanup (no ticket, leftover sheet cache): the reply is truthful.
             del trash_calls[:]
             trash_result[0] = False
@@ -2430,8 +2489,8 @@ def test_void_callers():
     finally:
         cfg.BOT_API_KEY, sheets_mod.trash_sheet = saved_key, saved_trash
         loop.close()
-        for st in ("tickets", "owed", "channel_sheet", "voided", "void_cutoff"):
-            tracking.state.save(st, {} if st in ("channel_sheet", "void_cutoff") else [])
+        for st in ("tickets", "owed", "channel_sheet", "voided", "void_cutoff", "channel_sheets"):
+            tracking.state.save(st, {} if st in ("channel_sheet", "void_cutoff", "channel_sheets") else [])
 
 
 def main():

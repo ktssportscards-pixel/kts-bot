@@ -666,6 +666,7 @@ async def _handle_message(message) -> None:
             return
         _channel_sheet[str(channel.id)] = sheet_url          # cache for later tracking-save
         state.save("channel_sheet", _channel_sheet)
+        tracking.remember_sheet(channel.id, sheet_url)       # history: a void reports the earlier ones
         missing = await asyncio.to_thread(sheets.fill_buying_sheet, sheet_url, rows)
         if missing:
             await ping_kevin(f"⚠️ {len(missing)} cert(s) didn't land on {username}'s sheet: "
