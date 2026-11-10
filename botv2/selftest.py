@@ -2373,6 +2373,16 @@ def test_ship_booking():
     tracking.record_tracking(9210, "1ZNEWNEWNEWNEWNEW2")
     tracking.record_accepted_ship(9210, lot("r2"))
     check(owed_row(9210)["tracking"] == "1ZNEWNEWNEWNEWNEW2", "second lot: its own tracking number sticks")
+    # the SAME number posted again for the new, unpaid lot (two batches in one box) is the
+    # new lot's number and must stick through later re-projections
+    tracking.mark_paid(9210)
+    tracking.record_quote(9210, lot("r3"), channel_name="repeat")
+    tracking.record_accepted_ship(9210, lot("r3"))
+    check(owed_row(9210)["tracking"] is None, "third lot: starts with no tracking (the paid lot's number is not inherited)")
+    tracking.record_tracking(9210, "1ZNEWNEWNEWNEWNEW2")            # same number as the lot just paid
+    tracking.record_accepted_ship(9210, lot("r3"))
+    check(owed_row(9210)["tracking"] == "1ZNEWNEWNEWNEWNEW2",
+          "third lot: the same number re-posted for the unpaid lot is kept")
     # a number dropped BEFORE the first ship still lands on the owed row (not a reopen)
     tracking.record_quote(9211, lot("p1"), channel_name="early")
     tracking.record_tracking(9211, "1ZEARLYEARLYEARLY3")

@@ -406,6 +406,11 @@ def record_tracking(channel_id, tracking_num: str) -> bool:
         for r in data:
             if r.get("id") == key:
                 r["tracking"] = tracking_num
+                if store == "owed" and not r.get("paid"):
+                    # A number posted while a balance is unpaid belongs to THAT lot — even if
+                    # it equals the number the previous, paid lot shipped under (two batches
+                    # in one box). Forget the "paid lot's number" so _project_owed keeps it.
+                    r.pop("paid_tracking", None)
                 if store == "tickets":
                     d = r.get("delivery") or {}
                     # Only (re)open an in_transit record when the NUMBER actually changes.
