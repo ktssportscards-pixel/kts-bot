@@ -63,7 +63,10 @@ async def alert_kevin(key: str, text: str) -> bool:
     the print stays for the container logs."""
     alerts.record_error(key, text)
     if alerts.should_alert(key):
-        return await ping_kevin(text)
+        ok = await ping_kevin(text)
+        if not ok:
+            alerts.forget(key)       # never delivered → don't let it use up the quiet window
+        return ok
     return False
 
 
@@ -298,8 +301,11 @@ async def _render_lanes_board():
     if st.get("message_id") and st.get("channel_id") == config.LANES_CHANNEL_ID:
         try:
             msg = await channel.fetch_message(int(st["message_id"]))
-        except Exception:
-            msg = None                                # deleted/unpinned → re-create below
+        except discord.NotFound:
+            msg = None                                # really deleted → re-create below
+        # Any OTHER error (403 / 5xx / network blip) propagates to the loop's handler, which
+        # skips this refresh and alerts Kevin. Treating it as "gone" posted + pinned a second
+        # board next to the first and orphaned the old one for good.
     if msg is None:
         msg = await channel.send(text)
         try:
@@ -360,8 +366,10 @@ async def _remove_lanes_board():
         channel = bot.get_channel(config.LANES_CHANNEL_ID) or await bot.fetch_channel(config.LANES_CHANNEL_ID)
         msg = await channel.fetch_message(int(mid))
         await msg.delete()
-    except Exception as e:
-        print(f"[bot] lanes board remove (non-fatal): {e}")
+    except discord.NotFound:
+        pass                                         # already gone → just forget the id
+    # Any other error propagates (the loop alerts + retries) and the saved id is KEPT: clearing
+    # it after a failed delete left the board pinned all week and posted a second one next window.
     state.save("lanes_board", {})                    # clear → reposts fresh next window
 
 
@@ -450,6 +458,12 @@ async def on_ready():
         await alert_kevin(f"state_load:{name}", _state_problem_text("load", name, why))
     if not _digest_started:                        # start the scheduled loops once
         _digest_started = True
+        if not config.KEVIN_USER_ID:
+            print("[bot] ⚠️ KEVIN_USER_ID is unset — admin commands and ALL Kevin DMs/alerts are disabled.")
+        if config.PRICE_MOCK:                      # a live Discord connection + mock pricing = fake quotes
+            print("[bot] ⚠️ BOTV2_PRICE_MOCK is ON — quotes are MOCK prices, not real ones.")
+            await alert_kevin("price_mock", "🚨 botv2 is running with `BOTV2_PRICE_MOCK=1` — every quote "
+                              "is a FAKE mock price. Turn it off unless this is a test bot.")
         bot.loop.create_task(_payout_digest_loop())
         bot.loop.create_task(_heartbeat_loop())
         if config.LANES_BOARD and config.LANES_CHANNEL_ID:
@@ -479,9 +493,13 @@ async def on_message(message):
     try:
         await _handle_message(message)
     except Exception as e:
-        print(f"[bot] on_message error (non-fatal): {e}")
-        await alert_kevin(f"on_message:{type(e).__name__}",
-                          f"⚠️ botv2 on_message error (non-fatal): {e}")
+        # Name the ticket and rate-limit per ticket: a bare "on_message error" keyed only by
+        # exception type told Kevin nothing and hid every other ticket's failure for 15 minutes.
+        ch = getattr(message, "channel", None)
+        where = f" in #{ch.name}" if getattr(ch, "name", None) else ""
+        print(f"[bot] on_message error{where} (non-fatal): {e}")
+        await alert_kevin(f"on_message:{type(e).__name__}:{getattr(ch, 'id', '')}",
+                          f"⚠️ botv2 on_message error{where} (non-fatal): {e}")
 
 
 # ── core loop ─────────────────────────────────────────────────────────────────
@@ -549,9 +567,10 @@ async def _handle_message(message) -> None:
             rows = await portal_client.price_certs(cert_list, customer=username,
                                                    rate_override=rate_override)
         except portal_client.PortalAuthError as e:
-            await alert_kevin("price_auth",
-                              f"🚨 **botv2 can't authenticate to pricing** — {e}. "
-                              f"Check BOT_API_KEY / the portal.")
+            await alert_kevin(f"price_auth:{channel.id}",
+                              f"🚨 **botv2 can't authenticate to pricing** in #{channel.name} — {e}. "
+                              f"Check BOT_API_KEY / the portal. Nothing retries on its own: this "
+                              f"ticket needs a re-quote once it's fixed.")
             await channel.send("⚠️ Pricing is briefly unavailable — hang tight, I'll "
                                "get your quote shortly.")
             return

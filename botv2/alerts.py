@@ -28,6 +28,13 @@ def should_alert(key: str, now: float = None) -> bool:
     return True
 
 
+def forget(key: str) -> None:
+    """Un-mark `key` as alerted, so its next occurrence alerts again. Used when the DM for
+    an alert could not be delivered — an alert Kevin never received must not use up the
+    suppression window."""
+    _last_sent.pop(key, None)
+
+
 def record_error(key: str, text: str) -> None:
     """Record the most recent failure (shown by /status), regardless of whether the
     alert itself was rate-limited — so /status always reflects the latest fault."""

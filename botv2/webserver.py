@@ -108,6 +108,8 @@ async def _status(req):
             "ship_all_doral": config.SHIP_ALL_DORAL,
             "auto_claim": config.AUTO_CLAIM,
             "pokemon_lane_open": config.POKEMON_LANE_OPEN,
+            "price_mock": config.PRICE_MOCK,                 # True on a live bot = FAKE quotes
+            "kevin_dm": bool(config.KEVIN_USER_ID),          # False = no admin commands / alerts
         },
     }))
 

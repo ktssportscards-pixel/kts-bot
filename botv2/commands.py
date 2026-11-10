@@ -58,7 +58,7 @@ async def handle(bot, message) -> bool:
                      "• `!paid` — mark this ticket's lot paid\n"
                      "• `!resolve` — clear a ticket's ⚠️ review flag after you've checked it (money unchanged)\n"
                      "• `!void <user | id:channel>` — kill a quote so it can't be accepted/shipped/paid (off-hours/error); add `force` for a shipped ticket\n"
-                     "• `!bands` — DM you the live allocation board\n"
+                     "• `!bands` — DM you the live bands board\n"
                      "• `!lanes` — DM you the customer-safe lanes board (preview before it goes live)\n"
                      "• `!stats [days]` — DM you volume + payout analytics\n"
                      "• `!stalecheck` — DM you the stuck-ticket digest on demand (same as the daily 8am check)\n"
@@ -286,7 +286,7 @@ async def handle(bot, message) -> bool:
         # In a guild channel, note it went to DMs (no numbers leak). In a DM the board's already here.
         if getattr(channel, "guild", None) is not None:
             try:
-                await channel.send("📊 Allocation board sent to your DMs.")
+                await channel.send("📊 Board sent to your DMs.")   # no forbidden word in a channel
             except Exception:
                 pass
         return True

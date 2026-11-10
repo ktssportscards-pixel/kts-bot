@@ -1743,6 +1743,155 @@ def test_truthful_replies():
         sheets_mod.get_drive_service = real_drive
 
 
+# ── alerts that name the ticket; the lanes board on Discord errors ─────────────
+def test_alerts_and_lanes():
+    section("alert routing + lanes board errors")
+    import types
+    import discord
+    import botv2.config as cfg
+    from botv2 import alerts, bot as botmod, webserver
+    from botv2.portal_client import PortalAuthError
+
+    # an alert whose DM could NOT be delivered must not use up the 15-minute quiet window
+    alerts.reset()
+    check(asyncio.run(botmod.alert_kevin("zz_undelivered", "x")) is False
+          and alerts.should_alert("zz_undelivered", now=1.0),
+          "alert_kevin: an undelivered alert (no Kevin id / DM failed) can fire again next time")
+    alerts.reset()
+
+    # the on_message catch-all names the ticket and is rate-limited PER ticket
+    with _BotHarness(8960, name="crashy") as h:
+        real_handle = botmod._handle_message
+
+        async def _boom(_message):
+            raise RuntimeError("kaboom")
+        botmod._handle_message = _boom
+        try:
+            asyncio.run(botmod.on_message(_FakeMessage(h.channel, "12345678")))
+            other = _fake_channel(8961, "othercrash")
+            asyncio.run(botmod.on_message(_FakeMessage(other, "12345678")))
+        finally:
+            botmod._handle_message = real_handle
+        check(len(h.kevin.dms) == 2 and "#crashy" in h.kevin.dms[0] and "#othercrash" in h.kevin.dms[1],
+              "on_message error: the alert names the ticket, and a 2nd ticket's error isn't suppressed")
+
+    # pricing auth failure: Kevin's alert names the ticket; the customer text is unchanged
+    async def _unauth(cert_list, customer=None, rate_override=None, session=None):
+        raise PortalAuthError("portal rejected x-bot-key (401)")
+    with _BotHarness(8962, name="authfail") as h:
+        real_price = portal_client.price_certs
+        portal_client.price_certs = _unauth
+        try:
+            h.say("12345678")
+        finally:
+            portal_client.price_certs = real_price
+        check(not h.errors and any("#authfail" in d and "re-quote" in d for d in h.kevin.dms),
+              "price auth failure: Kevin's alert names the ticket that needs a re-quote")
+        check(h.channel.sent == ["⚠️ Pricing is briefly unavailable — hang tight, I'll get your quote shortly."],
+              "price auth failure: customer-facing text unchanged")
+
+    # !bands typed in a guild channel: the channel ack carries no forbidden customer word
+    with _BotHarness(8963, name="bandsroom") as h:
+        asyncio.run(commands.handle(None, _FakeMessage(h.channel, "!bands", author=h.kevin)))
+        check(h.channel.sent and not any(w in h.channel.sent[-1].lower() for w in cfg.CUSTOMER_FORBIDDEN_WORDS)
+              and h.kevin.dms and "Allocation board" in h.kevin.dms[0],
+              "!bands: channel ack has no forbidden word (the DM'd board keeps its real title)")
+        del h.channel.sent[:]
+        asyncio.run(commands.handle(None, _FakeMessage(h.channel, "!help", author=h.kevin)))
+        check(h.channel.sent and not any(w in "\n".join(h.channel.sent).lower() for w in cfg.CUSTOMER_FORBIDDEN_WORDS),
+              "!help (Kevin, in a channel): no forbidden customer word in the admin block")
+
+    # /status exposes the two 'is this bot misconfigured' booleans
+    loop = asyncio.new_event_loop()
+    saved_key = cfg.BOT_API_KEY
+    cfg.BOT_API_KEY = "selftestkey"
+    try:
+        import json as _j
+        req = types.SimpleNamespace(headers={"x-bot-key": "selftestkey"}, query={})
+        flags = _j.loads(loop.run_until_complete(webserver._status(req)).body.decode())["flags"]
+        check(flags.get("price_mock") is True and flags.get("kevin_dm") is False and flags.get("auto_claim") is False,
+              "status: price_mock / kevin_dm flags reported (mock is ON only because this is the selftest)")
+    finally:
+        cfg.BOT_API_KEY = saved_key
+        loop.close()
+
+    # ── lanes board: only a real 404 means "the message is gone" ──
+    def not_found():
+        return discord.NotFound(types.SimpleNamespace(status=404, reason="Not Found"), "Unknown Message")
+
+    class _BoardMsg:
+        def __init__(self, mid, log):
+            self.id, self.log = mid, log
+
+        async def edit(self, content=None):
+            self.log.append(("edit", self.id))
+
+        async def delete(self):
+            self.log.append(("delete", self.id))
+
+        async def pin(self):
+            self.log.append(("pin", self.id))
+
+    class _LanesChan:
+        def __init__(self):
+            self.log, self.fetch_error, self.next_id = [], None, 500
+
+        async def fetch_message(self, mid):
+            if self.fetch_error is not None:
+                raise self.fetch_error
+            return _BoardMsg(mid, self.log)
+
+        async def send(self, text):
+            _fake_send_check(text)
+            self.next_id += 1
+            self.log.append(("send", self.next_id))
+            return _BoardMsg(self.next_id, self.log)
+
+    chan = _LanesChan()
+    saved = (cfg.LANES_BOARD, cfg.LANES_CHANNEL_ID)
+    cfg.LANES_BOARD, cfg.LANES_CHANNEL_ID = True, 4444
+    botmod.bot.get_channel = lambda _cid: chan
+    st = lambda: tracking.state.load("lanes_board", dict)
+
+    def run(coro):
+        try:
+            asyncio.run(coro)
+            return None
+        except Exception as e:
+            return e
+    try:
+        tracking.state.save("lanes_board", {"message_id": 111, "channel_id": 4444})
+        check(run(botmod._render_lanes_board()) is None and chan.log == [("edit", 111)],
+              "lanes: healthy refresh edits the pinned board in place")
+        # transient fetch error → NO second board; the saved id is kept; the loop alerts + retries
+        del chan.log[:]
+        chan.fetch_error = RuntimeError("503 Service Unavailable")
+        err = run(botmod._render_lanes_board())
+        check(isinstance(err, RuntimeError) and chan.log == [] and st().get("message_id") == 111,
+              "lanes: a transient fetch error does NOT post a duplicate board (it used to post + pin a second one)")
+        # failed take-down → the saved id is kept so it is retried (it used to be forgotten)
+        err = run(botmod._remove_lanes_board())
+        check(isinstance(err, RuntimeError) and st().get("message_id") == 111,
+              "lanes: a failed take-down keeps the saved id so the delete is retried")
+        # a real 404 → re-create on refresh / just forget on take-down
+        chan.fetch_error = not_found()
+        check(run(botmod._render_lanes_board()) is None and chan.log == [("send", 501), ("pin", 501)]
+              and st().get("message_id") == 501, "lanes: a deleted board (404) is re-created and re-pinned")
+        check(run(botmod._remove_lanes_board()) is None and st() == {},
+              "lanes: take-down of an already-deleted board just clears the saved id")
+        # normal take-down
+        del chan.log[:]
+        chan.fetch_error = None
+        tracking.state.save("lanes_board", {"message_id": 222, "channel_id": 4444})
+        check(run(botmod._remove_lanes_board()) is None and chan.log == [("delete", 222)] and st() == {},
+              "lanes: normal take-down deletes the board and clears the id")
+    finally:
+        cfg.LANES_BOARD, cfg.LANES_CHANNEL_ID = saved
+        botmod.bot.__dict__.pop("get_channel", None)
+        tracking.state.save("lanes_board", {})
+        alerts.reset()
+
+
 # ── scheduled DMs across a daylight-saving change ───────────────────────────────
 def test_schedule_dst():
     section("schedules across DST")
@@ -2040,7 +2189,7 @@ def main():
               test_lanes_board, test_stale_tickets, test_delivery_ofd,
               test_webserver_auth, test_audit_fixes, test_lanes_schedule,
               test_owed_accumulation, test_void, test_void_callers, test_truthful_replies,
-              test_schedule_dst):
+              test_alerts_and_lanes, test_schedule_dst):
         t()
     check(not _net_attempts,
           f"no test attempted a real network connection (attempts: {_net_attempts[:5]})")
