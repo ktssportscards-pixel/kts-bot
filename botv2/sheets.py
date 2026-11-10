@@ -36,7 +36,10 @@ def get_credentials():
 
 def get_gspread_client():
     import gspread
-    return gspread.authorize(get_credentials())
+    client = gspread.authorize(get_credentials())
+    if hasattr(client, "set_timeout"):                # bound every Sheets request (see config)
+        client.set_timeout(config.SHEETS_TIMEOUT_S)
+    return client
 
 
 def get_drive_service():

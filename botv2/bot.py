@@ -5,13 +5,13 @@ Flow: a ticket channel → welcome once → extract certs → price via the port
 post the customer quote + DM Kevin the summary. Priced entirely through
 portal_client (Triumph behind it); no CardLadder, no local rules engine.
 
-Run:  python -m botv2.bot          (needs DISCORD_TOKEN + BOT_API_KEY + a live /bot/price)
-      BOTV2_PRICE_MOCK=1 python -m botv2.bot   (offline: mock prices)
+Run:  python -m botv2              (needs a Discord token + BOT_API_KEY + a live /bot/price;
+                                    see __main__.py for why not `python -m botv2.bot`)
+      BOTV2_PRICE_MOCK=1 python -m botv2   (mock prices — ONLY with a TEST Discord app)
+Test: python -m botv2.selftest     (offline; never touches Discord, the portal or Drive)
 
-Deferred to later modules (tracked in README, not lost from v1): buying-sheet
-create/fill, dual-address shipping + proceed/ship handling, CSV lot ingestion,
-VIP override lookup, Pokémon quotas, and the command set (!summary, !payinfo,
-!adopt, …). Each hooks into this loop without changing it.
+The buying sheet, shipping, tracking, void and command flows live in their own modules
+(sheets / shipping / tracking / commands) and hook into this loop.
 """
 import asyncio
 
@@ -108,6 +108,24 @@ def _on_state_problem(kind: str, name: str, detail: str) -> None:
 
 
 state.add_listener(_on_state_problem)
+
+
+def _startup_storage_problems() -> list:
+    """(key, text) alerts about where bot state is being kept — checked once at startup.
+    Everything money-related (tickets, owed balances, payment info, void guards) is a JSON
+    file under DATA_DIR; if that isn't a persistent, writable volume it is lost silently."""
+    out = []
+    if config.DATA_DIR_IS_DEFAULT:
+        out.append(("data_dir_default",
+                    "🚨 `DATA_DIR` is not set on this service — tickets, owed balances, payment info "
+                    "and void guards are being kept INSIDE the container and will be wiped by the next "
+                    "redeploy. Point `DATA_DIR` at the mounted volume."))
+    if not state.writable():
+        out.append(("data_dir_write",
+                    f"🚨 The data folder (`{config.DATA_DIR}`) is not writable — nothing the bot "
+                    f"records right now (quotes, shipments, payments, voids) is being saved. "
+                    f"Check the volume."))
+    return out
 
 
 # ── events ────────────────────────────────────────────────────────────────────
@@ -502,6 +520,9 @@ async def on_ready():
         _digest_started = True
         if not config.KEVIN_USER_ID:
             print("[bot] ⚠️ KEVIN_USER_ID is unset — admin commands and ALL Kevin DMs/alerts are disabled.")
+        for key, text in _startup_storage_problems():
+            print(f"[bot] {text}")
+            await alert_kevin(key, text)
         if config.PRICE_MOCK:                      # a live Discord connection + mock pricing = fake quotes
             print("[bot] ⚠️ BOTV2_PRICE_MOCK is ON — quotes are MOCK prices, not real ones.")
             await alert_kevin("price_mock", "🚨 botv2 is running with `BOTV2_PRICE_MOCK=1` — every quote "

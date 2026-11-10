@@ -136,11 +136,19 @@ PSA_FOLDER_ID = os.environ.get("PSA_FOLDER_ID", V1_PSA_FOLDER_ID)
 ALLOW_SHARED_PSA_FOLDER = os.environ.get("ALLOW_SHARED_PSA_FOLDER", "").lower() in ("1", "true", "yes")
 TEMPLATE_SHEET_ID = os.environ.get("TEMPLATE_SHEET_ID", "1y_jis_knml_UIVWxxtEHrKs_vjkuX97x8Q7u3pVsQVM")
 SHEET_FORM_NAME = "Form. Put Date Here."   # the worksheet tab the template ships with
+# Per-request timeout for Google Sheets calls (the fill after a quote, the ship-time lot
+# rebuild). gspread sends every request with NO timeout unless told otherwise, so a stalled
+# connection parked the handler forever: no reply to a customer's "ship", no alert. 120 s is
+# google-auth's own default.
+SHEETS_TIMEOUT_S = 120
 SHEET_NOT_LOADED_MARK = "didn't load — resend"
 
 # ── Persistence (set DATA_DIR to a mounted volume in prod so state survives) ───
 DATA_DIR = os.environ.get("DATA_DIR") or os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "data")
+# True when DATA_DIR was not set, i.e. state lives inside the container image and is wiped
+# by every redeploy. The bot warns Kevin about this at startup (see bot.on_ready).
+DATA_DIR_IS_DEFAULT = not os.environ.get("DATA_DIR")
 
 # ── Lot minimums + lane status ─────────────────────────────────────────────────
 # No minimum lot size — everything drop-ships now (Kevin removed the floor 2026-11-06);

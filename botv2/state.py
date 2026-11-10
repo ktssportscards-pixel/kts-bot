@@ -79,6 +79,21 @@ def load_failures() -> dict:
         return dict(_load_failed)
 
 
+def writable() -> bool:
+    """True if a file can be created in DATA_DIR right now (a startup probe; leaves nothing
+    behind). False means nothing the bot records is being saved."""
+    try:
+        os.makedirs(config.DATA_DIR, exist_ok=True)
+        probe = os.path.join(config.DATA_DIR, ".write-probe")
+        with open(probe, "w") as f:
+            f.write("ok")
+        os.unlink(probe)
+        return True
+    except Exception as e:
+        print(f"[state] DATA_DIR write probe failed: {e}")
+        return False
+
+
 def _notify(kind: str, name: str, detail: str) -> None:
     for fn in list(_listeners):
         try:

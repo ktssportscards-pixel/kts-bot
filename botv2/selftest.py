@@ -451,6 +451,51 @@ def test_state_persistence():
     finally:
         state._listeners.remove(listener)
 
+    # startup storage check: state kept inside the container / an unwritable data folder
+    import botv2.config as cfg
+    saved_default, saved_dir = cfg.DATA_DIR_IS_DEFAULT, cfg.DATA_DIR
+    try:
+        cfg.DATA_DIR_IS_DEFAULT = False
+        check(state.writable() and botmod._startup_storage_problems() == []
+              and not os.path.exists(os.path.join(cfg.DATA_DIR, ".write-probe")),
+              "startup: a set, writable DATA_DIR raises nothing (and the probe leaves no file)")
+        cfg.DATA_DIR_IS_DEFAULT = True
+        check([k for k, _t in botmod._startup_storage_problems()] == ["data_dir_default"],
+              "startup: DATA_DIR unset → Kevin is warned state will not survive a redeploy")
+        cfg.DATA_DIR_IS_DEFAULT = False
+        blocker = os.path.join(saved_dir, "zz_not_a_dir")
+        with open(blocker, "w") as f:
+            f.write("x")
+        cfg.DATA_DIR = os.path.join(blocker, "sub")            # can't be created: parent is a file
+        check(state.writable() is False
+              and [k for k, _t in botmod._startup_storage_problems()] == ["data_dir_write"],
+              "startup: an unwritable data folder → Kevin is warned nothing is being saved")
+    finally:
+        cfg.DATA_DIR_IS_DEFAULT, cfg.DATA_DIR = saved_default, saved_dir
+
+    # Google Sheets requests are bounded (gspread's default is no timeout at all)
+    import sys
+    import types
+    from botv2 import sheets as sheets_mod
+    seen_timeout = []
+    fake_client = types.SimpleNamespace(set_timeout=lambda t: seen_timeout.append(t))
+    fake_gspread = types.ModuleType("gspread")
+    fake_gspread.authorize = lambda creds: fake_client
+    real_gspread, real_creds = sys.modules.get("gspread"), sheets_mod.get_credentials
+    sys.modules["gspread"] = fake_gspread
+    sheets_mod.get_credentials = lambda: object()
+    try:
+        check(sheets_mod.get_gspread_client() is fake_client and seen_timeout == [cfg.SHEETS_TIMEOUT_S] == [120],
+              "sheets: the gspread client is given a 120 s request timeout (it had none)")
+        fake_gspread.authorize = lambda creds: object()         # an older client without set_timeout
+        check(sheets_mod.get_gspread_client() is not None, "sheets: a client without set_timeout still works")
+    finally:
+        sheets_mod.get_credentials = real_creds
+        if real_gspread is None:
+            sys.modules.pop("gspread", None)
+        else:
+            sys.modules["gspread"] = real_gspread
+
     # bot wiring: the problem lands on /status, and (with a loop) in Kevin's DMs
     alerts.reset()
     botmod._on_state_problem("save", "owed", "No space left on device")
@@ -1163,6 +1208,11 @@ def test_webserver_auth():
         cfg.BOT_API_KEY = ""                          # fails closed when no key is configured
         check(st(webserver._ops(_Req(key="anything"))) == 401,
               "auth: fails closed when BOT_API_KEY is unset")
+        blank = _Req()
+        blank.headers = {"x-bot-key": ""}             # unset key + EMPTY header must not "match"
+        check(st(webserver._ops(_Req())) == 401 and st(webserver._ops(blank)) == 401
+              and st(webserver._void(blank)) == 401,
+              "auth: unset key + missing/empty header is still denied (no empty-equals-empty hole)")
     finally:
         cfg.BOT_API_KEY = saved
         loop.close()
