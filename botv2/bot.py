@@ -215,34 +215,37 @@ async def notify_out_for_delivery(channel_id, user: str = "") -> bool:
         return False
 
 
-def _seconds_until_friday_9am_et() -> float:
-    from datetime import datetime, timedelta, timezone
-    try:
-        from zoneinfo import ZoneInfo
-        now = datetime.now(ZoneInfo("America/New_York"))
-    except Exception:
-        # no tz database on the image (tzdata should prevent this) — fall back to a
-        # fixed -5h offset so the digest still fires ~Friday morning rather than dying.
-        now = datetime.now(timezone(timedelta(hours=-5)))
+def _real_seconds_until(now, target) -> float:
+    """Real elapsed seconds from `now` to `target` (both timezone-aware). Subtracting two
+    datetimes that share one tzinfo ignores the UTC offset, so across a daylight-saving
+    change the answer is an hour off — the 8 AM DMs fired at 7 AM and again at 8 AM on the
+    fall-back Sunday (an hour late in spring), and the next Friday digest an hour early
+    and then again on time. Converting both to UTC first gives the true gap."""
+    from datetime import timezone
+    return (target.astimezone(timezone.utc) - now.astimezone(timezone.utc)).total_seconds()
+
+
+def _seconds_until_friday_9am_et(now=None) -> float:
+    """Seconds until the next Friday 09:00 America/New_York. `now` is injectable for tests;
+    _now_et() falls back to a fixed -5h offset if the image has no tz database, so the
+    digest still fires ~Friday morning rather than dying."""
+    from datetime import timedelta
+    now = now or _now_et()
     target = now.replace(hour=9, minute=0, second=0, microsecond=0) + timedelta(
         days=(4 - now.weekday()) % 7)             # Friday = weekday 4
     if target <= now:
         target += timedelta(days=7)
-    return (target - now).total_seconds()
+    return _real_seconds_until(now, target)
 
 
-def _seconds_until_daily_et(hour: int = 8) -> float:
+def _seconds_until_daily_et(hour: int = 8, now=None) -> float:
     """Seconds until the next HH:00 America/New_York (same tz fallback as the digest)."""
-    from datetime import datetime, timedelta, timezone
-    try:
-        from zoneinfo import ZoneInfo
-        now = datetime.now(ZoneInfo("America/New_York"))
-    except Exception:
-        now = datetime.now(timezone(timedelta(hours=-5)))
+    from datetime import timedelta
+    now = now or _now_et()
     target = now.replace(hour=hour, minute=0, second=0, microsecond=0)
     if target <= now:
         target += timedelta(days=1)
-    return (target - now).total_seconds()
+    return _real_seconds_until(now, target)
 
 
 async def _payout_digest_loop():
@@ -343,7 +346,7 @@ def _seconds_until_lanes_open() -> float:
         hour=_LANES_OPEN_HOUR, minute=0, second=0, microsecond=0)
     if target <= now:
         target += timedelta(days=7)
-    return max(60.0, (target - now).total_seconds())
+    return max(60.0, _real_seconds_until(now, target))
 
 
 async def _remove_lanes_board():

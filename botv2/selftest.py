@@ -1621,6 +1621,32 @@ def test_void():
     tracking.state.save("void_cutoff", {})
 
 
+# ── scheduled DMs across a daylight-saving change ───────────────────────────────
+def test_schedule_dst():
+    section("schedules across DST")
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from botv2 import bot as botmod
+    et = ZoneInfo("America/New_York")
+    daily, friday = botmod._seconds_until_daily_et, botmod._seconds_until_friday_9am_et
+    H = 3600
+    # ordinary day: 08:01:30 → next 08:00 is 23h58m30s away
+    check(daily(8, now=datetime(2027, 6, 1, 8, 1, 30, tzinfo=et)) == 24 * H - 90, "daily: ordinary day")
+    # the night clocks spring FORWARD (2027-03-14) is 23 hours long …
+    check(daily(8, now=datetime(2027, 3, 13, 8, 1, 30, tzinfo=et)) == 23 * H - 90,
+          "daily: spring-forward night is 23h (was computed as 24h → fired at 9 AM)")
+    # … and the night they fall BACK (2027-11-07) is 25 hours long.
+    check(daily(8, now=datetime(2027, 11, 6, 8, 1, 30, tzinfo=et)) == 25 * H - 90,
+          "daily: fall-back night is 25h (was computed as 24h → fired at 7 AM, then again at 8)")
+    # Friday digest: the week containing the fall-back is 7 days + 1 hour long.
+    check(friday(now=datetime(2027, 11, 5, 9, 1, 30, tzinfo=et)) == 7 * 24 * H + H - 90,
+          "friday digest: week across fall-back is 7d+1h (was 7d → fired at 8 AM, then again at 9)")
+    check(friday(now=datetime(2027, 6, 3, 9, 0, 0, tzinfo=et)) == 24 * H, "friday digest: Thursday 9:00 → 24h")
+    check(friday(now=datetime(2027, 6, 4, 9, 0, 0, tzinfo=et)) == 7 * 24 * H,
+          "friday digest: exactly Friday 9:00 schedules NEXT week (no double fire)")
+    check(0 < daily(8) <= 25 * H and 0 < friday() <= 7 * 24 * H + H, "schedules: live clock values are sane")
+
+
 # ── void CALLERS: !void (commands.handle) and POST /void (webserver._void) ──────
 def test_void_callers():
     section("void callers (!void + POST /void)")
@@ -1856,7 +1882,7 @@ def main():
               test_alerts_status, test_analytics, test_delivery, test_register_tracking,
               test_lanes_board, test_stale_tickets, test_delivery_ofd,
               test_webserver_auth, test_audit_fixes, test_lanes_schedule,
-              test_owed_accumulation, test_void, test_void_callers):
+              test_owed_accumulation, test_void, test_void_callers, test_schedule_dst):
         t()
     check(not _net_attempts,
           f"no test attempted a real network connection (attempts: {_net_attempts[:5]})")
