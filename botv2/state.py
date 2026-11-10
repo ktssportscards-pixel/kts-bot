@@ -15,6 +15,7 @@ whatever is on disk (<name>.json.unreadable-<stamp>) before replacing it — and
 listeners are told, so Kevin hears about it instead of quietly losing the owed /
 tickets / payinfo history to the next write. At most 5 kept copies per store.
 """
+import itertools
 import json
 import os
 import shutil
@@ -40,8 +41,13 @@ def _path(name: str) -> str:
     return os.path.join(config.DATA_DIR, f"{name}.json")
 
 
+_seq = itertools.count(1)
+
+
 def _stamp() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    """A sortable UTC stamp for kept-copy file names; the counter makes two names taken in
+    the same microsecond (or after a clock step) distinct, so one copy never replaces another."""
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ") + f"-{next(_seq)}"
 
 
 _KEEP_MAX = 5       # kept copies per store — the EARLIEST ones are closest to the last good state
