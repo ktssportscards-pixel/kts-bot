@@ -2027,6 +2027,31 @@ def test_handlers_and_void_races():
         check(any("no ticket on record" in d for d in h.kevin.dms),
               "tracking with no ticket on record: Kevin is told the number isn't stored")
 
+    # 5a) the tracking ack only PROMISES an arrival update when one can actually happen:
+    #     customer updates on + the delivery watcher on + the number stored on a ticket.
+    promise, neutral = "the moment it arrives", "Kevin will keep an eye out"
+    saved_flags = (cfg.DELIVERY_TRACKING, cfg.REGISTER_TRACKING)
+    try:
+        for dt, rt, has_ticket, want_promise in ((False, False, True, False), (True, False, True, False),
+                                                 (False, True, True, False), (True, True, True, True),
+                                                 (True, True, False, False)):
+            cfg.DELIVERY_TRACKING, cfg.REGISTER_TRACKING = dt, rt
+            with _BotHarness(9120, name="ackcust", rows=_rows, sheet_url=URL % 9120) as h:
+                if has_ticket:
+                    h.say("12345678")
+                    h.say("ship")
+                del h.channel.sent[:]
+                h.say("1Z999AA10123456784")
+                ack = h.channel.sent[0] if h.channel.sent else ""
+                check(not h.errors and len(h.channel.sent) == 1
+                      and (promise in ack) == want_promise and (neutral in ack) == (not want_promise),
+                      f"tracking ack: updates={dt} watcher={rt} ticket={has_ticket} → "
+                      f"{'promise' if want_promise else 'neutral wording'}")
+                tracking.void_ticket(9120)
+            lots.drop(9120)
+    finally:
+        cfg.DELIVERY_TRACKING, cfg.REGISTER_TRACKING = saved_flags
+
     # 5b) "Shipped! <tracking #>" — agree-shaped AND a tracking drop: the number must not be lost.
     with _BotHarness(9109, name="shippedtrk", rows=_rows, sheet_url=URL % 9109) as h:
         h.say("12345678")

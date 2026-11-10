@@ -183,12 +183,16 @@ async def _handle_ship(channel) -> None:
 async def _handle_tracking(channel, tnum) -> None:
     """Customer dropped a tracking number — acknowledge, note it, save to the sheet."""
     uname = tickets.sanitize_channel_name(channel.name) or channel.name
+    # Record FIRST, so the ack never promises an arrival update that cannot happen. The
+    # "I'll let you know…" wording is used only when all three hold: customer updates are on
+    # (BOTV2_DELIVERY_TRACKING), the delivery watcher is on (BOTV2_REGISTER_TRACKING), and the
+    # number was actually stored on a ticket (a delivery event can only find a stored number).
+    noted = tracking.record_tracking(channel.id, tnum)
     ack = f"📦 Got it — tracking `{tnum}` noted. Kevin will keep an eye out! 🙌"
-    if config.DELIVERY_TRACKING:                       # auto-arrival updates are on
+    if config.DELIVERY_TRACKING and config.REGISTER_TRACKING and noted:
         ack = (f"📦 Got it — tracking `{tnum}` noted. I'll let you know right here the "
                f"moment it arrives — no need to check it yourself. 🙌")
     await channel.send(ack)
-    noted = tracking.record_tracking(channel.id, tnum)
     if config.REGISTER_TRACKING:                        # ask the portal to watch it for delivery
         try:
             await portal_client.register_tracking(channel.id, tnum)
