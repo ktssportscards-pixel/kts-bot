@@ -1,5 +1,31 @@
 # botv2 — Deploy guide (Railway)
 
+> ## ⚠️ Current state — read this before anything below (updated 2026-11-10)
+> **botv2 IS the live production bot.** Since the 2026-11-04 cutover the existing Railway
+> `worker` service builds branch **`bot-v2-triumph`** with config `botv2/railway.json`
+> (`python -m botv2`) on the same Discord bot v1 used. v1 (`kts_collectr_bot.py`, the root
+> `Procfile`, branch `main`) is dormant rollback code — nothing below about "v1 keeps
+> running" or "a second service with its own token" describes today.
+>
+> - **A push to `bot-v2-triumph` that touches `botv2/**` redeploys the live bot** — docs and
+>   tests included (`watchPatterns`). The restart wipes the in-memory lots, and messages sent
+>   while it restarts are not replayed. `.github/workflows/canary.yml` then smoke-tests it.
+> - **`botv2/railway.json` must stay valid.** As noted further down, if Railway can't read it
+>   the service falls back to the root `Procfile` — v1's code on the live bot's token.
+> - The rest of this guide was written for the original two-service plan and is kept for
+>   history. **Do not follow these parts of it on the live service:**
+>   - *"set `BOTV2_PRICE_MOCK=1`, deploy … for a smoke test"* — on the live bot that sends real
+>     customers FAKE quotes. (The bot now DMs Kevin at startup if it boots that way, and
+>     `/status.flags.price_mock` shows it.) Test with `python -m botv2.selftest` instead.
+>   - *"remove `DISCORD_TOKEN` to take v2 offline"* — `config.py` reads `DISCORD_BOT_TOKEN`
+>     first, so that does nothing. Roll back by redeploying a previous good build, or by
+>     pointing the service back at `main` (v1).
+>   - *"New service … v2's own bot token … a different Discord application"* — do not create
+>     a second service or a second bot.
+>   - The `/owed`, `/tickets`, `/leaderboard`, `/links` endpoints no longer exist; see
+>     `portal-interface/portal-calls-bot.md` for the real list (incl. `POST /void`).
+> - Never run the bot locally with the production token: it would act in the live server.
+
 v2 runs as a **second Railway service** off the **same repo** (`kts-bot`) that v1
 already deploys from. It is a separate bot (its own Discord application + token).
 

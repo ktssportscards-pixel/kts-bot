@@ -1,5 +1,10 @@
 # botv2 — Triumph-sourced KTS Collectr bot (ground-up rebuild)
 
+> **Status (2026-11-10): botv2 is the LIVE production bot** (cut over 2026-11-04; Railway
+> service `worker`, branch `bot-v2-triumph`). A push to that branch touching `botv2/**`
+> redeploys it. See `DEPLOY.md` → "Current state". Parts of this README describe the
+> pre-cutover plan and are marked below.
+
 Fresh rebuild of the Discord bot. **One architectural change** from v1
 (`../kts_collectr_bot.py`): prices come from the **KTS Portal**, not the CardLadder
 scraper.
@@ -29,9 +34,14 @@ stripped again here, so it can never reach a customer sheet or message.
 ## Run / test
 ```
 # from the kts-bot/ directory
-python -m botv2.bot                 # live (needs DISCORD_TOKEN + BOT_API_KEY + portal /bot/price)
-BOTV2_PRICE_MOCK=1 python -m botv2.bot   # offline: mock prices, exercise the Discord flow
+python -m botv2.selftest            # the offline test suite — safe anywhere (temp data dir,
+                                    # credentials scrubbed, network disabled); exit 0 = green
+python -m botv2                     # run the bot (needs a Discord token + BOT_API_KEY + the portal)
+BOTV2_PRICE_MOCK=1 python -m botv2  # mock prices — ONLY with a TEST Discord app/token
 ```
+**Never run the bot with the production Discord token** (it would post, DM and create
+sheets in the live server), and never set `BOTV2_PRICE_MOCK=1` on the live service
+(customers would get fake quotes).
 `portal_client.price_certs([...])` is the single price call; `BOTV2_PRICE_MOCK=1`
 makes it return deterministic fake rows so the bot is testable before the portal
 endpoint is deployed.
@@ -64,9 +74,11 @@ applies that seller's rates (per-row `vip`). Precedence: explicit `rateOverride`
 | `vip.py` | rare manual override (VIP is portal-sourced by username) |
 | `tracking.py` | record accepted lots → owed/tickets stores, tracking #, mark paid |
 | `payout_digest.py` | Friday 9am ET unpaid-owed digest DM to Kevin |
-| `commands.py` | `!ping` / `!help` / `!adopt` / `!paid` |
-| `webserver.py` | /health + /owed /tickets /leaderboard /links (binds $PORT) |
-| `state.py` | atomic JSON persistence |
+| `commands.py` | `!ping` / `!help` + Kevin-only `!adopt` `!paid` `!resolve` `!void` `!bands` `!lanes` `!stats` `!stalecheck` `!payinfo` `!owe` `!synctracking` |
+| `webserver.py` | `/health` (public) + authed `/ops` `/status` `/analytics` `/delivery` `/void` (binds $PORT) |
+| `state.py` | atomic JSON persistence; keeps (never overwrites) a store it couldn't read and reports it |
+| `textsplit.py` | splits long text into Discord-sized messages (2,000-char cap) |
+| `alerts.py` / `canary.py` / `analytics.py` | Kevin alert rate-limiter + `/status` last error · live smoke test · volume/payout aggregates |
 | `bot.py` | Discord client, `on_message` router, entry |
 | `selftest.py` | the test suite — `python -m botv2.selftest` |
 
@@ -84,12 +96,11 @@ portal does allocation.
   sends; the portal applies it. A local manual override remains for a one-off.
 
 ## Still open
-- Integration-test against the live `/bot/price` (needs the portal endpoint built
-  on Kevin's direct go). Until then v2 runs on the mock.
-- Deploy wiring (Procfile/requirements) when Kevin moves v2 off local.
+- *(Both pre-cutover items are done: v2 prices against the live `/bot/price` and is
+  deployed via `botv2/railway.json`.)* Open decisions now live in Kevin's roadmap sheet.
 
 ## Backups of v1 (the months of proven work)
 - git tag `v1-stable-2026-11-04`, branch `v1-backup-2026-11-04`
 - full copy: `../../kts-bot-BACKUP-v1-2026-11-04/`
-- `../kts_collectr_bot.py` stays the LIVE bot on `main`; v2 lives on branch
-  `bot-v2-triumph` and does not touch the live deploy until Kevin says go.
+- `../kts_collectr_bot.py` on `main` WAS the live bot until the 2026-11-04 cutover and is
+  now the dormant rollback copy. botv2 on branch `bot-v2-triumph` IS the live deploy.
