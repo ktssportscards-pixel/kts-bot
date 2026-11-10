@@ -200,6 +200,7 @@ class _BotHarness:
     def __init__(self, cid, name="harness", rows=None, sheet_url=None):
         self.cid, self.name, self.rows, self.sheet_url = cid, name, rows, sheet_url
         self.sheet_calls, self.fill_calls, self.errors = [], [], []
+        self.tracking_saves, self.trash_calls = [], []
 
     def __enter__(self):
         import botv2.config as cfg
@@ -208,8 +209,19 @@ class _BotHarness:
         self.kevin = _FakeUser(uid=777, name="kevin")
         self.channel = _fake_channel(self.cid, self.name)
         self._saved = (cfg.KEVIN_USER_ID, portal_client.price_certs,
-                       sheets_mod.create_psa_sheet, sheets_mod.fill_buying_sheet)
+                       sheets_mod.create_psa_sheet, sheets_mod.fill_buying_sheet,
+                       sheets_mod.save_tracking, sheets_mod.trash_sheet)
         cfg.KEVIN_USER_ID = 777
+        # The two Apps Script WRITE calls a handler can reach are always stubbed in here:
+        # nothing driven through this harness may even attempt them (the process-wide network
+        # kill would stop it, but then the "no network attempt" check rightly fails the run).
+        sheets_mod.save_tracking = lambda url, tnum: self.tracking_saves.append((url, tnum))
+        if getattr(sheets_mod.trash_sheet, "__module__", "") == "botv2.sheets":   # keep a test's own stub
+
+            def _trash(url):
+                self.trash_calls.append(url)
+                return True
+            sheets_mod.trash_sheet = _trash
         botmod.bot.get_user = lambda _uid: self.kevin          # instance attr shadows the method
         tickets._known.add(self.cid)
         botmod._welcomed.add(self.cid)
@@ -246,7 +258,8 @@ class _BotHarness:
     def __exit__(self, *exc):
         cfg, botmod, sheets_mod = self.cfg, self.botmod, self.sheets_mod
         (cfg.KEVIN_USER_ID, portal_client.price_certs,
-         sheets_mod.create_psa_sheet, sheets_mod.fill_buying_sheet) = self._saved
+         sheets_mod.create_psa_sheet, sheets_mod.fill_buying_sheet,
+         sheets_mod.save_tracking, sheets_mod.trash_sheet) = self._saved
         botmod.bot.__dict__.pop("get_user", None)
         self.tickets._known.discard(self.cid)
         botmod._welcomed.discard(self.cid)
@@ -1743,6 +1756,160 @@ def test_truthful_replies():
         sheets_mod.get_drive_service = real_drive
 
 
+# ── the quote → sheet → ship → tracking handlers, driven end to end with fakes ──
+def test_handlers_and_void_races():
+    section("handlers + void races")
+    import botv2.config as cfg
+    from botv2 import bot as botmod, sheets as sheets_mod
+    URL = "https://docs.google.com/spreadsheets/d/RACE%s/edit"
+
+    def _rows(cert_list):
+        return [PricedRow(cert=c, cert_id=c, category="pokemon", market_value=100, value=100,
+                          decision="BUY", offer=90, card_name="Pikachu", grader="PSA", grade="10")
+                for c in cert_list]
+
+    # 1) normal quote: sheet cached + filled, Kevin gets the summary with the link, and the
+    #    claim client is NEVER called while BOTV2_AUTO_CLAIM is off.
+    claim_calls = []
+    real_claim = portal_client.claim_certs
+
+    async def _claim_spy(*a, **k):
+        claim_calls.append(a)
+        return []
+    portal_client.claim_certs = _claim_spy
+    try:
+        with _BotHarness(9100, name="normalq", rows=_rows, sheet_url=URL % 9100) as h:
+            h.say("12345678 23456789")
+            check(not h.errors and len(h.channel.sent) == 1 and "Total payout" in h.channel.sent[0],
+                  "quote: customer gets one quote message")
+            check(cfg.AUTO_CLAIM is False and not claim_calls,
+                  "quote: the claim client is not called while BOTV2_AUTO_CLAIM is off")
+            check(h.sheet_calls == [("normalq", ["12345678", "23456789"])] and h.fill_calls == [URL % 9100]
+                  and botmod._channel_sheet.get("9100") == URL % 9100
+                  and tracking.state.load("channel_sheet", dict).get("9100") == URL % 9100,
+                  "quote: buying sheet created, cached (memory + disk) and filled")
+            check(any((URL % 9100) in d and "normalq" in d for d in h.kevin.dms),
+                  "quote: Kevin's summary carries the sheet link")
+
+            # 2) tracking in a normal ticket: stored, Kevin told, no warning suffix
+            del h.kevin.dms[:]
+            h.say("1Z999AA10123456784")
+            check("noted" in h.channel.sent[-1] and any("Tracking from" in d and "⚠️" not in d for d in h.kevin.dms),
+                  "tracking: normal ticket → ack + Kevin DM without a warning")
+            check(h.tracking_saves == [(URL % 9100, "1Z999AA10123456784")]
+                  and any("(saved to sheet)" in d for d in h.kevin.dms)
+                  and tracking.find_tickets(channel_id=9100)[0].get("tracking") == "1Z999AA10123456784",
+                  "tracking: number stored on the ticket and saved to the cached sheet")
+            tracking.void_ticket(9100)
+    finally:
+        portal_client.claim_certs = real_claim
+
+    # 3) a void that lands WHILE the buying sheet is building: the late sheet must not be
+    #    cached, filled or summarised — Kevin gets its link to trash by hand.
+    with _BotHarness(9101, name="racer", rows=_rows, sheet_url=URL % 9101) as h:
+        voided = []
+
+        def _slow_create(username, cert_tokens, folder_id=None):
+            h.sheet_calls.append((username, list(cert_tokens)))
+            voided.append(tracking.void_ticket(9101))        # Kevin's void runs mid-build
+            return URL % 9101, f"{username} discord", {}
+        sheets_mod.create_psa_sheet = _slow_create
+        h.say("12345678")
+        check(voided and voided[0].get("ticket_removed") is True, "race: the void removed the ticket mid-build")
+        check(not h.errors and "9101" not in botmod._channel_sheet
+              and "9101" not in tracking.state.load("channel_sheet", dict),
+              "race: the late sheet is NOT cached for the dead quote (it used to be re-cached + persisted)")
+        check(not h.fill_calls, "race: the late sheet is NOT filled with offers")
+        kd = "\n".join(h.kevin.dms)
+        check((URL % 9101) in kd and "VOIDED while its buying sheet" in kd and "📋" not in kd,
+              "race: Kevin gets the sheet link to trash by hand, not a normal quote summary")
+        check(tracking.is_voided(9101), "race: channel stays voided")
+
+    # 4) ship in a voided channel: ignored (existing gate) …
+    with _BotHarness(9102, name="shipvoid", rows=_rows, sheet_url=URL % 9102) as h:
+        h.say("12345678")
+        tracking.void_ticket(9102)
+        lots.drop(9102)
+        botmod._last_quote.pop(9102, None)
+        del h.channel.sent[:], h.kevin.dms[:]
+        h.say("ship")
+        check(not h.channel.sent and any("VOIDED channel" in d for d in h.kevin.dms),
+              "ship on a voided channel: no address posted, Kevin told")
+
+    # … and a void that lands DURING the ship-time lot rebuild still wins (TOCTOU).
+    with _BotHarness(9103, name="shiprace", rows=_rows, sheet_url=URL % 9103) as h:
+        h.say("12345678")
+        lots.drop(9103)                                       # as after a redeploy: no in-memory lot
+        real_rebuild = lots.rebuild_from_sheets
+
+        def _rebuild(cid, username, days=4, created_after=None):
+            tracking.void_ticket(cid)                         # the void lands mid-rebuild …
+            lots.add_slab_values(cid, {"x": 100.0}, {"x": "basketball"})   # … and the thread re-creates a lot
+            return True
+        lots.rebuild_from_sheets = _rebuild
+        del h.channel.sent[:], h.kevin.dms[:]
+        try:
+            h.say("ship")
+        finally:
+            lots.rebuild_from_sheets = real_rebuild
+        check(not h.errors and not h.channel.sent,
+              "ship race: no shipping address is posted when the void landed during the rebuild")
+        check(not lots.has_lot(9103) and any("VOIDED channel" in d for d in h.kevin.dms)
+              and not any(r.get("id") == "owed_9103" for r in tracking.state.load("owed", list)),
+              "ship race: the re-created lot is dropped, nothing booked, Kevin told")
+
+    # 5) tracking number in a VOIDED channel / a channel with no ticket: customer ack unchanged,
+    #    but Kevin is told the number was not stored.
+    with _BotHarness(9104, name="trackvoid", rows=_rows, sheet_url=URL % 9104) as h:
+        h.say("12345678")
+        dm = _fake_channel(9199, "kevin-dm")
+        dm.guild = None
+        asyncio.run(commands.handle(None, _FakeMessage(dm, "!void id:9104", author=h.kevin)))   # a real void
+        check(h.trash_calls == [URL % 9104] and "9104" not in botmod._channel_sheet,
+              "void (through the command): sheet trashed once, cache cleared")
+        del h.channel.sent[:], h.kevin.dms[:]
+        h.say("1Z999AA10123456784")
+        check(len(h.channel.sent) == 1 and "noted" in h.channel.sent[0] and not h.tracking_saves,
+              "tracking on a voided channel: customer ack unchanged, nothing written to a sheet")
+        check(any("VOIDED" in d and "NOT stored" in d for d in h.kevin.dms),
+              "tracking on a voided channel: Kevin is told it was voided and the number isn't stored")
+    with _BotHarness(9105, name="tracknone") as h:
+        h.say("1Z999AA10123456784")
+        check(any("no ticket on record" in d for d in h.kevin.dms),
+              "tracking with no ticket on record: Kevin is told the number isn't stored")
+
+    # 6) save_tracking reads the Apps Script reply: an explicit failure is an error
+    def _reply(body):
+        class _R:
+            def read(self, n=-1):
+                return body.encode()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+        return lambda req, timeout=15: _R()
+    real_urlopen = sheets_mod.urllib.request.urlopen
+    try:
+        def saves(body):
+            sheets_mod.urllib.request.urlopen = _reply(body)
+            try:
+                sheets_mod.save_tracking(URL % 1, "1Z999AA10123456784")
+                return True
+            except RuntimeError:
+                return False
+        check(saves('{"success": true}') and saves('{"ok": 1}') and saves("<html>ok</html>") and saves(""),
+              "save_tracking: success / unknown / non-JSON replies are accepted as before")
+        check(not saves('{"success": false, "error": "unauthorized"}') and not saves('{"error": "no such sheet"}'),
+              "save_tracking: an explicit failure reply raises (Kevin gets 'add it by hand', not 'saved to sheet')")
+    finally:
+        sheets_mod.urllib.request.urlopen = real_urlopen
+
+    for st in ("tickets", "owed", "channel_sheet", "voided", "void_cutoff"):
+        tracking.state.save(st, {} if st in ("channel_sheet", "void_cutoff") else [])
+
+
 # ── alerts that name the ticket; the lanes board on Discord errors ─────────────
 def test_alerts_and_lanes():
     section("alert routing + lanes board errors")
@@ -2163,6 +2330,11 @@ def test_void_callers():
             seed(1001, "shipped", status="accepted", owed=True)
             ok, dm = kevin_says("!void id:1001")
             check(has_ticket(1001) and "force" in dm, "!void on a shipped ticket still needs force")
+            check("$455.00 still owed (unpaid)" in dm, "!void gate: says what is actually still owed")
+            tracking.mark_paid(1001)
+            ok, dm = kevin_says("!void id:1001")
+            check(has_ticket(1001) and "already PAID" in dm and "still owed" not in dm,
+                  "!void gate: a fully paid ticket is not described as an unpaid balance")
             r = body_of(post({"channel_id": "1001"}))
             check(r.get("reason") == "needs_force" and has_ticket(1001), "/void on a shipped ticket still needs force")
             ok, dm = kevin_says("!void id:1001 force")
@@ -2189,7 +2361,7 @@ def main():
               test_lanes_board, test_stale_tickets, test_delivery_ofd,
               test_webserver_auth, test_audit_fixes, test_lanes_schedule,
               test_owed_accumulation, test_void, test_void_callers, test_truthful_replies,
-              test_alerts_and_lanes, test_schedule_dst):
+              test_handlers_and_void_races, test_alerts_and_lanes, test_schedule_dst):
         t()
     check(not _net_attempts,
           f"no test attempted a real network connection (attempts: {_net_attempts[:5]})")

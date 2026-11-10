@@ -567,10 +567,15 @@ def mark_paid(channel_id) -> bool:
     return True
 
 
+def owed_entry(channel_id):
+    """The owed row for this channel (paid or not), or None."""
+    return next((r for r in state.load("owed", list) if r.get("id") == f"owed_{channel_id}"), None)
+
+
 def has_owed_entry(channel_id) -> bool:
     """True if an owed row exists for this channel (paid or not) — lets `!paid` tell
     'nothing to mark' apart from 'the write failed'."""
-    return any(r.get("id") == f"owed_{channel_id}" for r in state.load("owed", list))
+    return owed_entry(channel_id) is not None
 
 
 def resolve_review(channel_id) -> list:

@@ -120,14 +120,27 @@ def _sheet_id_from_url(sheet_url: str) -> str:
 
 
 def save_tracking(sheet_url: str, tracking: str) -> None:
-    """Write a tracking number onto the buying sheet via the Apps Script."""
+    """Write a tracking number onto the buying sheet via the Apps Script. Raises if the call
+    fails OR the script explicitly reports failure — the caller then tells Kevin to add it
+    by hand instead of '(saved to sheet)'. Deliberately lenient: only an explicit failure
+    object ({"success": false, …} or an "error" with no success:true) counts, because the
+    script's success reply shape isn't pinned down here; an unreadable/non-JSON body is
+    treated as before (no error)."""
     sid = _sheet_id_from_url(sheet_url) if "/d/" in str(sheet_url) else sheet_url
     data = json.dumps({"action": "update_tracking", "sheet_id": sid,
                        "tracking": tracking}).encode()
     req = urllib.request.Request(config.APPS_SCRIPT_URL, data=data,
                                  headers={"Content-Type": "application/json",
                                           "User-Agent": "KTS-Bot/2.0"})
-    urllib.request.urlopen(req, timeout=15)
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        try:
+            j = json.loads(resp.read(10000).decode("utf-8", "replace"))     # bounded read
+        except Exception:
+            return
+    if isinstance(j, dict) and (j.get("success") is False
+                                or (j.get("error") and j.get("success") is not True)):
+        raise RuntimeError("Apps Script update_tracking reported failure: "
+                           + str(j.get("error") or "no reason given")[:200])
 
 
 def trash_sheet(sheet_url_or_id: str) -> bool:

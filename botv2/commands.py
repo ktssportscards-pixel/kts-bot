@@ -175,9 +175,21 @@ async def handle(bot, message) -> bool:
         # residual state left by a prior partial void instead of stalling at "nothing to void".
         rows = tracking.find_tickets(channel_id=cid)
         if rows and rows[0].get("status", "quoted") in ("accepted", "paid") and not force:
+            # Say what is actually OWED. The ticket total is every card ever quoted on it
+            # (still-quoted + shipped + already paid), which read as "a real balance" even for
+            # a ticket that was fully paid.
+            total = float(rows[0].get("payout", 0) or 0)
+            o = tracking.owed_entry(cid)
+            if o is None:
+                money = f"ticket total ${total:,.2f}"
+            elif o.get("paid"):
+                money = f"already PAID (nothing outstanding; ticket total ${total:,.2f})"
+            else:
+                money = (f"**${float(o.get('payout', 0) or 0):,.2f} still owed (unpaid)**; "
+                         f"ticket total ${total:,.2f}")
             await reply(
-                f"🛑 Channel `{cid}` is **{rows[0].get('status', 'quoted')}** — a real balance of "
-                f"${float(rows[0].get('payout', 0) or 0):,.2f}. Voiding it drops that balance. "
+                f"🛑 Channel `{cid}` has **shipped** — {money}. Voiding it deletes the whole ticket: "
+                f"the owed balance, the paid history and any newer open quote on it. "
                 f"Re-run as `!void id:{cid} force` if you really mean it.")
             return True
         res = tracking.void_ticket(cid)          # idempotent full purge (runs even with no ticket)

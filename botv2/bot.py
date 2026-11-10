@@ -131,6 +131,12 @@ async def _handle_ship(channel) -> None:
             await alert_kevin(f"lot_rebuild:{channel.id}",
                               f"⚠️ lot rebuild failed on ship (#{channel.name}): {e} — "
                               f"shipping may route to the wrong hub; check this ticket.")
+        # The rebuild awaited for seconds: re-check the cancel guard, so a void that landed
+        # meanwhile still wins (and drop any lot the rebuild thread just re-created).
+        if tracking.is_voided(channel.id):
+            lots.drop(channel.id)
+            await ping_kevin(f"🛑 #{channel.name} — ship attempt on a VOIDED channel; ignored (no rebuild, no booking).")
+            return
     msg, gave, note = shipping.compose_shipping(channel.id)
     await channel.send(msg)
     if gave:
@@ -150,7 +156,7 @@ async def _handle_tracking(channel, tnum) -> None:
         ack = (f"📦 Got it — tracking `{tnum}` noted. I'll let you know right here the "
                f"moment it arrives — no need to check it yourself. 🙌")
     await channel.send(ack)
-    tracking.record_tracking(channel.id, tnum)
+    noted = tracking.record_tracking(channel.id, tnum)
     if config.REGISTER_TRACKING:                        # ask the portal to watch it for delivery
         try:
             await portal_client.register_tracking(channel.id, tnum)
@@ -170,8 +176,16 @@ async def _handle_tracking(channel, tnum) -> None:
             await alert_kevin(f"tracking_save:{channel.id}",
                               f"⚠️ tracking sheet-save failed (#{channel.name}): {e} — "
                               f"the number is noted below; add it to the sheet by hand.")
+    if tracking.is_voided(channel.id):
+        warn = (" — ⚠️ this channel's quote was VOIDED: no ticket/owed on record, so the number "
+                "is NOT stored and nothing is booked.")
+    elif not noted:
+        warn = (" — ⚠️ no ticket on record for this channel, so the number is NOT stored "
+                "(a delivery update can't fire for it).")
+    else:
+        warn = ""
     await ping_kevin(f"📦 Tracking from **{uname}** (#{channel.name}): `{tnum}`{saved}"
-                     + ("" if sheet_url else " — no sheet cached, add by hand"))
+                     + ("" if sheet_url else " — no sheet cached, add by hand") + warn)
 
 
 async def notify_delivered(channel_id, user: str = "") -> bool:
@@ -598,6 +612,10 @@ async def _handle_message(message) -> None:
                       "grader": r.grader, "grade": r.grade, "name": (r.card_name or "")[:60]}
                      for r in quote.accepted],
         passed=[r.cert for r in quote.rejected])   # explicit PASS drops a re-quoted card (combine-all)
+    # The buying sheet is built further down, off the customer's path, and can take a minute
+    # or more. Remember the channel's cancellation cutoff as of THIS quote: it only ever moves
+    # when a void runs, so a different value after the build means the quote was voided meanwhile.
+    void_mark = tracking.void_cutoff_of(channel.id)
     proceed = lots.proceed_or_hold_tail(channel.id)
     # instant. A long quote (many declined cards listed one per line) is split across
     # messages — one over Discord's 2,000-char cap is rejected whole, which used to abort
@@ -630,6 +648,13 @@ async def _handle_message(message) -> None:
     sheet_url = ""
     try:
         sheet_url, _name, _ = await asyncio.to_thread(sheets.create_psa_sheet, username, cert_list)
+        if tracking.void_cutoff_of(channel.id) != void_mark:
+            # A void hit this channel while the sheet was building. It found no sheet to trash,
+            # so don't hand the dead quote a live one: no cache entry, no fill, no summary —
+            # just give Kevin the link. (No automatic trash from here.)
+            await ping_kevin(f"🛑 #{channel.name} was VOIDED while its buying sheet was still building. "
+                             f"I did NOT fill or link that sheet — trash it by hand: {sheet_url}")
+            return
         _channel_sheet[str(channel.id)] = sheet_url          # cache for later tracking-save
         state.save("channel_sheet", _channel_sheet)
         missing = await asyncio.to_thread(sheets.fill_buying_sheet, sheet_url, rows)
