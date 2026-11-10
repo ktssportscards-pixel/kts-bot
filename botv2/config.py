@@ -10,13 +10,23 @@ NO CardLadder helper, and NO rules engine of its own.
 """
 import os
 
+
+def _int_env(name: str, default: int) -> int:
+    """An integer setting from the environment. Unset OR blank → `default` (a variable left
+    blank on Railway used to crash the import with int(''), boot-looping the bot). Anything
+    else must be a valid integer and still fails loudly at startup, rather than silently
+    running with a different value than the one that was typed."""
+    raw = (os.environ.get(name) or "").strip()
+    return int(raw) if raw else default
+
+
 # ── Discord ───────────────────────────────────────────────────────────────────
 # Accept the existing v1 Railway var name (DISCORD_BOT_TOKEN) first, so the same
 # bot token works unchanged on the shared service; DISCORD_TOKEN is a fallback.
 DISCORD_TOKEN = os.environ.get("DISCORD_BOT_TOKEN") or os.environ.get("DISCORD_TOKEN") or ""
 # Kevin's Discord user id — used to DM him quote summaries and to detect an
 # in-flight ticket (if he's already talking in a channel, skip the welcome).
-KEVIN_USER_ID = int(os.environ.get("KEVIN_USER_ID", "0") or "0")
+KEVIN_USER_ID = _int_env("KEVIN_USER_ID", 0)
 
 # ── Price source: KTS Portal /bot/price proxy (Triumph lives behind it) ────────
 # BOT_API_KEY is a NEW shared secret for the x-bot-key header — it is NOT the
@@ -46,7 +56,7 @@ UNCLAIM_ENDPOINT = PORTAL_BASE_URL.rstrip("/") + "/bot/unclaim"
 # Threshold for a near-full nudge. The portal also flags per-card nearFull on
 # /bot/price rows at this same %; the board read gives the fuller picture.
 ALLOCATION_ENDPOINT = PORTAL_BASE_URL.rstrip("/") + "/bot/allocation"
-NEAR_FULL_PCT = int(os.environ.get("NEAR_FULL_PCT", "85"))
+NEAR_FULL_PCT = _int_env("NEAR_FULL_PCT", 85)
 
 # ── Delivery tracking (auto "your package arrived" update) ─────────────────────
 # A customer drops a tracking number in their ticket (or the app); when the carrier
@@ -81,8 +91,8 @@ REGISTER_TRACKING_ENDPOINT = PORTAL_BASE_URL.rstrip("/") + "/bot/register-tracki
 # one must NOT). DEFAULT OFF, and a no-op unless BOTV2_LANES_BOARD is on AND a channel
 # id is set. Refreshes every LANES_REFRESH_MIN minutes (floored at 1).
 LANES_BOARD = os.environ.get("BOTV2_LANES_BOARD", "").lower() in ("1", "true", "yes")
-LANES_CHANNEL_ID = int(os.environ.get("BOTV2_LANES_CHANNEL_ID", "0") or "0")
-LANES_REFRESH_MIN = int(os.environ.get("BOTV2_LANES_REFRESH_MIN", "10") or "10")
+LANES_CHANNEL_ID = _int_env("BOTV2_LANES_CHANNEL_ID", 0)
+LANES_REFRESH_MIN = _int_env("BOTV2_LANES_REFRESH_MIN", 10)
 # Weekly auto-schedule: when ON (default), the board auto-POSTS when the buying window opens
 # and REMOVES itself when it closes, so BOTV2_LANES_BOARD can stay on permanently. Window is
 # Saturday 3 AM -> Monday 3 AM ET (the buying weekend). Set BOTV2_LANES_SCHEDULE=0 to ignore
@@ -96,9 +106,9 @@ LANES_SCHEDULE = os.environ.get("BOTV2_LANES_SCHEDULE", "1").lower() in ("1", "t
 # KEVIN-ONLY — the digest never reaches a customer. DEFAULT OFF (the loop only starts
 # when this is on).
 STALE_NUDGES = os.environ.get("BOTV2_STALE_NUDGES", "").lower() in ("1", "true", "yes")
-STALE_QUOTED_DAYS = int(os.environ.get("BOTV2_STALE_QUOTED_DAYS", "5"))    # quoted, never shipped
-STALE_TRANSIT_DAYS = int(os.environ.get("BOTV2_STALE_TRANSIT_DAYS", "5"))  # shipped, not delivered
-STALE_UNPAID_DAYS = int(os.environ.get("BOTV2_STALE_UNPAID_DAYS", "3"))    # delivered, still unpaid
+STALE_QUOTED_DAYS = _int_env("BOTV2_STALE_QUOTED_DAYS", 5)    # quoted, never shipped
+STALE_TRANSIT_DAYS = _int_env("BOTV2_STALE_TRANSIT_DAYS", 5)  # shipped, not delivered
+STALE_UNPAID_DAYS = _int_env("BOTV2_STALE_UNPAID_DAYS", 3)    # delivered, still unpaid
 # ── Google Sheets (buying sheets) ──────────────────────────────────────────────
 GOOGLE_CREDENTIALS_JSON = os.environ.get("GOOGLE_CREDENTIALS_JSON")
 GOOGLE_CREDENTIALS_FILE = os.environ.get(
@@ -135,22 +145,22 @@ DATA_DIR = os.environ.get("DATA_DIR") or os.path.join(
 # ── Lot minimums + lane status ─────────────────────────────────────────────────
 # No minimum lot size — everything drop-ships now (Kevin removed the floor 2026-11-06);
 # the ship path no longer holds small lots. Kept configurable in case a floor returns.
-SPORTS_OP_MIN_LOT = int(os.environ.get("SPORTS_OP_MIN_LOT", "0"))
-POKEMON_SINGLES_MIN_LOT = int(os.environ.get("POKEMON_SINGLES_MIN_LOT", "0"))
+SPORTS_OP_MIN_LOT = _int_env("SPORTS_OP_MIN_LOT", 0)
+POKEMON_SINGLES_MIN_LOT = _int_env("POKEMON_SINGLES_MIN_LOT", 0)
 
 # Ship-routing override: when ON, the bot sends EVERY ship to the single Doral address
 # (one package) instead of the Pokémon→VA / Sports-OP→Doral split. For weeks when Kevin
 # consolidates everything to one hub. DEFAULT OFF (normal two-address split).
 SHIP_ALL_DORAL = os.environ.get("BOTV2_SHIP_ALL_DORAL", "").lower() in ("1", "true", "yes")
-MIN_LOT_VALUE = int(os.environ.get("MIN_LOT_VALUE", "0"))                  # combined min (0 = off)
-MIN_SLAB_COUNT = int(os.environ.get("MIN_SLAB_COUNT", "0"))               # slab-count min (0 = off)
+MIN_LOT_VALUE = _int_env("MIN_LOT_VALUE", 0)                  # combined min (0 = off)
+MIN_SLAB_COUNT = _int_env("MIN_SLAB_COUNT", 0)               # slab-count min (0 = off)
 # Whether the Pokémon (Pixel, no-minimum) lane is open — controls only customer
 # COPY (the "send Pokémon, no minimum" invites); actual acceptance is the portal's
 # call per cert. Kevin flips this when the Pokémon lane opens.
 POKEMON_LANE_OPEN = os.environ.get("POKEMON_LANE_OPEN", "").lower() in ("1", "true", "yes")
 
 # ── Web server (tracker sync: /owed /tickets /leaderboard /links /health) ──────
-WEB_PORT = int(os.environ.get("PORT", "8080"))
+WEB_PORT = _int_env("PORT", 8080)
 
 # ── Confidential-field guard ───────────────────────────────────────────────────
 # The portal already drops payoutCents + memberMultiplier at the source, so they

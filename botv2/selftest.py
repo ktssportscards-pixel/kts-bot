@@ -90,6 +90,27 @@ def test_harness_is_hermetic():
     check(cfg.DISCORD_TOKEN == "" and cfg.BOT_API_KEY == "" and cfg.APPS_SCRIPT_SHARED_SECRET == ""
           and not cfg.GOOGLE_CREDENTIALS_JSON and not os.path.exists(cfg.GOOGLE_CREDENTIALS_FILE),
           "harness: no credential is loaded (tokens, bot key, sheet secret, service account)")
+    # integer settings: unset or BLANK → the default (a blank Railway variable used to crash
+    # the import with int('')); a typo still fails loudly instead of silently changing a value.
+    os.environ.pop("ZZ_SELFTEST_INT", None)
+    check(cfg._int_env("ZZ_SELFTEST_INT", 7) == 7, "config: unset int → default")
+    for blank in ("", "   "):
+        os.environ["ZZ_SELFTEST_INT"] = blank
+        check(cfg._int_env("ZZ_SELFTEST_INT", 7) == 7, f"config: blank int {blank!r} → default (no crash)")
+    os.environ["ZZ_SELFTEST_INT"] = " 12 "
+    check(cfg._int_env("ZZ_SELFTEST_INT", 7) == 12, "config: a real value is used")
+    os.environ["ZZ_SELFTEST_INT"] = "12x"
+    try:
+        cfg._int_env("ZZ_SELFTEST_INT", 7)
+        check(False, "config: a garbage int must fail loudly")
+    except ValueError:
+        check(True, "config: a garbage int fails loudly")
+    os.environ.pop("ZZ_SELFTEST_INT", None)
+    check((cfg.MIN_LOT_VALUE, cfg.MIN_SLAB_COUNT, cfg.SPORTS_OP_MIN_LOT, cfg.POKEMON_SINGLES_MIN_LOT,
+           cfg.NEAR_FULL_PCT, cfg.STALE_QUOTED_DAYS, cfg.STALE_TRANSIT_DAYS, cfg.STALE_UNPAID_DAYS,
+           cfg.LANES_REFRESH_MIN, cfg.WEB_PORT, cfg.KEVIN_USER_ID, cfg.LANES_CHANNEL_ID)
+          == (0, 0, 0, 0, 85, 5, 5, 3, 10, 8080, 0, 0),
+          "config: every integer default is unchanged")
     check(cfg.PSA_FOLDER_ID == cfg.V1_PSA_FOLDER_ID and not cfg.ALLOW_SHARED_PSA_FOLDER
           and cfg.psa_folder_unsafe(),
           "harness: Drive folder left at the refuse-to-create tripwire default")
@@ -1039,6 +1060,8 @@ def test_webserver_auth():
             webserver._void(_Req(key="selftestkey", body={"user": "void_web"}))).body.decode())
         check(nf.get("voided") is False and nf.get("reason") == "not_found",
               "void: idempotent (second void → not_found)")
+        for wrong in ("selftestkeY", "selftestke", "selftestkey ", "sélftestkey", "\udcff"):
+            check(st(webserver._ops(_Req(key=wrong))) == 401, f"auth: wrong key {wrong!r} rejected")
         cfg.BOT_API_KEY = ""                          # fails closed when no key is configured
         check(st(webserver._ops(_Req(key="anything"))) == 401,
               "auth: fails closed when BOT_API_KEY is unset")

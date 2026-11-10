@@ -8,6 +8,7 @@ sink). The old v1 /owed /tickets /leaderboard /links reads were removed — thei
 consumer was a retired local tracker, and the portal reads /ops instead.
 """
 import datetime
+import hmac
 
 import aiohttp.web as web
 
@@ -27,7 +28,12 @@ def _authed(req) -> bool:
     """x-bot-key gate, shared by every non-public endpoint. Fails CLOSED when BOT_API_KEY
     is unset (no key configured → deny everyone) so an endpoint can never be accidentally
     public. Only /health is intentionally unauthenticated (Railway health-check + canary)."""
-    return bool(config.BOT_API_KEY) and req.headers.get("x-bot-key") == config.BOT_API_KEY
+    key, got = config.BOT_API_KEY, req.headers.get("x-bot-key")
+    if not key or not isinstance(got, str):
+        return False
+    # constant-time compare (bytes, so a non-ASCII header can't raise) — no timing oracle on the key
+    return hmac.compare_digest(got.encode("utf-8", "backslashreplace"),
+                               key.encode("utf-8", "backslashreplace"))
 
 
 def _unauthorized():
