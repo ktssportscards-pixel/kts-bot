@@ -18,8 +18,10 @@
 >     customers FAKE quotes. (The bot now DMs Kevin at startup if it boots that way, and
 >     `/status.flags.price_mock` shows it.) Test with `python -m botv2.selftest` instead.
 >   - *"remove `DISCORD_TOKEN` to take v2 offline"* — `config.py` reads `DISCORD_BOT_TOKEN`
->     first, so that does nothing. Roll back by redeploying a previous good build, or by
->     pointing the service back at `main` (v1).
+>     first, so that does nothing. To roll back, **redeploy a previous good build** in
+>     Railway (Deployments → Redeploy). Going all the way back to v1 means undoing the
+>     cutover (service branch AND config-file path) — check the cutover notes for the exact
+>     steps before relying on it in an incident.
 >   - *"New service … v2's own bot token … a different Discord application"* — do not create
 >     a second service or a second bot.
 >   - The `/owed`, `/tickets`, `/leaderboard`, `/links` endpoints no longer exist; see

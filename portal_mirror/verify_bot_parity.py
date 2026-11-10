@@ -13,6 +13,13 @@ safe-stricter overlays, verified separately). Values from $1 (the bot's $1 floor
 overlay; portal's $0.40-0.60 sub-$1 is a documented safe-stricter divergence).
 
 Run:  python3 verify_bot_parity.py   ->  "BOT PARITY OK" or a list of mismatches.
+
+WHAT THIS DOES AND DOESN'T COVER (added 2026-11-10): "the bot" here is the v1 monolith
+(kts_collectr_bot.py) as checked out — its local band logic against the mirrored
+rules.json snapshot. It does NOT exercise botv2, the live bot since the 2026-11-04
+cutover: botv2 has no local pricing at all (it takes the decision + offer from the
+portal's /bot/price), so "BOT PARITY OK" says nothing about what the live bot quotes.
+botv2's pricing check is the canary's live /bot/price step (python -m botv2.canary).
 """
 import sys, os, types
 from unittest.mock import MagicMock
