@@ -1621,6 +1621,105 @@ def test_void():
     tracking.state.save("void_cutoff", {})
 
 
+# ── replies and alerts that must tell the truth ─────────────────────────────────
+def test_truthful_replies():
+    section("truthful replies + alerts")
+    import botv2.config as cfg
+    from botv2 import bot as botmod, sheets as sheets_mod
+    from botv2.portal_client import PortalUnavailable
+
+    with _BotHarness(8950, name="truthy") as h:
+        guild_chan = h.channel                          # a guild (ticket) channel: .guild is set
+
+        # !payinfo: when the delete FAILS, don't say "I deleted the message".
+        class _Undeletable(_FakeMessage):
+            async def delete(self):
+                raise RuntimeError("403 Missing Permissions")
+        m = _Undeletable(guild_chan, "!payinfo list", author=h.kevin)
+        check(asyncio.run(commands.handle(None, m)) is True and guild_chan.sent
+              and "could NOT delete" in guild_chan.sent[-1] and "I deleted the message" not in guild_chan.sent[-1],
+              "!payinfo: a failed delete is reported (it used to claim the message was deleted)")
+        del guild_chan.sent[:]
+        m2 = _FakeMessage(guild_chan, "!payinfo list", author=h.kevin)
+        check(asyncio.run(commands.handle(None, m2)) is True and m2.deleted
+              and "I deleted the message" in guild_chan.sent[-1], "!payinfo: normal path unchanged")
+
+        # !paid: a failed write is not "no owed entry".
+        del guild_chan.sent[:]
+        tracking.state.save("owed", [{"id": "owed_8950", "channel_id": 8950, "user": "truthy",
+                                      "paid": False, "payout": 100.0}])
+        real = tracking.state.save
+        tracking.state.save = lambda name, data: False if name == "owed" else real(name, data)
+        try:
+            asyncio.run(commands.handle(None, _FakeMessage(guild_chan, "!paid", author=h.kevin)))
+        finally:
+            tracking.state.save = real
+        check("NOT marked paid" in guild_chan.sent[-1] and "No owed entry" not in guild_chan.sent[-1],
+              "!paid: a failed save says so (it used to answer 'No owed entry')")
+        asyncio.run(commands.handle(None, _FakeMessage(guild_chan, "!paid", author=h.kevin)))
+        check(guild_chan.sent[-1] == "✅ Marked paid.", "!paid: works once the write succeeds")
+        tracking.state.save("owed", [])
+        asyncio.run(commands.handle(None, _FakeMessage(guild_chan, "!paid", author=h.kevin)))
+        check("No owed entry" in guild_chan.sent[-1], "!paid: genuinely nothing owed still says so")
+
+        # !bands: a raw network error gets the friendly reply too (only PortalError did).
+        del h.kevin.dms[:]
+        real_fetch = portal_client.fetch_allocation
+
+        async def _boom():
+            raise RuntimeError("Cannot connect to host")
+        portal_client.fetch_allocation = _boom
+        try:
+            dm = _fake_channel(8951, "kevin-dm")
+            dm.guild = None
+            try:
+                handled = asyncio.run(commands.handle(None, _FakeMessage(dm, "!bands", author=h.kevin)))
+            except Exception:
+                handled = False
+        finally:
+            portal_client.fetch_allocation = real_fetch
+        check(handled and h.kevin.dms and "Couldn't load the allocation board" in h.kevin.dms[-1],
+              "!bands: a network error is reported to Kevin instead of raising")
+
+    # lone bare CGC-shaped number while pricing is DOWN: the alert must say pricing failed.
+    async def _down(cert_list, customer=None, rate_override=None, session=None):
+        raise PortalUnavailable("portal 503")
+    with _BotHarness(8952, name="lonecgc") as h:
+        real_price = portal_client.price_certs
+        portal_client.price_certs = _down
+        try:
+            h.say("6193949247")
+        finally:
+            portal_client.price_certs = real_price
+        kd = "\n".join(h.kevin.dms)
+        check(not h.errors and "pricing error" in kd and "didn't resolve as a slab" not in kd and not h.channel.sent,
+              "lone number during a pricing outage: Kevin is told pricing failed (not 'not a slab')")
+
+    # ship with no in-memory lot and a failing Drive rebuild: the 'lot rebuild failed' alert fires.
+    real_drive = sheets_mod.get_drive_service
+
+    def _no_drive():
+        raise RuntimeError("drive unavailable")
+    sheets_mod.get_drive_service = _no_drive
+    try:
+        try:
+            lots.rebuild_from_sheets(8953, "rebuilder")
+            raised = False
+        except RuntimeError:
+            raised = True
+        lots.drop(8953)
+        check(raised and not lots.has_lot(8953), "rebuild_from_sheets: a Drive failure is raised, lot untouched")
+        with _BotHarness(8953, name="rebuilder") as h:
+            h.say("ship")
+            kd = "\n".join(h.kevin.dms)
+            check(not h.errors and "lot rebuild failed" in kd and "wrong hub" in kd,
+                  "ship: Kevin is alerted when the lot rebuild fails (the alert was unreachable)")
+            check(h.channel.sent and "Ship" in h.channel.sent[0],
+                  "ship: the customer still gets the (fail-open) address")
+    finally:
+        sheets_mod.get_drive_service = real_drive
+
+
 # ── scheduled DMs across a daylight-saving change ───────────────────────────────
 def test_schedule_dst():
     section("schedules across DST")
@@ -1882,7 +1981,8 @@ def main():
               test_alerts_status, test_analytics, test_delivery, test_register_tracking,
               test_lanes_board, test_stale_tickets, test_delivery_ofd,
               test_webserver_auth, test_audit_fixes, test_lanes_schedule,
-              test_owed_accumulation, test_void, test_void_callers, test_schedule_dst):
+              test_owed_accumulation, test_void, test_void_callers, test_truthful_replies,
+              test_schedule_dst):
         t()
     check(not _net_attempts,
           f"no test attempted a real network connection (attempts: {_net_attempts[:5]})")

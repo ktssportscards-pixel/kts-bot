@@ -567,6 +567,12 @@ def mark_paid(channel_id) -> bool:
     return True
 
 
+def has_owed_entry(channel_id) -> bool:
+    """True if an owed row exists for this channel (paid or not) — lets `!paid` tell
+    'nothing to mark' apart from 'the write failed'."""
+    return any(r.get("id") == f"owed_{channel_id}" for r in state.load("owed", list))
+
+
 def resolve_review(channel_id) -> list:
     """Kevin has eyeballed an ambiguous ticket — clear its review flag from BOTH the ticket
     and the owed row. Returns the certs/markers that were cleared (empty if none), so the

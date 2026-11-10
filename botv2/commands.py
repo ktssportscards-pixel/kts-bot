@@ -79,7 +79,15 @@ async def handle(bot, message) -> bool:
         if not is_kevin:
             return True
         ok = tracking.mark_paid(channel.id)
-        await channel.send("✅ Marked paid." if ok else "⚠️ No owed entry for this channel.")
+        if ok:
+            reply = "✅ Marked paid."
+        elif tracking.has_owed_entry(channel.id):
+            # mark_paid returns False for a failed write too — don't call that "no owed entry".
+            reply = ("⚠️ Couldn't save that — a storage write failed, so this is NOT marked paid yet. "
+                     "Try `!paid` again.")
+        else:
+            reply = "⚠️ No owed entry for this channel."
+        await channel.send(reply)
         return True
 
     if cmd == "resolve":
@@ -246,7 +254,8 @@ async def handle(bot, message) -> bool:
         from . import pricing, portal_client
         try:
             board = pricing.allocation_board(await portal_client.fetch_allocation())
-        except portal_client.PortalError as e:
+        except Exception as e:      # PortalError, but also raw network / timeout errors (as !lanes does)
+            print(f"[cmd] !bands fetch failed: {e}")
             board = f"⚠️ Couldn't load the allocation board: {e}"
         # DM Kevin the figures — NEVER post the real numbers into a (customer) channel.
         try:
@@ -359,13 +368,19 @@ async def handle(bot, message) -> bool:
         # If typed in a guild channel, delete the command first (it may carry details
         # on `!payinfo set`), then DM Kevin. Best used in a DM with the bot.
         in_guild = getattr(channel, "guild", None) is not None
+        deleted = False
         if in_guild:
             try:
                 await message.delete()
+                deleted = True
             except Exception as e:
                 print(f"[cmd] !payinfo couldn't delete in-channel message: {e}")
         if not is_kevin:
             return True   # swallow admin command (already scrubbed if it was in a channel)
+        # Never claim the message is gone when the delete failed — the details would sit in
+        # the channel while Kevin believes they were scrubbed.
+        not_deleted = ("⚠️ I could NOT delete your `!payinfo` message here (missing Manage Messages?) — "
+                       "delete it yourself so the details don't sit in the channel.")
         reply = tracking.payinfo_command(message.content)
         try:
             await textsplit.send_chunked(message.author, reply)
@@ -373,13 +388,15 @@ async def handle(bot, message) -> bool:
             print(f"[cmd] !payinfo DM failed: {e}")
             if in_guild:
                 try:   # never echo the details into the channel
-                    await channel.send("⚠️ Couldn't DM you — open your DMs to the bot, then retry `!payinfo` (I deleted the message).")
+                    await channel.send("⚠️ Couldn't DM you — open your DMs to the bot, then retry `!payinfo`"
+                                       + (" (I deleted the message)." if deleted else ". " + not_deleted))
                 except Exception:
                     pass
             return True
         if in_guild:
             try:
-                await channel.send("🔒 Handled in your DMs — I deleted the message so details don't sit in the channel.")
+                await channel.send("🔒 Handled in your DMs — I deleted the message so details don't sit in the channel."
+                                   if deleted else "🔒 Handled in your DMs. " + not_deleted)
             except Exception:
                 pass
         return True

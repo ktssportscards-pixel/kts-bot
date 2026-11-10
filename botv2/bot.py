@@ -125,7 +125,7 @@ async def _handle_ship(channel) -> None:
                                     getattr(channel, "created_at", None))
         except Exception as e:
             print(f"[bot] lot rebuild failed (non-fatal): {e}")
-            await alert_kevin("lot_rebuild",
+            await alert_kevin(f"lot_rebuild:{channel.id}",
                               f"⚠️ lot rebuild failed on ship (#{channel.name}): {e} — "
                               f"shipping may route to the wrong hub; check this ticket.")
     msg, gave, note = shipping.compose_shipping(channel.id)
@@ -164,7 +164,7 @@ async def _handle_tracking(channel, tnum) -> None:
             saved = " (saved to sheet)"
         except Exception as e:
             print(f"[bot] tracking sheet-save failed (non-fatal): {e}")
-            await alert_kevin("tracking_save",
+            await alert_kevin(f"tracking_save:{channel.id}",
                               f"⚠️ tracking sheet-save failed (#{channel.name}): {e} — "
                               f"the number is noted below; add it to the sheet by hand.")
     await ping_kevin(f"📦 Tracking from **{uname}** (#{channel.name}): `{tnum}`{saved}"
@@ -521,8 +521,14 @@ async def _handle_message(message) -> None:
     if certs.cgc_needs_confirm(text, cert_list):
         try:
             pre = await portal_client.price_certs(cert_list)
-        except portal_client.PortalError:
-            pre = []
+        except portal_client.PortalError as e:
+            # Pricing is down, so we can't tell a slab from a phone number — say THAT, not
+            # "didn't resolve as a slab" (which sent Kevin looking for a typo during an outage).
+            await alert_kevin("price_error",
+                              f"🚨 **botv2 pricing error** in #{channel.name} while checking a lone "
+                              f"number `{certs.cert_digits(cert_list[0])}`: {e} — no quote made. If it "
+                              f"was a real CGC cert, have them resend it.")
+            return
         if not pre or not pre[0].priced:
             await ping_kevin(
                 f"ℹ️ **#{channel.name}** sent a lone number "
@@ -612,7 +618,7 @@ async def _handle_message(message) -> None:
             await ping_kevin(f"⚠️ {len(missing)} cert(s) didn't land on {username}'s sheet: "
                              + ", ".join(certs.cert_label(c) for c in missing))
     except Exception as e:
-        await alert_kevin(f"sheet_fail:{type(e).__name__}",
+        await alert_kevin(f"sheet_fail:{channel.id}",
                           f"⚠️ buying sheet failed for #{channel.name} ({e}) — "
                           f"summary below, add rows by hand if needed.")
     await ping_kevin(pricing.kevin_summary(quote, username, sheet_url,

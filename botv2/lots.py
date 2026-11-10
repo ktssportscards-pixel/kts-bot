@@ -118,7 +118,11 @@ def rebuild_from_sheets(cid, username, days=4, created_after=None) -> bool:
     VA address — wrong for Sports/One Piece. Rebuild from the customer's recent
     buying sheet(s): every row with comp>0 AND payout>0 (so Kevin's hand-edits —
     e.g. zeroing what Triumph won't take — count), with its category. Later sheets
-    win per cert. Returns True if anything was rebuilt."""
+    win per cert. Returns True if anything was rebuilt, False if there was nothing to
+    rebuild from. A Google/Drive/Sheets failure is RAISED (after logging) so the caller
+    can tell Kevin the ship may have routed to the wrong hub — it used to be swallowed
+    here, which made bot._handle_ship's "lot rebuild failed" alert unreachable. The lot is
+    only touched at the very end, so a failure leaves it exactly as it was."""
     from datetime import datetime, timedelta, timezone
     from . import certs, sheets
     try:
@@ -185,8 +189,8 @@ def rebuild_from_sheets(cid, username, days=4, created_after=None) -> bool:
         e["rebuilt"] = True
         return True
     except Exception as ex:
-        print(f"[lots] rebuild_from_sheets failed (non-fatal): {ex}")
-        return False
+        print(f"[lots] rebuild_from_sheets failed: {ex}")
+        raise
 
 
 def proceed_or_hold_tail(cid):
