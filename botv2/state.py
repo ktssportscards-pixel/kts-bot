@@ -72,9 +72,9 @@ def add_listener(fn) -> None:
 
 
 def load_failures() -> dict:
-    """{store name: 'corrupt' | 'unreadable'} for stores whose last load failed and that
-    have not been read or rewritten successfully since (startup uses this to tell Kevin
-    about a store that was already bad when the bot booted)."""
+    """{store name: 'corrupt' | 'unreadable'} for stores that failed to load and have not
+    been rewritten since (startup uses this to tell Kevin about a store that was already
+    bad when the bot booted)."""
     with _LOCK:
         return dict(_load_failed)
 
