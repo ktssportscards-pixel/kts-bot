@@ -530,6 +530,16 @@ async def on_message(message):
                           f"⚠️ botv2 on_message error{where} (non-fatal): {e}")
 
 
+def _lot_values(rows) -> dict:
+    """cert → value for the running lot and the ledger's comp column. The portal's
+    marketValue when it sent one (unchanged). For a BUY priced off a last sale with NO
+    marketValue, the value its offer was priced against — such a card used to be left out
+    of the lot altogether: quoted alone, the customer was told "your quote isn't finalized
+    yet"; in a mixed lot its lane/address was missing from the ship reply."""
+    return {r.cert: (r.market_value if r.market_value is not None else r.comp_value)
+            for r in rows if r.comp_value is not None}
+
+
 # ── core loop ─────────────────────────────────────────────────────────────────
 async def _handle_message(message) -> None:
     if message.author.bot or message.author == bot.user:
@@ -613,13 +623,15 @@ async def _handle_message(message) -> None:
     quote = pricing.build_quote(rows)
     # Track accepted slabs for the ship/minimum gate, then tailor the proceed line.
     lots.add_slab_values(
-        channel.id,
-        {r.cert: r.market_value for r in quote.accepted if r.market_value is not None},
+        channel.id, _lot_values(quote.accepted),
         {r.cert: r.category for r in quote.accepted})
+    # A card this re-quote declined leaves the running lot too (the ledger already drops it),
+    # so its lane no longer shows up in the ship instructions.
+    lots.remove_certs(channel.id, [r.cert for r in quote.rejected])
     _last_quote[channel.id] = {
         "username": username, "comp": quote.comp_total, "payout": quote.payout_total,
         "cards": quote.n_accepted,
-        "certs": {r.cert: r.market_value for r in quote.accepted if r.market_value is not None},
+        "certs": _lot_values(quote.accepted),
         "cert_offers": {r.cert: r.offer for r in quote.accepted},   # per-cert, for owed accumulation
     }
     tracking.record_quote(

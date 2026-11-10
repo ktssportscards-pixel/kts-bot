@@ -2058,6 +2058,70 @@ def test_handlers_and_void_races():
         tracking.state.save(st, {} if st in ("channel_sheet", "void_cutoff") else [])
 
 
+# ── the running lot (ship routing): value-only cards count; declined cards leave ──
+def test_lot_routing():
+    section("lot routing")
+    from botv2 import bot as botmod
+    URL = "https://docs.google.com/spreadsheets/d/LOT%s/edit"
+    hoop = lambda c: PricedRow(cert=c, cert_id=c, category="basketball", market_value=300, value=300,
+                               decision="BUY", offer=270, grader="PSA", grade="10")
+    # a CGC priced off its last sale: the portal sends `value` but NO marketValue
+    cgc = lambda c: PricedRow(cert=c, cert_id=c[4:], grader="CGC", grade="9.5", category="pokemon",
+                              value=80, value_basis="lastSold", decision="BUY", offer=72)
+    check(botmod._lot_values([hoop("1"), cgc("cgc:6193949247")]) == {"1": 300, "cgc:6193949247": 80},
+          "lot values: marketValue when present (unchanged), else the value the offer was priced on")
+
+    # alone: the quote must end with the normal proceed line, not "isn't finalized yet"
+    with _BotHarness(9300, name="cgconly", rows=lambda cl: [cgc(c) for c in cl], sheet_url=URL % 9300) as h:
+        h.say("CGC 6193949247")
+        check(not h.errors and "isn't finalized" not in h.channel.sent[0] and "proceed" in h.channel.sent[0].lower(),
+              "value-only CGC quoted alone: normal proceed line (it used to say 'your quote isn't finalized yet')")
+        check(lots.has_lot(9300) and tracking.find_tickets(channel_id=9300)[0]["ledger"]["cgc:6193949247"]["comp"] == 80.0,
+              "value-only CGC: in the running lot, and its ledger comp is its value (was 0)")
+
+    # mixed with sports: BOTH addresses must be given
+    def mixed(cl):
+        return [cgc(c) if c.startswith("cgc:") else hoop(c) for c in cl]
+    with _BotHarness(9301, name="mixedlot", rows=mixed, sheet_url=URL % 9301) as h:
+        h.say("12345678 CGC 6193949247")
+        del h.channel.sent[:]
+        h.say("ship")
+        ship = h.channel.sent[0]
+        check("Virginia Beach" in ship and "Doral" in ship,
+              "mixed lot with a value-only CGC Pokémon: BOTH hubs in the ship reply (the Pokémon lane was missing)")
+
+    # a card declined on a re-quote leaves the lot, so its lane leaves the ship reply
+    state = {"pass_hoop": False}
+
+    def requote(cl):
+        out = []
+        for c in cl:
+            if c.startswith("cgc:"):
+                out.append(cgc(c))
+            elif state["pass_hoop"]:
+                out.append(PricedRow(cert=c, cert_id=c, category="basketball", market_value=300, value=300,
+                                     decision="PASS", reason="out of band"))
+            else:
+                out.append(hoop(c))
+        return out
+    with _BotHarness(9302, name="declined", rows=requote, sheet_url=URL % 9302) as h:
+        h.say("12345678 CGC 6193949247")
+        check(lots.value_by_lane(9302) == (80.0, 300.0), "lot before the re-quote: Pokémon $80 + sports $300")
+        state["pass_hoop"] = True
+        h.say("12345678")                                   # the basketball card is now declined
+        check(lots.value_by_lane(9302) == (80.0, 0.0), "re-quote PASS: the declined card leaves the running lot")
+        del h.channel.sent[:]
+        h.say("ship")
+        ship = h.channel.sent[0]
+        check("Virginia Beach" in ship and "Doral" not in ship,
+              "ship after that: only the hub for cards we're still buying (Doral used to be listed too)")
+        check(next(r for r in tracking.state.load("owed", list) if r["id"] == "owed_9302")["payout"] == 72.0,
+              "…and only the still-accepted card is owed (ledger behaviour unchanged)")
+    lots.remove_certs(424242, ["x"])                        # unknown channel: no error
+    for st in ("tickets", "owed", "channel_sheet", "channel_sheets", "voided", "void_cutoff"):
+        tracking.state.save(st, {} if st in ("channel_sheet", "channel_sheets", "void_cutoff") else [])
+
+
 # ── the ship booking step: say what was booked, never half-book, never book "nothing" ──
 def test_ship_booking():
     section("ship booking")
@@ -2692,7 +2756,7 @@ def main():
               test_lanes_board, test_stale_tickets, test_delivery_resolution, test_delivery_ofd,
               test_webserver_auth, test_audit_fixes, test_lanes_schedule,
               test_owed_accumulation, test_void, test_void_callers, test_truthful_replies,
-              test_handlers_and_void_races, test_ship_booking, test_alerts_and_lanes,
+              test_handlers_and_void_races, test_lot_routing, test_ship_booking, test_alerts_and_lanes,
               test_canary_error_age,
               test_schedule_dst):
         t()

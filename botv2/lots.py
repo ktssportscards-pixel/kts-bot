@@ -37,6 +37,18 @@ def add_slab_values(cid, cert_value: dict, cert_category: dict = None) -> None:
     e["slab_sport"].update({str(c): (cat or "").lower() for c, cat in (cert_category or {}).items()})
 
 
+def remove_certs(cid, certs) -> None:
+    """Take cards OUT of the running lot (a re-quote that declined a card we had quoted). The
+    lot only ever grew, so a declined card kept its lane in the ship reply — a customer could
+    be told to send a second package to a hub for a card we are no longer buying."""
+    e = _lots.get(cid)
+    if not e:
+        return
+    for c in (certs or []):
+        e["slab_certs"].pop(str(c), None)
+        e["slab_sport"].pop(str(c), None)
+
+
 def set_singles(cid, totals_by_game: dict) -> None:
     """Latest Collectr CSV is the truth — replace the whole per-game dict."""
     _entry(cid)["singles"] = {g: float(v or 0) for g, v in (totals_by_game or {}).items()
