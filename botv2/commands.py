@@ -7,7 +7,7 @@ recognize (an overflow ticket). Unknown commands fall through to normal processi
 """
 import asyncio
 
-from . import config, tickets, tracking
+from . import config, textsplit, tickets, tracking
 
 
 async def _dm_kevin_result(message, channel, text) -> None:
@@ -21,7 +21,7 @@ async def _dm_kevin_result(message, channel, text) -> None:
         except Exception:
             pass
     try:
-        await message.author.send(text)
+        await textsplit.send_chunked(message.author, text)
     except Exception as e:
         print(f"[cmd] result DM failed: {e}")
         if in_guild:
@@ -65,7 +65,7 @@ async def handle(bot, message) -> bool:
                      "• `!payinfo` — store/view a seller's wire info (use in a DM; I scrub it from channels)\n"
                      "• `!synctracking` — register open tickets' tracking #s with the delivery watcher\n"
                      "• VIP is managed in the KTS app's VIP section (portal is the source of truth)")
-        await channel.send(base)
+        await textsplit.send_chunked(channel, base)
         return True
 
     if cmd == "adopt":
@@ -216,7 +216,7 @@ async def handle(bot, message) -> bool:
             board = f"⚠️ Couldn't load the allocation board: {e}"
         # DM Kevin the figures — NEVER post the real numbers into a (customer) channel.
         try:
-            await message.author.send(board)
+            await textsplit.send_chunked(message.author, board)
         except Exception as e:
             print(f"[cmd] !bands DM failed: {e}")
             try:
@@ -249,7 +249,7 @@ async def handle(bot, message) -> bool:
             preview += ("\n\n(Preview only — the live auto-board is OFF. Set "
                         "`BOTV2_LANES_BOARD=1` + `BOTV2_LANES_CHANNEL_ID=<channel id>` to post it.)")
         try:
-            await message.author.send(preview)
+            await textsplit.send_chunked(message.author, preview)
         except Exception as e:
             print(f"[cmd] !lanes DM failed: {e}")
             try:
@@ -272,7 +272,7 @@ async def handle(bot, message) -> bool:
         txt = analytics.summary_text(days)
         # DM Kevin the figures — payout/customer numbers NEVER go into a (customer) channel.
         try:
-            await message.author.send(txt)
+            await textsplit.send_chunked(message.author, txt)
         except Exception as e:
             print(f"[cmd] !stats DM failed: {e}")
             try:
@@ -305,7 +305,7 @@ async def handle(bot, message) -> bool:
             digest += ("\n\n(Daily auto-nudge is OFF — this ran on demand only. Set "
                        "`BOTV2_STALE_NUDGES=1` on Railway to also get it automatically at 8 AM ET.)")
         try:
-            await message.author.send(digest)
+            await textsplit.send_chunked(message.author, digest)
         except Exception as e:
             print(f"[cmd] !stalecheck DM failed: {e}")
             try:
@@ -334,7 +334,7 @@ async def handle(bot, message) -> bool:
             return True   # swallow admin command (already scrubbed if it was in a channel)
         reply = tracking.payinfo_command(message.content)
         try:
-            await message.author.send(reply)
+            await textsplit.send_chunked(message.author, reply)
         except Exception as e:
             print(f"[cmd] !payinfo DM failed: {e}")
             if in_guild:
@@ -357,7 +357,7 @@ async def handle(bot, message) -> bool:
         packet = tracking.build_owe_packets(user)
         # Packets carry wire details → DM only, never a channel.
         try:
-            await message.author.send(packet)
+            await textsplit.send_chunked(message.author, packet)
         except Exception as e:
             print(f"[cmd] !owe DM failed: {e}")
             if getattr(channel, "guild", None) is not None:

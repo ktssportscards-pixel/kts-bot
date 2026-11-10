@@ -62,7 +62,7 @@ socket.create_connection = _no_network
 socket.getaddrinfo = _no_network
 
 from botv2 import (certs, commands, lots, payout_digest, portal_client,  # noqa: E402
-                   pricing, shipping, tracking, vip)
+                   pricing, shipping, textsplit, tracking, vip)
 from botv2.portal_client import PricedRow                                # noqa: E402
 
 _fails = []
@@ -107,6 +107,220 @@ def test_harness_is_hermetic():
     check(blocked and len(_net_attempts) == before + 1,
           "harness: a real connection attempt is refused in-process")
     del _net_attempts[before:]            # the deliberate probe doesn't count against the suite
+
+
+# ── fake Discord plumbing: lets the REAL bot handlers run offline ───────────────
+def _discord_len(text) -> int:
+    """Message length the way Discord counts it (UTF-16 code units)."""
+    return len(text) + sum(1 for ch in text if ord(ch) > 0xFFFF)
+
+
+def _fake_send_check(text):
+    """Mimic the two Discord API rules our senders must respect: no empty message, and
+    nothing over 2,000 characters (the real API answers either with HTTP 400)."""
+    if not isinstance(text, str) or not text.strip():
+        raise RuntimeError("fake discord: cannot send an empty message (HTTP 400)")
+    if _discord_len(text) > 2000:
+        raise RuntimeError("fake discord: content must be 2000 or fewer in length (HTTP 400)")
+
+
+class _FakeUser:
+    """A Discord user (the customer, or Kevin when uid == config.KEVIN_USER_ID)."""
+    def __init__(self, uid=9, name="cust", is_bot=False):
+        self.id, self.name, self.bot, self.dms = uid, name, is_bot, []
+
+    async def send(self, text):
+        _fake_send_check(text)
+        self.dms.append(text)
+
+
+def _fake_channel(cid, name):
+    """A stand-in ticket channel that passes the handlers' isinstance(TextChannel) gate.
+    Records everything 'posted' in .sent; never touches the network."""
+    import discord
+
+    class _Typing:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class _Chan(discord.TextChannel):
+        category = None                       # no category → the plain name/known-id gate
+
+        def __init__(self, cid_, name_):      # deliberately NOT calling the real __init__
+            self.id, self.name, self.guild = cid_, name_, object()
+            self.sent = []
+
+        async def send(self, text):
+            _fake_send_check(text)
+            self.sent.append(text)
+
+        def typing(self):
+            return _Typing()
+
+    return _Chan(cid, name)
+
+
+class _FakeMessage:
+    def __init__(self, channel, content, author=None, mid=1):
+        self.channel, self.content, self.id = channel, content, mid
+        self.author = author or _FakeUser()
+        self.deleted = False
+
+    async def delete(self):
+        self.deleted = True
+
+
+class _BotHarness:
+    """Context manager: wires a fake Kevin + a fake ticket channel into the real bot
+    module, with pricing / sheet calls replaceable per test. Restores everything on exit."""
+    def __init__(self, cid, name="harness", rows=None, sheet_url=None):
+        self.cid, self.name, self.rows, self.sheet_url = cid, name, rows, sheet_url
+        self.sheet_calls, self.fill_calls, self.errors = [], [], []
+
+    def __enter__(self):
+        import botv2.config as cfg
+        from botv2 import alerts, bot as botmod, sheets as sheets_mod, tickets
+        self.cfg, self.botmod, self.sheets_mod, self.tickets = cfg, botmod, sheets_mod, tickets
+        self.kevin = _FakeUser(uid=777, name="kevin")
+        self.channel = _fake_channel(self.cid, self.name)
+        self._saved = (cfg.KEVIN_USER_ID, portal_client.price_certs,
+                       sheets_mod.create_psa_sheet, sheets_mod.fill_buying_sheet)
+        cfg.KEVIN_USER_ID = 777
+        botmod.bot.get_user = lambda _uid: self.kevin          # instance attr shadows the method
+        tickets._known.add(self.cid)
+        botmod._welcomed.add(self.cid)
+        alerts.reset()
+        if self.rows is not None:
+            rows = self.rows
+
+            async def _price(cert_list, customer=None, rate_override=None, session=None):
+                self.price_args = {"certs": list(cert_list), "customer": customer,
+                                   "rate_override": rate_override}
+                return rows(cert_list) if callable(rows) else rows
+            portal_client.price_certs = _price
+        if self.sheet_url is not None:
+            def _create(username, cert_tokens, folder_id=None):
+                self.sheet_calls.append((username, list(cert_tokens)))
+                return self.sheet_url, f"{username} discord", {}
+
+            def _fill(sheet_id, rows_, sheet_name=None):
+                self.fill_calls.append(sheet_id)
+                return []
+            sheets_mod.create_psa_sheet, sheets_mod.fill_buying_sheet = _create, _fill
+        return self
+
+    def say(self, content, author=None):
+        """Feed one message through the real on_message core. Like the live on_message
+        wrapper, an exception is caught — it lands in .errors for the test to assert on."""
+        msg = _FakeMessage(self.channel, content, author=author)
+        try:
+            asyncio.run(self.botmod._handle_message(msg))
+        except Exception as e:
+            self.errors.append(e)
+        return msg
+
+    def __exit__(self, *exc):
+        cfg, botmod, sheets_mod = self.cfg, self.botmod, self.sheets_mod
+        (cfg.KEVIN_USER_ID, portal_client.price_certs,
+         sheets_mod.create_psa_sheet, sheets_mod.fill_buying_sheet) = self._saved
+        botmod.bot.__dict__.pop("get_user", None)
+        self.tickets._known.discard(self.cid)
+        botmod._welcomed.discard(self.cid)
+        botmod._last_quote.pop(self.cid, None)
+        botmod._channel_sheet.pop(str(self.cid), None)
+        lots.drop(self.cid)
+        from botv2 import alerts
+        alerts.reset()
+        return False
+
+
+# ── long messages: Discord's 2,000-character cap ───────────────────────────────
+def test_textsplit():
+    section("long messages (2,000-char cap)")
+    sm, units = textsplit.split_message, _discord_len
+    check(sm("hello") == ["hello"], "split: short text is one unchanged message")
+    check(sm("") == [] and sm(None) == [] and sm("  \n ") == [], "split: nothing to send → no messages")
+    edge = "a" * textsplit.SAFE_LIMIT
+    check(sm(edge) == [edge] and [len(x) for x in sm(edge + "a")] == [textsplit.SAFE_LIMIT, 1],
+          "split: exact-limit text stays whole; one over splits")
+    lines = [f"• `{10000000 + i}` — **$100.00** → $90.00 — {'Some Card Name Here ' * 2}{i} (PSA 10)"
+             for i in range(120)]
+    parts = sm("header line\n\n" + "\n".join(lines))
+    check(len(parts) > 1 and all(units(x) <= 2000 for x in parts), "split: a 120-card summary fits Discord in parts")
+    check([ln for x in parts for ln in x.split("\n") if ln.startswith("•")] == lines,
+          "split: every line survives intact and in order (never cut mid-line)")
+    packet = lambda i: "\n".join([f"💸 **Payment packet — seller{i}**", "Amount: **$1,234.00**",
+                                  "── details on file ──", "Wire: Example Bank 000111222\nName: Some Person",
+                                  "_Review at the bank before sending — packets are prep, not payment._"])
+    owe = "💸 **14 to pay** (oldest first):\n\n" + "\n\n".join(packet(i) for i in range(14))
+    oparts = sm(owe)
+    check(len(oparts) > 1 and all(sum(packet(i) in x for x in oparts) == 1 for i in range(14)),
+          "split: prefers blank lines, so each payment packet stays in ONE message")
+    wide = sm("x" * 5000 + "\n" + "🔗" * 1500)
+    check(all(units(x) <= 2000 for x in wide) and "".join(wide).replace("\n", "") == "x" * 5000 + "🔗" * 1500,
+          "split: an over-long single line (and 2-unit emoji) is hard-split without loss")
+
+    # ping_kevin: a long DM arrives in parts instead of being rejected + swallowed
+    from botv2 import bot as botmod
+    with _BotHarness(8801) as h:
+        long_dm = "📋 summary\n" + "\n".join(lines)
+        ok = asyncio.run(botmod.ping_kevin(long_dm))
+        check(ok and len(h.kevin.dms) > 1 and "\n".join(h.kevin.dms).count("•") == 120,
+              "ping_kevin: a long DM is delivered in parts (was: rejected by Discord, silently lost)")
+        h.kevin.dms.clear()
+        check(asyncio.run(botmod.ping_kevin("short")) and h.kevin.dms == ["short"],
+              "ping_kevin: a normal DM is still exactly one message")
+
+    # the Friday digest and !owe packets for a long unpaid queue
+    tracking.state.save("owed", [{"id": f"owed_{9000 + i}", "channel_id": 9000 + i, "user": f"seller{i:02d}",
+                                  "paid": False, "payout": 1000.0 + i, "cards": 5, "date": "2026-11-06",
+                                  "tracking": "1Z999AA10123456784"} for i in range(40)])
+    tracking.state.save("payinfo", {})
+    try:
+        digest = payout_digest.build_digest()
+        check(units(digest) > 2000, "digest fixture is longer than one Discord message")
+        with _BotHarness(8802) as h:
+            check(asyncio.run(botmod.ping_kevin(digest)) and
+                  sum(x.count("• **seller") for x in h.kevin.dms) == 40,
+                  "payout digest: all 40 unpaid sellers reach Kevin across several DMs")
+            km = _FakeMessage(_fake_channel(8803, "kevin-dm"), "!owe", author=h.kevin)
+            km.channel.guild = None                                  # typed in a DM
+            check(asyncio.run(commands.handle(None, km)) is True and
+                  sum(x.count("Payment packet — seller") for x in h.kevin.dms) >= 40,
+                  "!owe: every payment packet is delivered (was: one >2,000-char DM rejected)")
+    finally:
+        tracking.state.save("owed", [])
+
+    # customer quote: many declined cards → a long message; it must still be posted, and
+    # the rest of the flow (sheet step, Kevin's summary) must still run.
+    def _rows(cert_list):
+        out = []
+        for i, c in enumerate(cert_list):
+            if i % 2:
+                out.append(PricedRow(cert=c, cert_id=c, category="pokemon", market_value=100, value=100,
+                                     decision="BUY", offer=90, card_name="Charizard Holo " * 3, grader="PSA", grade="10"))
+            else:
+                out.append(PricedRow(cert=c, cert_id=c, category="basketball", market_value=450, value=450,
+                                     decision="PASS", reason="outside the price range we are buying right now"))
+        return out
+    big = " ".join(str(20000000 + i) for i in range(90))
+    with _BotHarness(8804, name="bigseller", rows=_rows) as h:
+        h.say(big)
+        posted = "\n".join(h.channel.sent)
+        check(not h.errors and len(h.channel.sent) > 1 and all(units(x) <= 2000 for x in h.channel.sent),
+              "quote: a long customer quote is posted in parts (was: rejected, handler aborted)")
+        check(posted.count("outside the price range") == 45 and "Total payout" in posted
+              and "proceed" in posted.lower(),
+              "quote: totals, all 45 declined cards and the proceed line all reach the customer")
+        kd = "\n".join(h.kevin.dms)
+        check("bigseller" in kd and kd.count("Charizard") >= 45,
+              "quote: Kevin's summary for the same lot arrives too (in parts)")
+        check(any(r.get("id") == "tk_8804" for r in tracking.state.load("tickets", list)),
+              "quote: ticket recorded")
+    tracking.state.save("tickets", [])
 
 
 # ── certs ────────────────────────────────────────────────────────────────────
@@ -1322,7 +1536,7 @@ def main():
     print("botv2 selftest:")
     if _INHERITED_DATA_DIR:
         print("  (ignoring the inherited DATA_DIR — the selftest only ever writes to a temp dir)")
-    for t in (test_harness_is_hermetic, test_certs, test_pricing, test_lots_shipping, test_tracking_digest,
+    for t in (test_harness_is_hermetic, test_textsplit, test_certs, test_pricing, test_lots_shipping, test_tracking_digest,
               test_payout_flow, test_vip_commands_client, test_psa_folder_guard,
               test_alerts_status, test_analytics, test_delivery, test_register_tracking,
               test_lanes_board, test_stale_tickets, test_delivery_ofd,

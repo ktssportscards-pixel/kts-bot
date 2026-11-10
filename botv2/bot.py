@@ -18,7 +18,7 @@ import asyncio
 import discord
 
 from . import (alerts, certs, commands, config, lots, payout_digest,
-               portal_client, pricing, sheets, shipping, state, tickets,
+               portal_client, pricing, sheets, shipping, state, textsplit, tickets,
                tracking, vip, webserver, welcome)
 
 intents = discord.Intents.default()
@@ -41,13 +41,15 @@ def _remember_welcomed(cid: int) -> None:
 
 
 async def ping_kevin(text: str) -> bool:
-    """DM Kevin. Best-effort — a failed DM never blocks a customer quote."""
+    """DM Kevin. Best-effort — a failed DM never blocks a customer quote. Discord rejects
+    a message over 2,000 characters outright, so long text (a big lot's summary, the
+    Friday digest, a stale-ticket digest) goes out as several messages instead of being
+    dropped. True only if there was something to send and every part was delivered."""
     if not config.KEVIN_USER_ID:
         return False
     try:
         user = bot.get_user(config.KEVIN_USER_ID) or await bot.fetch_user(config.KEVIN_USER_ID)
-        await user.send(text)
-        return True
+        return await textsplit.send_chunked(user, text) > 0
     except Exception as e:
         print(f"[bot] ping_kevin failed (non-fatal): {e}")
         return False
@@ -525,7 +527,10 @@ async def _handle_message(message) -> None:
                      for r in quote.accepted],
         passed=[r.cert for r in quote.rejected])   # explicit PASS drops a re-quoted card (combine-all)
     proceed = lots.proceed_or_hold_tail(channel.id)
-    await channel.send(pricing.customer_message(quote, proceed_override=proceed))  # instant
+    # instant. A long quote (many declined cards listed one per line) is split across
+    # messages — one over Discord's 2,000-char cap is rejected whole, which used to abort
+    # this handler here: no quote for the customer, no sheet, no summary for Kevin.
+    await textsplit.send_chunked(channel, pricing.customer_message(quote, proceed_override=proceed))
 
     # Auto-claim: reserve Triumph allocation for the BUYs the instant we quote them,
     # to lock a slot before the team pools fill. DOUBLE-GATED — the portal's own kill
