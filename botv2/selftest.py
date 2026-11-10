@@ -323,6 +323,95 @@ def test_textsplit():
     tracking.state.save("tickets", [])
 
 
+# ── state: an unreadable store is preserved + reported, never silently replaced ──
+def test_state_persistence():
+    section("state persistence (corrupt / unreadable stores)")
+    import glob
+    import json
+    from botv2 import alerts, state
+    from botv2 import bot as botmod
+    seen = []
+    listener = lambda kind, name, detail: seen.append((kind, name, detail))
+    state.add_listener(listener)
+    path = lambda n: os.path.join(os.environ["DATA_DIR"], n + ".json")
+    try:
+        # missing store = the normal first run: default, no alarm
+        check(state.load("zz_missing", list) == [] and not seen and not state.load_failures(),
+              "state: a store that doesn't exist yet loads as the default, quietly")
+        # healthy round-trip
+        check(state.save("zz_ok", {"a": 1}) and state.load("zz_ok", dict) == {"a": 1} and not seen
+              and not os.path.exists(path("zz_ok") + ".tmp"),
+              "state: save + load round-trip, no temp file left behind")
+
+        # CORRUPT store: default comes back (bot keeps running) but the bytes are kept + reported
+        garbage = '{"owed": [ {"id": "owed_1", "payout": 900.0'            # truncated JSON
+        with open(path("zz_corrupt"), "w") as f:
+            f.write(garbage)
+        check(state.load("zz_corrupt", list) == [], "state: corrupt store → default (never crashes)")
+        copies = glob.glob(path("zz_corrupt") + ".corrupt-*")
+        check(len(copies) == 1 and open(copies[0]).read() == garbage,
+              "state: the corrupt file is copied aside immediately (evidence kept)")
+        check(seen == [("load", "zz_corrupt", seen[0][2])] and "corrupt" in seen[0][2]
+              and state.load_failures().get("zz_corrupt") == "corrupt",
+              "state: listeners are told once, and the failure is remembered")
+        state.load("zz_corrupt", list); state.load("zz_corrupt", list)
+        check(len(seen) == 1 and len(glob.glob(path("zz_corrupt") + ".corrupt-*")) == 1,
+              "state: repeated loads of the same bad file don't re-alert or re-copy")
+        # the caller's usual next move: save default+1 over it. Data must survive in the copy.
+        check(state.save("zz_corrupt", [{"id": "new"}]) and state.load("zz_corrupt", list) == [{"id": "new"}],
+              "state: the store is usable again after the next save")
+        check(open(copies[0]).read() == garbage and "zz_corrupt" not in state.load_failures(),
+              "state: the kept copy survives that save; the failure flag clears")
+
+        # UNREADABLE store (can't even open it): simulated with a directory at the store's path.
+        del seen[:]
+        os.mkdir(path("zz_unreadable"))
+        with open(os.path.join(path("zz_unreadable"), "real-data-marker"), "w") as f:
+            f.write("precious")
+        check(state.load("zz_unreadable", dict) == {} and seen and seen[0][0] == "load"
+              and "unreadable" in seen[0][2], "state: unreadable store → default + reported")
+        check(state.save("zz_unreadable", {"k": "v"}), "state: saving over an unreadable store succeeds")
+        aside = glob.glob(path("zz_unreadable") + ".unreadable-*")
+        check(len(aside) == 1 and open(os.path.join(aside[0], "real-data-marker")).read() == "precious",
+              "state: …but the unreadable original was MOVED ASIDE first, not destroyed")
+        check(state.load("zz_unreadable", dict) == {"k": "v"}, "state: new data readable afterwards")
+
+        # a transient read failure that clears on its own leaves no flag behind
+        with open(path("zz_flaky"), "w") as f:
+            f.write("not json")
+        state.load("zz_flaky", list)
+        with open(path("zz_flaky"), "w") as f:
+            json.dump([1, 2], f)
+        check(state.load("zz_flaky", list) == [1, 2] and "zz_flaky" not in state.load_failures(),
+              "state: a store that reads fine again clears its failure flag")
+
+        # SAVE failure: reported, old contents untouched, no partial temp file
+        del seen[:]
+        state.save("zz_keep", ["old"])
+        check(state.save("zz_keep", {"bad": object()}) is False, "state: an unwritable save returns False")
+        check(seen and seen[0][:2] == ("save", "zz_keep") and state.load("zz_keep", list) == ["old"]
+              and not os.path.exists(path("zz_keep") + ".tmp"),
+              "state: failed save is reported; previous contents intact; no temp file left")
+    finally:
+        state._listeners.remove(listener)
+
+    # bot wiring: the problem lands on /status, and (with a loop) in Kevin's DMs
+    alerts.reset()
+    botmod._on_state_problem("save", "owed", "No space left on device")
+    le = alerts.last_error() or {}
+    check(le.get("key") == "state_save:owed" and "owed" in le.get("text", ""),
+          "state→bot: a save failure is recorded for /status even with no event loop")
+    with _BotHarness(8811) as h:
+        async def _go():
+            botmod._on_state_problem("load", "tickets", "corrupt: Expecting value")
+            for _ in range(5):
+                await asyncio.sleep(0)
+        asyncio.run(_go())
+        check(len(h.kevin.dms) == 1 and "tickets.json" in h.kevin.dms[0] and "could not be read" in h.kevin.dms[0],
+              "state→bot: Kevin is DMed when a data file can't be read")
+    alerts.reset()
+
+
 # ── certs ────────────────────────────────────────────────────────────────────
 def test_certs():
     section("certs")
@@ -1536,7 +1625,7 @@ def main():
     print("botv2 selftest:")
     if _INHERITED_DATA_DIR:
         print("  (ignoring the inherited DATA_DIR — the selftest only ever writes to a temp dir)")
-    for t in (test_harness_is_hermetic, test_textsplit, test_certs, test_pricing, test_lots_shipping, test_tracking_digest,
+    for t in (test_harness_is_hermetic, test_textsplit, test_state_persistence, test_certs, test_pricing, test_lots_shipping, test_tracking_digest,
               test_payout_flow, test_vip_commands_client, test_psa_folder_guard,
               test_alerts_status, test_analytics, test_delivery, test_register_tracking,
               test_lanes_board, test_stale_tickets, test_delivery_ofd,

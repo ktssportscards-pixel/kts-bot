@@ -67,6 +67,46 @@ async def alert_kevin(key: str, text: str) -> bool:
     return False
 
 
+# ── persistence faults → Kevin ──────────────────────────────────────────────────
+_bg_tasks: set = set()          # strong refs to fire-and-forget alert tasks (never GC'd mid-flight)
+
+
+def _state_problem_text(kind: str, name: str, detail: str) -> str:
+    if kind == "load":
+        return (f"🚨 **Data file `{name}.json` could not be read** ({detail}). I'm running on an "
+                f"EMPTY `{name}` until it's fixed, so anything that depends on it (owed balances, "
+                f"tickets, payment info, void guards…) may be wrong or missing. The unreadable file "
+                f"is kept next to it in the data folder — restore it before trusting `{name}` again.")
+    return (f"🚨 **Couldn't save `{name}`** ({detail}). The latest change to it is NOT on disk "
+            f"(quotes / shipments / payments recorded since may be lost on a restart). "
+            f"Check the data volume — full or read-only?")
+
+
+def _spawn(coro) -> None:
+    task = asyncio.get_running_loop().create_task(coro)
+    _bg_tasks.add(task)
+    task.add_done_callback(_bg_tasks.discard)
+
+
+def _on_state_problem(kind: str, name: str, detail: str) -> None:
+    """state.py could not read or write a store. Record it for /status and DM Kevin
+    (rate-limited per store by alert_kevin) — from whichever thread it happened on.
+    Never raises: persistence must not fail harder because the alert couldn't go out."""
+    key, text = f"state_{kind}:{name}", _state_problem_text(kind, name, detail)
+    alerts.record_error(key, text)                       # visible on /status even with no loop
+    try:
+        try:
+            asyncio.get_running_loop()
+            _spawn(alert_kevin(key, text))               # on the bot's loop already
+        except RuntimeError:                             # a worker thread (or not started yet)
+            bot.loop.call_soon_threadsafe(lambda: _spawn(alert_kevin(key, text)))
+    except Exception:
+        pass                                             # no loop yet → /status + the log have it
+
+
+state.add_listener(_on_state_problem)
+
+
 # ── events ────────────────────────────────────────────────────────────────────
 async def _handle_ship(channel) -> None:
     """Customer said 'ship'/'proceed' — give the routed address(es) or the hold."""
@@ -401,6 +441,10 @@ async def on_ready():
             print(f"[bot] web server start failed (non-fatal): {e}")
             await alert_kevin("webserver", f"🚨 botv2 web server failed to start: {e} — "
                               f"/health, /status and the owed tracker are down.")
+    # A store that was already unreadable when the bot booted was reported before the loop
+    # (and Kevin's DM) existed — say so now. Rate-limited, so reconnects don't repeat it.
+    for name, why in state.load_failures().items():
+        await alert_kevin(f"state_load:{name}", _state_problem_text("load", name, why))
     if not _digest_started:                        # start the scheduled loops once
         _digest_started = True
         bot.loop.create_task(_payout_digest_loop())
