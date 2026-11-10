@@ -36,6 +36,7 @@ _CONFIG_ENV = (
     "APPS_SCRIPT_SHARED_SECRET", "PSA_FOLDER_ID", "ALLOW_SHARED_PSA_FOLDER",
     "TEMPLATE_SHEET_ID", "DATA_DIR", "SPORTS_OP_MIN_LOT", "POKEMON_SINGLES_MIN_LOT",
     "BOTV2_SHIP_ALL_DORAL", "MIN_LOT_VALUE", "MIN_SLAB_COUNT", "POKEMON_LANE_OPEN", "PORT",
+    "BOT_BASE_URL", "CANARY_CERT", "CANARY_ERROR_MAX_AGE_MIN",       # read by botv2.canary
 )
 for _k in _CONFIG_ENV:
     os.environ.pop(_k, None)
@@ -45,6 +46,7 @@ os.environ["BOTV2_PRICE_MOCK"] = "1"
 # loopback port and the service-account file at a path that cannot exist.
 os.environ["PORTAL_BASE_URL"] = "http://127.0.0.1:9/selftest-network-disabled"
 os.environ["APPS_SCRIPT_URL"] = "http://127.0.0.1:9/selftest-network-disabled"
+os.environ["BOT_BASE_URL"] = "http://127.0.0.1:9/selftest-network-disabled"
 os.environ["GOOGLE_CREDENTIALS_FILE"] = os.path.join(os.environ["DATA_DIR"], "no-credentials.json")
 
 _net_attempts = []
@@ -1842,6 +1844,19 @@ def test_handlers_and_void_races():
               "race: Kevin gets the sheet link to trash by hand, not a normal quote summary")
         check(tracking.is_voided(9101), "race: channel stays voided")
 
+    # … and a void that lands BEFORE the build even starts (during the customer post): no sheet at all.
+    with _BotHarness(9108, name="earlyvoid", rows=_rows, sheet_url=URL % 9108) as h:
+        real_send = h.channel.send
+
+        async def _send_then_void(text):
+            await real_send(text)
+            tracking.void_ticket(9108)                       # the void is processed during the post
+        h.channel.send = _send_then_void
+        h.say("12345678")
+        check(not h.errors and not h.sheet_calls and not h.fill_calls and "9108" not in botmod._channel_sheet
+              and any("VOIDED right after its quote" in d for d in h.kevin.dms),
+              "race: a quote voided before its sheet build starts gets NO sheet (Kevin told)")
+
     # 4) ship in a voided channel: ignored (existing gate) …
     with _BotHarness(9102, name="shipvoid", rows=_rows, sheet_url=URL % 9102) as h:
         h.say("12345678")
@@ -2082,6 +2097,26 @@ def test_alerts_and_lanes():
         botmod.bot.__dict__.pop("get_channel", None)
         tracking.state.save("lanes_board", {})
         alerts.reset()
+
+
+# ── canary: one old alert must not keep every hourly run red ────────────────────
+def test_canary_error_age():
+    section("canary last_error age")
+    from datetime import datetime, timedelta, timezone
+    import botv2.canary as canary
+    now = datetime(2026, 11, 10, 12, 0, 0, tzinfo=timezone.utc)
+    at = lambda mins: {"key": "sheet_fail:1", "text": "x",
+                       "at": (now - timedelta(minutes=mins)).isoformat(timespec="seconds")}
+    check(canary.is_fresh_error(None, now) is False, "canary: no last_error → pass")
+    check(canary.is_fresh_error(at(5), now, 90) is True, "canary: an error 5 min ago fails the run")
+    check(canary.is_fresh_error(at(89), now, 90) is True, "canary: still failing just inside the window")
+    check(canary.is_fresh_error(at(180), now, 90) is False,
+          "canary: a 3-hour-old error no longer fails every hourly run (it used to, until the next redeploy)")
+    check(canary.is_fresh_error({"key": "k"}, now, 90) is True
+          and canary.is_fresh_error({"key": "k", "at": "garbage"}, now, 90) is True,
+          "canary: an undatable last_error fails closed")
+    check(canary.is_fresh_error({"key": "k", "at": "2026-11-10T11:30:00Z"}, now, 90) is True,
+          "canary: 'Z' timestamps are understood")
 
 
 # ── scheduled DMs across a daylight-saving change ───────────────────────────────
@@ -2386,7 +2421,8 @@ def main():
               test_lanes_board, test_stale_tickets, test_delivery_ofd,
               test_webserver_auth, test_audit_fixes, test_lanes_schedule,
               test_owed_accumulation, test_void, test_void_callers, test_truthful_replies,
-              test_handlers_and_void_races, test_alerts_and_lanes, test_schedule_dst):
+              test_handlers_and_void_races, test_alerts_and_lanes, test_canary_error_age,
+              test_schedule_dst):
         t()
     check(not _net_attempts,
           f"no test attempted a real network connection (attempts: {_net_attempts[:5]})")

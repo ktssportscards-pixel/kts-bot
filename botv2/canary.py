@@ -8,6 +8,10 @@ Env:
   BOT_BASE_URL  the bot's web host (default: prod worker on Railway)
   BOT_API_KEY   x-bot-key — enables the authed /status + the pricing check
   CANARY_CERT   a known PSA/CGC cert number to price-check (e.g. a sports slab)
+  CANARY_ERROR_MAX_AGE_MIN  how old /status's last_error may be and still fail the
+                run (default 90). The bot never clears last_error, so without this one
+                transient alert kept every hourly run red until the next redeploy —
+                which would hide any later, real breakage behind a permanently red check.
 
 Exit 0 = all green · 1 = a check failed (printed). SIDE-EFFECT-FREE: /bot/price is a
 read; the canary never claims, registers, or writes anything.
@@ -17,10 +21,15 @@ import os
 import sys
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 
 BOT = os.environ.get("BOT_BASE_URL", "https://worker-production-1175.up.railway.app").rstrip("/")
 KEY = os.environ.get("BOT_API_KEY", "")
 CERT = os.environ.get("CANARY_CERT", "")
+try:
+    ERROR_MAX_AGE_MIN = float(os.environ.get("CANARY_ERROR_MAX_AGE_MIN") or 90)
+except ValueError:
+    ERROR_MAX_AGE_MIN = 90.0
 
 _fails = []
 
@@ -40,6 +49,27 @@ def _get(path, key=None, timeout=25):
             return r.status, r.read().decode()
     except urllib.error.HTTPError as e:
         return e.code, e.read().decode()
+
+
+def error_age_minutes(last_error, now=None):
+    """Minutes since /status's last_error was recorded, or None when it carries no usable
+    timestamp (the caller then treats it as fresh — fail closed)."""
+    try:
+        at = datetime.fromisoformat(str((last_error or {}).get("at")).replace("Z", "+00:00"))
+        if at.tzinfo is None:
+            at = at.replace(tzinfo=timezone.utc)
+        return ((now or datetime.now(timezone.utc)) - at).total_seconds() / 60.0
+    except Exception:
+        return None
+
+
+def is_fresh_error(last_error, now=None, max_age_min=None) -> bool:
+    """True if `last_error` should fail the canary: it exists and is recent (or undatable)."""
+    if not last_error:
+        return False
+    age = error_age_minutes(last_error, now)
+    limit = ERROR_MAX_AGE_MIN if max_age_min is None else max_age_min
+    return age is None or age <= limit
 
 
 def _price_check():
@@ -77,7 +107,11 @@ def main():
             d = json.loads(b) if s == 200 else {}
             check(s == 200 and d.get("ok") is True, f"/status ok (got {s})")
             le = d.get("last_error")
-            check(le is None, "/status: no last_error" + (f" — {le.get('key')}" if le else ""))
+            fresh = is_fresh_error(le)
+            check(not fresh, f"/status: no last_error in the last {ERROR_MAX_AGE_MIN:g} min"
+                  + (f" — {le.get('key')} at {le.get('at')}" if fresh and isinstance(le, dict) else ""))
+            if le and not fresh:
+                print(f"  ··  older last_error on record ({le.get('key')} at {le.get('at')}) — not failing on it")
         except Exception as e:
             check(False, f"/status — {e}")
         if CERT:
