@@ -176,14 +176,14 @@ async def _handle_tracking(channel, tnum) -> None:
             await alert_kevin(f"tracking_save:{channel.id}",
                               f"⚠️ tracking sheet-save failed (#{channel.name}): {e} — "
                               f"the number is noted below; add it to the sheet by hand.")
-    if tracking.is_voided(channel.id):
+    if noted:
+        warn = ""
+    elif tracking.is_voided(channel.id):
         warn = (" — ⚠️ this channel's quote was VOIDED: no ticket/owed on record, so the number "
                 "is NOT stored and nothing is booked.")
-    elif not noted:
+    else:
         warn = (" — ⚠️ no ticket on record for this channel, so the number is NOT stored "
                 "(a delivery update can't fire for it).")
-    else:
-        warn = ""
     await ping_kevin(f"📦 Tracking from **{uname}** (#{channel.name}): `{tnum}`{saved}"
                      + ("" if sheet_url else " — no sheet cached, add by hand") + warn)
 
