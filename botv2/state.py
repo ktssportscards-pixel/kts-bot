@@ -9,10 +9,11 @@ redeploys; without one, stores are ephemeral and callers must degrade gracefully
 (v1's redeploy-recovery lessons are preserved in each consumer).
 
 A store that EXISTS but can't be read is never silently replaced: load() still hands
-back the default (the bot keeps running), but the unreadable file is kept — copied
-aside at once if it is corrupt, moved aside by the next save() if it couldn't even be
-opened — and listeners are told, so Kevin hears about it instead of quietly losing the
-owed / tickets / payinfo history to the next write.
+back the default (the bot keeps running), but the old bytes are kept — a corrupt file
+is copied aside at once (<name>.json.corrupt-<stamp>), and the next save() keeps
+whatever is on disk (<name>.json.unreadable-<stamp>) before replacing it — and
+listeners are told, so Kevin hears about it instead of quietly losing the owed /
+tickets / payinfo history to the next write. At most 5 kept copies per store.
 """
 import json
 import os
@@ -28,8 +29,8 @@ _LOCK = threading.Lock()
 # bot.py registers one that DMs Kevin (rate-limited): a store that can't be read or
 # written is a money-tracking fault, and a line in the container log is not enough.
 _listeners: list = []
-# store name -> why its last load failed ("corrupt" | "unreadable"). Cleared by a later
-# successful load or save. While set, save() keeps the old file instead of destroying it.
+# store name -> why a load of it failed ("corrupt" | "unreadable"). Cleared only by the next
+# SAVE of that store; while set, that save keeps the old file instead of destroying it.
 _load_failed: dict = {}
 # store name -> (mtime_ns, size) of the corrupt file already copied aside (copy once).
 _preserved: dict = {}
@@ -40,7 +41,28 @@ def _path(name: str) -> str:
 
 
 def _stamp() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+
+
+_KEEP_MAX = 5       # kept copies per store — the EARLIEST ones are closest to the last good state
+
+
+def _sig(path: str):
+    """(mtime_ns, size) of a file, or None if it can't be stat'ed."""
+    try:
+        st = os.stat(path)
+        return (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+
+
+def _kept_count(path: str) -> int:
+    base = os.path.basename(path)
+    try:
+        return sum(1 for n in os.listdir(os.path.dirname(path))
+                   if n.startswith(base + ".corrupt-") or n.startswith(base + ".unreadable-"))
+    except OSError:
+        return 0
 
 
 def add_listener(fn) -> None:
@@ -78,16 +100,15 @@ def _load_problem(name: str, path: str, exc: Exception) -> None:
         first = _load_failed.get(name) != kind
         _load_failed[name] = kind
         if kind == "corrupt":                       # readable bytes → copy them aside right now
-            try:
-                st = os.stat(path)
-                sig = (st.st_mtime_ns, st.st_size)
-                if _preserved.get(name) != sig:
+            sig = _sig(path)
+            if sig is not None and _preserved.get(name) != sig and _kept_count(path) < _KEEP_MAX:
+                try:
                     kept = f"{path}.corrupt-{_stamp()}"
                     shutil.copy2(path, kept)
                     _preserved[name] = sig
-            except Exception as e:
-                kept = ""
-                print(f"[state] couldn't keep a copy of corrupt {name!r}: {e}")
+                except Exception as e:
+                    kept = ""
+                    print(f"[state] couldn't keep a copy of corrupt {name!r}: {e}")
     if first or kept:
         print(f"[state] load {name!r} failed ({kind}): {exc}"
               + (f" — copy kept at {kept}" if kept else ""))
@@ -98,20 +119,45 @@ def load(name: str, default):
     """Load a store, or return `default` (a value, or a 0-arg factory) when it can't be
     read — a missing/corrupt store never crashes the bot. A store that simply doesn't
     exist yet is the normal first-run case; one that exists but can't be read is
-    reported and preserved (see the module docstring)."""
+    reported and preserved (see the module docstring).
+
+    A failed read is remembered until the store is next SAVED, even if a later read
+    succeeds: whatever was built from the empty default (the module-level caches in
+    bot / tickets / vip are loaded once and never re-read) is still about to be written
+    over the file, so that write must keep the old bytes."""
     path = _path(name)
     try:
         with open(path) as f:
-            data = json.load(f)
+            return json.load(f)
     except FileNotFoundError:
         return _default(default)
     except Exception as e:
         _load_problem(name, path, e)
         return _default(default)
-    if _load_failed:                                # rare path: a store recovered on its own
-        with _LOCK:
-            _load_failed.pop(name, None)
-    return data
+
+
+def _keep_aside(name: str, path: str) -> None:
+    """(Called under _LOCK, just before the store is replaced.) This process failed to read
+    the file at `path`, so the data about to be written was built WITHOUT it. Keep the old
+    bytes next to it instead of destroying them. Never raises: if they can't be kept, the
+    save still goes ahead (the pre-existing behaviour) — refusing to write would stall the
+    whole bot on one bad file."""
+    if not os.path.lexists(path):
+        return
+    if _load_failed.get(name) == "corrupt" and _preserved.get(name) == _sig(path):
+        return                                      # load() already copied exactly these bytes
+    if _kept_count(path) >= _KEEP_MAX:
+        print(f"[state] {name!r}: already {_KEEP_MAX} kept copies — not keeping another")
+        return
+    aside = f"{path}.unreadable-{_stamp()}"
+    try:
+        try:
+            os.link(path, aside)                    # hard link: the live name never disappears
+        except OSError:
+            os.replace(path, aside)                 # no hard links here → move it (needs no read access)
+        print(f"[state] kept the previous {name!r} as {aside}")
+    except OSError as e:
+        print(f"[state] couldn't keep the previous {name!r} ({e}) — writing anyway")
 
 
 def save(name: str, data) -> bool:
@@ -120,26 +166,22 @@ def save(name: str, data) -> bool:
     path = _path(name)
     tmp = path + ".tmp"
     try:
+        # Serialise BEFORE touching any file: an unserialisable value fails here, cleanly,
+        # and json.dumps uses the C encoder (several times faster than json.dump to a file —
+        # these stores are rewritten on the event loop). Same bytes as before.
+        payload = json.dumps(data)
         os.makedirs(config.DATA_DIR, exist_ok=True)
         with _LOCK:
             try:
                 with open(tmp, "w") as f:
-                    json.dump(data, f)
+                    f.write(payload)
                     f.flush()
                     try:
                         os.fsync(f.fileno())        # the rename must not outrun the data
                     except OSError:
                         pass                        # best-effort (some filesystems refuse fsync)
                 if name in _load_failed:
-                    # The file on disk could not be read, so `data` was built WITHOUT it.
-                    # Never destroy it: a corrupt one was already copied aside by load();
-                    # anything else is moved aside here (a rename needs no read access).
-                    if _load_failed[name] != "corrupt" or name not in _preserved:
-                        try:
-                            if os.path.exists(path):
-                                os.replace(path, f"{path}.unreadable-{_stamp()}")
-                        except OSError as e:
-                            print(f"[state] couldn't set aside unreadable {name!r}: {e}")
+                    _keep_aside(name, path)
                 os.replace(tmp, path)
                 _load_failed.pop(name, None)
                 _preserved.pop(name, None)

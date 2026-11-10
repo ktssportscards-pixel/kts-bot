@@ -418,14 +418,28 @@ def test_state_persistence():
               "state: …but the unreadable original was MOVED ASIDE first, not destroyed")
         check(state.load("zz_unreadable", dict) == {"k": "v"}, "state: new data readable afterwards")
 
-        # a transient read failure that clears on its own leaves no flag behind
+        # ONE failed read poisons whatever was built from it (bot/tickets/vip cache a store at
+        # import and never re-read it), so the flag must survive a later successful read and
+        # the next save must keep what is on disk — here, a file that became readable again.
         with open(path("zz_flaky"), "w") as f:
             f.write("not json")
-        state.load("zz_flaky", list)
+        cached = state.load("zz_flaky", list)                       # → [] (the "import-time cache")
         with open(path("zz_flaky"), "w") as f:
-            json.dump([1, 2], f)
-        check(state.load("zz_flaky", list) == [1, 2] and "zz_flaky" not in state.load_failures(),
-              "state: a store that reads fine again clears its failure flag")
+            json.dump(["real", "history"], f)                       # the file is healthy again
+        check(state.load("zz_flaky", list) == ["real", "history"] and "zz_flaky" in state.load_failures(),
+              "state: a later successful read does NOT clear the failure flag")
+        check(state.save("zz_flaky", cached + ["one new row"]), "state: the stale cache is written back…")
+        kept = glob.glob(path("zz_flaky") + ".unreadable-*")
+        check(len(kept) == 1 and json.load(open(kept[0])) == ["real", "history"]
+              and state.load("zz_flaky", list) == ["one new row"] and "zz_flaky" not in state.load_failures(),
+              "state: …but the healthy file it replaced was kept (it used to be destroyed)")
+        # kept copies are capped per store, so a flapping store can't fill the volume
+        for i in range(8):
+            with open(path("zz_flap"), "w") as f:
+                f.write("garbage %d" % i)
+            state.load("zz_flap", list)
+            state.save("zz_flap", [i])
+        check(len(glob.glob(path("zz_flap") + ".*-*")) == 5, "state: at most 5 kept copies per store")
 
         # SAVE failure: reported, old contents untouched, no partial temp file
         del seen[:]
