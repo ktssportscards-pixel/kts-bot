@@ -646,6 +646,12 @@ async def _handle_message(message) -> None:
     # Apps Script is slow). The customer already has their quote; Kevin gets the
     # sheet link + summary once it's built. A sheet failure never blocks the DM.
     sheet_url = ""
+    if tracking.void_cutoff_of(channel.id) != void_mark:
+        # Voided between the quote and here (the customer post / claim step awaited): the
+        # quote is already dead, so don't build a sheet for it at all.
+        await ping_kevin(f"🛑 #{channel.name} was VOIDED right after its quote posted — "
+                         f"no buying sheet was built for it.")
+        return
     try:
         sheet_url, _name, _ = await asyncio.to_thread(sheets.create_psa_sheet, username, cert_list)
         if tracking.void_cutoff_of(channel.id) != void_mark:
