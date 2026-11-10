@@ -212,8 +212,14 @@ class _BotHarness:
         self.channel = _fake_channel(self.cid, self.name)
         self._saved = (cfg.KEVIN_USER_ID, portal_client.price_certs,
                        sheets_mod.create_psa_sheet, sheets_mod.fill_buying_sheet,
-                       sheets_mod.save_tracking, sheets_mod.trash_sheet)
+                       sheets_mod.save_tracking, sheets_mod.trash_sheet,
+                       sheets_mod.get_drive_service, sheets_mod.get_gspread_client)
         cfg.KEVIN_USER_ID = 777
+        # No Google client is ever built in here (keeps a test's own stub if it set one).
+        if getattr(sheets_mod.get_drive_service, "__module__", "") == "botv2.sheets":
+            def _no_google(*_a, **_k):
+                raise RuntimeError("selftest: no Google client in the harness")
+            sheets_mod.get_drive_service = sheets_mod.get_gspread_client = _no_google
         # The two Apps Script WRITE calls a handler can reach are always stubbed in here:
         # nothing driven through this harness may even attempt them (the process-wide network
         # kill would stop it, but then the "no network attempt" check rightly fails the run).
@@ -260,7 +266,8 @@ class _BotHarness:
         cfg, botmod, sheets_mod = self.cfg, self.botmod, self.sheets_mod
         (cfg.KEVIN_USER_ID, portal_client.price_certs,
          sheets_mod.create_psa_sheet, sheets_mod.fill_buying_sheet,
-         sheets_mod.save_tracking, sheets_mod.trash_sheet) = self._saved
+         sheets_mod.save_tracking, sheets_mod.trash_sheet,
+         sheets_mod.get_drive_service, sheets_mod.get_gspread_client) = self._saved
         botmod.bot.__dict__.pop("get_user", None)
         self.tickets._known.discard(self.cid)
         botmod._welcomed.discard(self.cid)
