@@ -2396,6 +2396,293 @@ def test_ship_booking():
     alerts.reset()
 
 
+# ── guards that had no test at all: rebuild cutoff, /delivery, the real portal client ──
+def test_untested_guards():
+    section("previously untested guards")
+    import json as _j
+    import types
+    from datetime import date, timedelta
+    import botv2.config as cfg
+    import botv2.analytics as analytics
+    from botv2 import alerts, bot as botmod, sheets as sheets_mod, webserver
+    from botv2.portal_client import PortalAuthError, PortalBadRequest, PortalUnavailable
+    for st in ("tickets", "owed", "voided"):
+        tracking.state.save(st, [])
+    for st in ("channel_sheet", "channel_sheets", "void_cutoff"):
+        tracking.state.save(st, {})
+
+    # ── 1) Fix B (f2a2c60): after a void, the ship-time Drive rebuild must use ONLY sheets
+    #       created after the cancellation — a cancelled sheet whose trash failed can't
+    #       resurrect the lot. Nothing asserted that the filter is honoured.
+    hdr = ["", "cert", "", "", "", "cat", "comp", "rate", "payout"]
+    sheets_data = {
+        "OLD": [hdr, ["PSA", "11111111", "", "", "PSA 10", "basketball", 300, 0.9, 270]],
+        "NEW": [hdr, ["PSA", "22222222", "", "", "PSA 10", "pokemon", 100, 0.9, 90],
+                ["CGC", "6193949247", "", "", "CGC 9.5", "", 80, 0.9, 72],
+                ["PSA", "33333333", "", "", "PSA 9", "baseball", 50, 0, 0]],      # zeroed by hand → not in the lot
+    }
+    drive_files = [{"id": "OLD", "name": "cutoffuser discord 11/01", "createdTime": "2020-01-01T00:00:00.000Z"},
+                   {"id": "NEW", "name": "cutoffuser discord 11/10", "createdTime": "2099-01-01T00:00:00.000Z"},
+                   {"id": "OTHER", "name": "cutoffuser2 discord 11/10", "createdTime": "2099-01-01T00:00:00.000Z"}]
+    queries = []
+
+    class _Files:
+        def list(self, **kw):
+            queries.append(kw.get("q", ""))
+            return self
+
+        def execute(self):
+            return {"files": list(drive_files)}
+    fake_drive = types.SimpleNamespace(files=lambda: _Files())
+    fake_gc = types.SimpleNamespace(open_by_key=lambda fid: types.SimpleNamespace(
+        get_worksheet=lambda i: types.SimpleNamespace(
+            get_all_values=lambda value_render_option=None: sheets_data[fid])))
+    saved_g = (sheets_mod.get_drive_service, sheets_mod.get_gspread_client)
+    sheets_mod.get_drive_service, sheets_mod.get_gspread_client = (lambda: fake_drive), (lambda: fake_gc)
+    try:
+        # no void on record → both of this customer's sheets count (and not the look-alike name)
+        check(lots.rebuild_from_sheets(9400, "cutoffuser") is True
+              and lots.value_by_lane(9400) == (180.0, 300.0),
+              "rebuild: rebuilds from the customer's own sheets only (exact name), skipping zeroed rows")
+        check("trashed=false" in queries[-1] and "cutoffuser discord" in queries[-1],
+              "rebuild: asks Drive for un-trashed sheets of that customer")
+        lots.drop(9400)
+        # quote + VOID → cutoff recorded → only the sheet created AFTER it may be used
+        tracking.record_quote(9400, {"username": "cutoffuser", "comp": 300, "payout": 270, "cards": 1,
+                                     "certs": {"11111111": 300}, "cert_offers": {"11111111": 270}},
+                              channel_name="cutoffuser")
+        tracking.void_ticket(9400)
+        check(bool(tracking.void_cutoff_of(9400)), "rebuild: the void recorded a cutoff")
+        check(lots.rebuild_from_sheets(9400, "cutoffuser") is True and lots.value_by_lane(9400) == (180.0, 0.0),
+              "rebuild after a void: the pre-cancellation sheet is IGNORED (its basketball card does not come back)")
+        lots.drop(9400)
+        # and the ship gate itself: a voided channel gets no address even though sheets exist —
+        # and the Drive rebuild is not even attempted for it.
+        with _BotHarness(9400, name="cutoffuser") as h:
+            rebuilds = []
+            real_rebuild = lots.rebuild_from_sheets
+
+            def _spy_rebuild(*a, **k):
+                rebuilds.append(a)
+                return real_rebuild(*a, **k)
+            lots.rebuild_from_sheets = _spy_rebuild
+            try:
+                h.say("ship")
+                check(not h.channel.sent and not lots.has_lot(9400) and not rebuilds
+                      and any("VOIDED channel" in d for d in h.kevin.dms),
+                      "ship gate: a voided channel is refused BEFORE any rebuild (no Drive call at all)")
+                # a stale in-memory lot + last quote must not get a voided channel shipped either
+                lots.add_slab_values(9400, {"stale": 300.0}, {"stale": "basketball"})
+                botmod._last_quote[9400] = {"username": "cutoffuser", "comp": 300, "payout": 270, "cards": 1,
+                                            "certs": {"stale": 300}, "cert_offers": {"stale": 270}}
+                del h.kevin.dms[:]
+                h.say("ship")
+                check(not h.channel.sent and not rebuilds
+                      and not any(r.get("id") == "owed_9400" for r in tracking.state.load("owed", list))
+                      and any("VOIDED channel" in d for d in h.kevin.dms),
+                      "ship gate: even with a stale in-memory lot + quote, a voided channel gets no address and no booking")
+            finally:
+                lots.rebuild_from_sheets = real_rebuild
+    finally:
+        sheets_mod.get_drive_service, sheets_mod.get_gspread_client = saved_g
+        lots.drop(9400)
+
+    # ── 2) POST /delivery: the handler body and the ONE gate on the bot messaging a customer
+    class _Req:
+        def __init__(self, body, key="selftestkey"):
+            self.headers, self.query, self._body = ({"x-bot-key": key} if key else {}), {}, body
+
+        async def json(self):
+            if isinstance(self._body, Exception):
+                raise self._body
+            return self._body
+    loop = asyncio.new_event_loop()
+    post = lambda h, body, key="selftestkey": loop.run_until_complete(h(_Req(body, key)))
+    body_of = lambda resp: _j.loads(resp.body.decode())
+    saved = (cfg.BOT_API_KEY, cfg.DELIVERY_TRACKING)
+    cfg.BOT_API_KEY = "selftestkey"
+    try:
+        with _BotHarness(9410, name="dlvcust") as h:
+            botmod.bot.get_channel = lambda _cid: h.channel
+            lot = {"username": "dlvcust", "comp": 100, "payout": 90, "cards": 1,
+                   "certs": {"d1": 100}, "cert_offers": {"d1": 90}}
+            tracking.record_quote(9410, lot, channel_name="dlvcust")
+            tracking.record_accepted_ship(9410, lot)
+            tracking.record_tracking(9410, "1Z999AA10123456784")
+            cfg.DELIVERY_TRACKING = False
+            # a status-less / unknown event must never be treated as "delivered"
+            for bad in ({"channel_id": "9410"}, {"channel_id": "9410", "status": ""},
+                        {"channel_id": "9410", "status": "in_transit"}):
+                r = post(webserver._delivery, bad)
+                check(r.status == 200 and "ignored" in body_of(r)
+                      and tracking.delivery_status(9410).get("status") == "in_transit",
+                      f"/delivery {bad.get('status')!r}: acked + ignored, ticket still in transit")
+            check(not h.channel.sent and not h.kevin.dms, "/delivery ignored events: nobody is messaged")
+            check(post(webserver._delivery, {}).status == 400 and post(webserver._delivery, []).status == 400
+                  and post(webserver._delivery, ValueError("bad json")).status == 400,
+                  "/delivery: no target / non-object / bad JSON → 400")
+            # flag OFF: an out-for-delivery event is recorded but posts NOTHING to the customer
+            r = body_of(post(webserver._delivery, {"channel_id": "9410", "status": "out_for_delivery"}))
+            check(r.get("found") is True and r.get("already") is False and r.get("posted") is False
+                  and tracking.delivery_status(9410).get("status") == "out_for_delivery"
+                  and not h.channel.sent and not h.kevin.dms,
+                  "/delivery out-for-delivery (customer messaging OFF): recorded, nobody messaged")
+            # flag OFF: delivered flips the ticket + DMs Kevin, and posts NOTHING to the customer
+            r = body_of(post(webserver._delivery, {"channel_id": "9410", "status": "Delivered"}))
+            check(r.get("found") is True and r.get("posted") is False and r.get("messaging_enabled") is False
+                  and r.get("channel_id") == "9410"
+                  and tracking.delivery_status(9410).get("status") == "delivered",
+                  "/delivery delivered (customer messaging OFF): ticket flipped, posted:false")
+            check(not h.channel.sent and len(h.kevin.dms) == 1 and "Delivered" in h.kevin.dms[0],
+                  "/delivery flag OFF: the customer gets NOTHING; Kevin gets his DM")
+            r = body_of(post(webserver._delivery, {"tracking": "1z999aa10123456784", "status": "delivered"}))
+            check(r.get("already") is True and len(h.kevin.dms) == 1 and not h.channel.sent,
+                  "/delivery replay: already delivered → no second DM, no post")
+            r = body_of(post(webserver._delivery, {"channel_id": "9410", "status": "out_for_delivery"}))
+            check(r.get("already") is True and not h.channel.sent, "/delivery OFD after delivered: no post")
+            # flag ON: exactly one customer-safe post per stage
+            cfg.DELIVERY_TRACKING = True
+            tracking.record_quote(9411, {**lot, "username": "dlvcust2"}, channel_name="dlvcust2")
+            tracking.record_tracking(9411, "1Z999AA10123456785")
+            del h.kevin.dms[:]
+            r = body_of(post(webserver._delivery, {"tracking": "1Z999AA10123456785", "status": "out-for-delivery"}))
+            check(r.get("posted") is True and len(h.channel.sent) == 1 and "out for delivery" in h.channel.sent[0]
+                  and not h.kevin.dms, "/delivery OFD (flag ON): one customer heads-up, no Kevin DM")
+            r = body_of(post(webserver._delivery, {"tracking": "1Z999AA10123456785", "status": "delivered"}))
+            check(r.get("posted") is True and len(h.channel.sent) == 2 and "arrived" in h.channel.sent[1],
+                  "/delivery delivered (flag ON): exactly one 'arrived' post")
+            check(not any(w in " ".join(h.channel.sent).lower() for w in cfg.CUSTOMER_FORBIDDEN_WORDS)
+                  and "$" not in " ".join(h.channel.sent),
+                  "/delivery customer posts: no forbidden word, no dollar figure")
+            check(any("NOT booked as owed" in d for d in h.kevin.dms),
+                  "/delivery delivered for a never-booked lot: Kevin's DM flags it")
+            r = body_of(post(webserver._delivery, {"tracking": "1ZNOBODYNOBODY0000", "status": "delivered"}))
+            check(r.get("found") is False and len(h.channel.sent) == 2, "/delivery unknown package: clean miss, no post")
+            botmod.bot.__dict__.pop("get_channel", None)
+
+        # ── 3) POST /void input rules (strict force, exactly one target)
+        tracking.record_quote(9420, {"username": "strict", "comp": 100, "payout": 90, "cards": 1,
+                                     "certs": {"s1": 100}, "cert_offers": {"s1": 90}}, channel_name="strict")
+        for bad in ({"user": "strict", "force": "true"}, {"user": "strict", "force": 1},
+                    {"user": "strict", "channel_id": "9420"}, {}, [], {"channel_id": 9420},
+                    ValueError("bad json")):
+            check(post(webserver._void, bad).status == 400 and tracking.find_tickets(channel_id=9420),
+                  f"/void rejects {bad!r:.60} with 400 and voids nothing")
+        check(post(webserver._void, {"user": "strict"}, key="wrong").status == 401
+              and tracking.find_tickets(channel_id=9420), "/void: a wrong key is refused")
+        tracking.void_ticket(9420)
+    finally:
+        cfg.BOT_API_KEY, cfg.DELIVERY_TRACKING = saved
+        loop.close()
+
+    # ── 4) the REAL portal request layer (mock mode never reaches it): what goes on the wire,
+    #       and how failures are classified. Driven with a fake session — no network.
+    class _Resp:
+        def __init__(self, status=200, payload=None, text=""):
+            self.status, self._payload, self._text = status, payload, text
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def text(self):
+            return self._text
+
+        async def json(self, content_type=None):
+            if isinstance(self._payload, Exception):
+                raise self._payload
+            return self._payload
+
+    class _Session:
+        def __init__(self, *responses):
+            self.responses, self.calls = list(responses), []
+
+        def post(self, url, json=None, headers=None, timeout=None):
+            self.calls.append({"url": url, "json": json, "headers": headers})
+            return self.responses.pop(0) if len(self.responses) > 1 else self.responses[0]
+    row = lambda cid, **kw: {"certId": cid, "category": "pokemon", "marketValue": 100, "value": 100,
+                             "decision": "BUY", "offer": 90, "payoutCents": 9999, "memberMultiplier": 1.2, **kw}
+    run = lambda coro: asyncio.run(coro)
+    saved_cfg = (cfg.BOT_API_KEY, cfg.PRICE_RETRY_BACKOFF_S)
+    cfg.BOT_API_KEY, cfg.PRICE_RETRY_BACKOFF_S = "wirekey", 0
+    try:
+        sess = _Session(_Resp(200, {"rows": [row("12345678"), row("6193949247", vip=True)], "customerMatched": True}))
+        rows = run(portal_client._price_chunk(sess, ["12345678", "cgc:6193949247"], "j.smith", {"pokemon": 95}))
+        call = sess.calls[0]
+        check(call["url"] == cfg.PRICE_ENDPOINT and call["headers"].get("x-bot-key") == "wirekey"
+              and call["json"] == {"certs": ["12345678", "cgc:6193949247"], "customer": "j.smith",
+                                   "rateOverride": {"pokemon": 95}},
+              "price client: certs + customer + rateOverride + x-bot-key go on the wire as documented")
+        check([r.cert for r in rows] == ["12345678", "cgc:6193949247"] and rows[1].vip and rows[0].customer_matched
+              and rows[0].offer == 90.0 and not hasattr(rows[0], "payoutCents"),
+              "price client: rows mapped in input order; confidential fields never reach PricedRow")
+        sess = _Session(_Resp(200, {"rows": [row("12345678")]}))
+        rows = run(portal_client._price_chunk(sess, ["12345678"]))
+        check("customer" not in sess.calls[0]["json"] and "rateOverride" not in sess.calls[0]["json"]
+              and rows[0].customer_matched is False, "price client: no customer / override → neither key is sent")
+        # a short reply must not shift offers onto the wrong cert
+        sess = _Session(_Resp(200, {"rows": [row("23456789", offer=55)]}))
+        rows = run(portal_client._price_chunk(sess, ["12345678", "23456789"]))
+        check(rows[0].error and rows[0].offer is None and rows[1].offer == 55.0 and not rows[1].error,
+              "price client: a short reply is matched by cert id (the missing cert errors; nothing shifts)")
+        for status, exc in ((401, PortalAuthError), (400, PortalBadRequest)):
+            sess = _Session(_Resp(status, text="nope"))
+            try:
+                run(portal_client._price_chunk(sess, ["12345678"]))
+                got = None
+            except Exception as e:
+                got = type(e)
+            check(got is exc and len(sess.calls) == 1, f"price client: HTTP {status} → {exc.__name__}, never retried")
+        sess = _Session(_Resp(503), _Resp(200, ValueError("not json")), _Resp(200, {"rows": [row("12345678")]}))
+        rows = run(portal_client._price_chunk(sess, ["12345678"]))
+        check(len(sess.calls) == 3 and rows[0].offer == 90.0,
+              "price client: a 5xx and a non-JSON 200 are retried, then the good reply is used")
+        sess = _Session(_Resp(502))
+        try:
+            run(portal_client._price_chunk(sess, ["12345678"]))
+            got = None
+        except Exception as e:
+            got = type(e)
+        check(got is PortalUnavailable and len(sess.calls) == cfg.PRICE_MAX_RETRIES + 1,
+              "price client: persistent 5xx → PortalUnavailable after the retry budget")
+        # the claim request layer itself (never reached by the bot while the flag is off — see
+        # test_vip_commands_client; here only its wire shape, against a fake session)
+        sess = _Session(_Resp(200, {"results": [{"certId": "12345678", "skipped": "Auto-claim is turned off."}]}))
+        res = run(portal_client._claim_chunk(sess, cfg.UNCLAIM_ENDPOINT, ["12345678"], "chan-1"))
+        check(sess.calls[0]["json"] == {"certs": ["12345678"], "idempotencyKey": "chan-1"}
+              and res[0].skipped and not res[0].ok, "claim wire shape (fake session, UNCLAIM url): certs + idempotencyKey")
+        # register-tracking: what the bot sends today (channel_id as given — see the review notes)
+        check(run(portal_client.register_tracking(1492170401608896533, "")) == {"ok": False, "error": "no tracking"},
+              "register_tracking: an empty number is refused locally")
+    finally:
+        cfg.BOT_API_KEY, cfg.PRICE_RETRY_BACKOFF_S = saved_cfg
+
+    # ── 5) counts() and the analytics window, on seeded stores (the old checks could not fail)
+    today = date.today().isoformat()
+    old = (date.today() - timedelta(days=30)).isoformat()
+    tracking.state.save("tickets", [
+        {"id": "tk_1", "channel_id": 1, "user": "a", "status": "accepted", "cards": 2, "comp": 200.0, "payout": 180.0, "date": today},
+        {"id": "tk_2", "channel_id": 2, "user": "b", "status": "accepted", "cards": 1, "comp": 100.0, "payout": 90.0, "date": today},
+        {"id": "tk_3", "channel_id": 3, "user": "c", "status": "quoted", "cards": 3, "comp": 300.0, "payout": 270.0, "date": old}])
+    tracking.state.save("owed", [
+        {"id": "owed_1", "channel_id": 1, "user": "a", "paid": False, "payout": 180.0},
+        {"id": "owed_2", "channel_id": 2, "user": "b", "paid": True, "payout": 0.0}])
+    check(tracking.counts() == {"tickets_total": 3, "tickets_open": 2, "owed_open": 1, "owed_total": 180.0},
+          "counts: 3 tickets, 2 open (1 unpaid + 1 never shipped), $180 owed")
+    allt, wk = analytics.summary(), analytics.summary(days=7)
+    check(allt["totals"]["tickets"] == 3 and allt["totals"]["payout"] == 540.0
+          and allt["status"] == {"open": 1, "shipped": 2, "paid": 1}, "analytics all-time: totals + status counts")
+    check(wk["window_days"] == 7 and wk["totals"]["tickets"] == 2 and wk["totals"]["payout"] == 270.0,
+          "analytics ?days=7: the 30-day-old ticket is excluded")
+    for st in ("tickets", "owed", "voided"):
+        tracking.state.save(st, [])
+    for st in ("channel_sheet", "channel_sheets", "void_cutoff"):
+        tracking.state.save(st, {})
+    alerts.reset()
+
+
 # ── alerts that name the ticket; the lanes board on Discord errors ─────────────
 def test_alerts_and_lanes():
     section("alert routing + lanes board errors")
@@ -2904,7 +3191,8 @@ def main():
               test_lanes_board, test_stale_tickets, test_delivery_resolution, test_delivery_ofd,
               test_webserver_auth, test_audit_fixes, test_lanes_schedule,
               test_owed_accumulation, test_void, test_void_callers, test_truthful_replies,
-              test_handlers_and_void_races, test_lot_routing, test_ship_booking, test_alerts_and_lanes,
+              test_handlers_and_void_races, test_lot_routing, test_ship_booking, test_untested_guards,
+              test_alerts_and_lanes,
               test_canary_error_age,
               test_schedule_dst):
         t()
