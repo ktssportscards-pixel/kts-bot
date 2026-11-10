@@ -83,8 +83,13 @@ def extract_certs(text: str) -> list:
     stripped = re.sub(r'\d', '', text).strip()
     words = [w for w in stripped.split() if re.search(r'[a-zA-Z]', w)]
     plain = [re.sub(r'[^a-z]', '', w.lower()) for w in words]
-    # "CGC" labelling a cert isn't chatter — "CGC 1… CGC 2…" is certs, not words.
-    if sum(1 for p in plain if p != 'cgc') > 3:
+    # "CGC" labelling a cert isn't chatter — "CGC 1… CGC 2…" is certs, not words. The same
+    # goes for a "PSA" that sits directly in front of a number as its label: a customer who
+    # labels every slab ("PSA 12345678" four or more times) used to be ignored in silence.
+    # A free-floating "psa" (not attached to a number) still counts as a word.
+    psa_labels = sum(1 for _d, lab, _p in found if lab == 'psa')
+    chatter = sum(1 for p in plain if p != 'cgc') - min(psa_labels, plain.count('psa'))
+    if chatter > 3:
         return []
     not_cert_ctx = any(p in _NOT_A_CERT_WORDS for p in plain)
     says_cgc = bool(re.search(r'cgc', text, re.I))
@@ -97,6 +102,8 @@ def extract_certs(text: str) -> list:
             # was never a match before — keep it so.
             if pos > 0 and (scan[pos - 1].isalnum() or scan[pos - 1] == '_'):
                 continue
+            if label in ('bgs', 'sgc', 'tag', 'beckett'):
+                continue      # another grader's SHORT serial ("SGC 1234567") is not a PSA cert
             tok = digits
         elif label == 'cgc':
             tok = cgc_cert(digits)

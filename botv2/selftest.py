@@ -461,6 +461,19 @@ def test_certs():
     check(ec("way too many random words here now ok 12345678") == [], "chatter guard")
     check(ec("psa12345678") == [], "glued label not a cert")
     check(ec("12345678 12345678 23456789") == ["12345678", "23456789"], "dedup order")
+    # a customer who labels every slab: 4+ "PSA <number>" used to be dropped as chatter, silently
+    check(ec("PSA 12345678 PSA 23456789 PSA 34567890 PSA 45678901")
+          == ["12345678", "23456789", "34567890", "45678901"], "4 PSA-labelled certs are certs, not chatter")
+    check(ec("PSA 12345678\nPSA: 23456789\nPSA #34567890\nPSA-45678901\nCGC 6193949247")
+          == ["12345678", "23456789", "34567890", "45678901", "cgc:6193949247"],
+          "a labelled mixed PSA/CGC list on separate lines is read in full")
+    check(ec("psa psa psa psa is great 12345678") == [], "free-floating 'psa' words still count as chatter")
+    check(ec("way too many random words here PSA 12345678") == [], "real chatter with one label is still ignored")
+    # another grader's SHORT serial must not be quoted as a PSA cert
+    check(ec("SGC 1234567") == [] and ec("BGS 12345678") == [] and ec("Beckett #12345678") == []
+          and ec("TAG 1234567") == [], "7-9 digit BGS/SGC/TAG/Beckett serials are not PSA certs")
+    check(ec("SGC 1234567 PSA 23456789 34567890") == ["23456789", "34567890"],
+          "…while PSA-labelled and unlabelled numbers in the same message still are")
     et = certs.extract_tracking
     check(et("1Z999AA10123456784") == "1Z999AA10123456784", "UPS tracking")
     check(et("here 9400111899223817200000 ok") == "9400111899223817200000", "USPS tracking")
