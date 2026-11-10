@@ -462,6 +462,19 @@ def test_state_persistence():
         cfg.DATA_DIR_IS_DEFAULT = True
         check([k for k, _t in botmod._startup_storage_problems()] == ["data_dir_default"],
               "startup: DATA_DIR unset → Kevin is warned state will not survive a redeploy")
+        saved_folder = cfg.PSA_FOLDER_ID
+        try:
+            cfg.DATA_DIR_IS_DEFAULT = False
+            for blank in ("", "   "):
+                cfg.PSA_FOLDER_ID = blank
+                check(cfg.psa_folder_blank() and not cfg.psa_folder_unsafe()
+                      and [k for k, _t in botmod._startup_storage_problems()] == ["psa_folder_blank"],
+                      f"startup: PSA_FOLDER_ID={blank!r} (blank skips the v1-folder check) → Kevin is warned")
+            cfg.PSA_FOLDER_ID = "a-real-folder-id"
+            check(not cfg.psa_folder_blank() and botmod._startup_storage_problems() == [],
+                  "startup: a real folder id raises nothing")
+        finally:
+            cfg.PSA_FOLDER_ID = saved_folder
         cfg.DATA_DIR_IS_DEFAULT = False
         blocker = os.path.join(saved_dir, "zz_not_a_dir")
         with open(blocker, "w") as f:

@@ -181,6 +181,15 @@ CONFIDENTIAL_ROW_FIELDS = ("payout", "payoutCents", "memberMultiplier", "source"
 CUSTOMER_FORBIDDEN_WORDS = ("triumph", "poketrader", "pixel", "allocation", "doral")
 
 
+def psa_folder_blank() -> bool:
+    """True when PSA_FOLDER_ID is present but blank / whitespace. Buying sheets are then
+    created with an EMPTY folder id (the Apps Script falls back to its own default folder),
+    and psa_folder_unsafe() below — an equality check against v1's folder id — does not fire,
+    so the "refuse to write into v1's folder" safety net is bypassed. The bot only WARNS about
+    this (creation behaviour is unchanged); see the review notes for the stricter option."""
+    return not (PSA_FOLDER_ID or "").strip()
+
+
 def psa_folder_unsafe() -> bool:
     """True when v2 would write buying sheets into v1's shared folder without the
     explicit ALLOW_SHARED_PSA_FOLDER opt-in — i.e. PSA_FOLDER_ID hasn't been pointed

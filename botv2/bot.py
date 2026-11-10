@@ -111,10 +111,18 @@ state.add_listener(_on_state_problem)
 
 
 def _startup_storage_problems() -> list:
-    """(key, text) alerts about where bot state is being kept — checked once at startup.
-    Everything money-related (tickets, owed balances, payment info, void guards) is a JSON
-    file under DATA_DIR; if that isn't a persistent, writable volume it is lost silently."""
+    """(key, text) alerts about configuration that silently loses or misplaces data — checked
+    once at startup. Everything money-related (tickets, owed balances, payment info, void
+    guards) is a JSON file under DATA_DIR; if that isn't a persistent, writable volume it is
+    lost silently. And a blank PSA_FOLDER_ID sends buying sheets to the Apps Script's default
+    folder while skipping the v1-folder safety check."""
     out = []
+    if config.psa_folder_blank():
+        out.append(("psa_folder_blank",
+                    "🚨 `PSA_FOLDER_ID` is set but BLANK — buying sheets are being created with an "
+                    "empty folder id (the Apps Script picks its own default folder) and the "
+                    "\"never write into v1's folder\" safety check is skipped. Set it to the real "
+                    "buying-sheet folder id."))
     if config.DATA_DIR_IS_DEFAULT:
         out.append(("data_dir_default",
                     "🚨 `DATA_DIR` is not set on this service — tickets, owed balances, payment info "
