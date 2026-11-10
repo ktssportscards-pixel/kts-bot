@@ -8,14 +8,58 @@ Covers every pure/offline path: cert + tracking parsing, quote building + messag
 VIP flag, lots/lanes/minimums, VA/Doral shipping, tracking record + payout digest,
 commands, and the portal client's mock + param plumbing. The live Discord + Google
 + /bot/price paths are exercised separately (they need real creds/endpoint).
+
+HERMETIC BY CONSTRUCTION — safe to run from any shell, including one that has the
+production variables exported (a Railway shell, a dev box with a real .env sourced):
+  * it ALWAYS uses a fresh temp DATA_DIR (an inherited DATA_DIR is ignored — the tests
+    blank the tickets / owed / payinfo / void stores, which would wipe real data);
+  * every config variable is scrubbed from the environment first (credentials, the
+    auto-claim flag, the Drive folder ids, feature flags), so results never depend on
+    the caller's shell and no real credential is ever loaded;
+  * the network is disabled for the whole process, so no test can reach Discord, the
+    portal (incl. /bot/claim), the Apps Script or Google Drive even if a guard regressed.
 """
 import asyncio
 import os
+import socket
 import tempfile
 
-# Must be set before importing any botv2 module that reads config at import time.
-os.environ.setdefault("DATA_DIR", tempfile.mkdtemp(prefix="botv2-selftest-"))
+# ── hermetic harness: must run BEFORE any botv2 module reads config at import time ──
+_INHERITED_DATA_DIR = os.environ.get("DATA_DIR")
+_CONFIG_ENV = (
+    "DISCORD_BOT_TOKEN", "DISCORD_TOKEN", "KEVIN_USER_ID", "PORTAL_BASE_URL", "BOT_API_KEY",
+    "BOTV2_PRICE_MOCK", "BOTV2_AUTO_CLAIM", "NEAR_FULL_PCT", "BOTV2_DELIVERY_TRACKING",
+    "BOTV2_REGISTER_TRACKING", "BOTV2_LANES_BOARD", "BOTV2_LANES_CHANNEL_ID",
+    "BOTV2_LANES_REFRESH_MIN", "BOTV2_LANES_SCHEDULE", "BOTV2_STALE_NUDGES",
+    "BOTV2_STALE_QUOTED_DAYS", "BOTV2_STALE_TRANSIT_DAYS", "BOTV2_STALE_UNPAID_DAYS",
+    "GOOGLE_CREDENTIALS_JSON", "GOOGLE_CREDENTIALS_FILE", "APPS_SCRIPT_URL",
+    "APPS_SCRIPT_SHARED_SECRET", "PSA_FOLDER_ID", "ALLOW_SHARED_PSA_FOLDER",
+    "TEMPLATE_SHEET_ID", "DATA_DIR", "SPORTS_OP_MIN_LOT", "POKEMON_SINGLES_MIN_LOT",
+    "BOTV2_SHIP_ALL_DORAL", "MIN_LOT_VALUE", "MIN_SLAB_COUNT", "POKEMON_LANE_OPEN", "PORT",
+)
+for _k in _CONFIG_ENV:
+    os.environ.pop(_k, None)
+os.environ["DATA_DIR"] = tempfile.mkdtemp(prefix="botv2-selftest-")
 os.environ["BOTV2_PRICE_MOCK"] = "1"
+# Belt and braces under the network kill below: point every outbound URL at a dead
+# loopback port and the service-account file at a path that cannot exist.
+os.environ["PORTAL_BASE_URL"] = "http://127.0.0.1:9/selftest-network-disabled"
+os.environ["APPS_SCRIPT_URL"] = "http://127.0.0.1:9/selftest-network-disabled"
+os.environ["GOOGLE_CREDENTIALS_FILE"] = os.path.join(os.environ["DATA_DIR"], "no-credentials.json")
+
+_net_attempts = []
+
+
+def _no_network(*args, **_kwargs):
+    """Every real connection attempt in this process lands here and fails loudly."""
+    _net_attempts.append(repr(args[-1:])[:80])
+    raise RuntimeError("botv2 selftest: network access is disabled")
+
+
+socket.socket.connect = _no_network
+socket.socket.connect_ex = _no_network
+socket.create_connection = _no_network
+socket.getaddrinfo = _no_network
 
 from botv2 import (certs, commands, lots, payout_digest, portal_client,  # noqa: E402
                    pricing, shipping, tracking, vip)
@@ -31,6 +75,38 @@ def check(cond, msg):
 
 def section(name):
     print(f"  · {name}")
+
+
+# ── the harness itself: prove the safety properties the docstring promises ──────
+def test_harness_is_hermetic():
+    section("harness is hermetic")
+    import urllib.request
+    import botv2.config as cfg
+    check(cfg.DATA_DIR == os.environ["DATA_DIR"] and "botv2-selftest-" in cfg.DATA_DIR
+          and cfg.DATA_DIR != _INHERITED_DATA_DIR,
+          "harness: DATA_DIR is a fresh temp dir (an inherited DATA_DIR is never used)")
+    check(cfg.PRICE_MOCK is True, "harness: pricing is mocked")
+    check(cfg.AUTO_CLAIM is False, "harness: auto-claim flag is off regardless of the caller's env")
+    check(cfg.DISCORD_TOKEN == "" and cfg.BOT_API_KEY == "" and cfg.APPS_SCRIPT_SHARED_SECRET == ""
+          and not cfg.GOOGLE_CREDENTIALS_JSON and not os.path.exists(cfg.GOOGLE_CREDENTIALS_FILE),
+          "harness: no credential is loaded (tokens, bot key, sheet secret, service account)")
+    check(cfg.PSA_FOLDER_ID == cfg.V1_PSA_FOLDER_ID and not cfg.ALLOW_SHARED_PSA_FOLDER
+          and cfg.psa_folder_unsafe(),
+          "harness: Drive folder left at the refuse-to-create tripwire default")
+    check("127.0.0.1:9" in cfg.APPS_SCRIPT_URL and "127.0.0.1:9" in cfg.PRICE_ENDPOINT
+          and "127.0.0.1:9" in cfg.CLAIM_ENDPOINT,
+          "harness: every outbound URL points at a dead loopback port")
+    before = len(_net_attempts)
+    try:
+        urllib.request.urlopen("http://127.0.0.1:9/selftest-probe", timeout=1)
+        blocked = False
+    except RuntimeError as e:
+        blocked = "network access is disabled" in str(e)
+    except Exception:
+        blocked = False
+    check(blocked and len(_net_attempts) == before + 1,
+          "harness: a real connection attempt is refused in-process")
+    del _net_attempts[before:]            # the deliberate probe doesn't count against the suite
 
 
 # ── certs ────────────────────────────────────────────────────────────────────
@@ -309,14 +385,29 @@ def test_psa_folder_guard():
     try:
         cfg.PSA_FOLDER_ID, cfg.ALLOW_SHARED_PSA_FOLDER = cfg.V1_PSA_FOLDER_ID, False
         check(cfg.psa_folder_unsafe(), "v1 folder + no flag -> unsafe")
-        # create_psa_sheet must refuse BEFORE any network/Google call
+        # create_psa_sheet must refuse BEFORE any network/Google call. The Apps Script
+        # call is stubbed with a counter, so a regressed tripwire shows up as a failed
+        # check here instead of a real sheet in v1's live folder.
+        calls = []
+        orig_urlopen = sheets_mod.urllib.request.urlopen
+        orig_sleep = sheets_mod.time.sleep
+
+        def _spy(*a, **k):
+            calls.append(a)
+            raise RuntimeError("selftest: Apps Script call attempted")
+        sheets_mod.urllib.request.urlopen = _spy
+        sheets_mod.time.sleep = lambda *_a, **_k: None     # never sit in the retry/poll loop
         try:
             sheets_mod.create_psa_sheet("x", ["12345678"])
             check(False, "create_psa_sheet should refuse v1 folder")
-        except RuntimeError:
-            check(True, "create_psa_sheet refuses v1 folder (no network)")
+        except RuntimeError as e:
+            check("Refusing to create" in str(e), "create_psa_sheet refuses v1 folder (no network)")
         except Exception as e:
             check(False, f"wrong error type from guard: {e!r}")
+        finally:
+            sheets_mod.urllib.request.urlopen = orig_urlopen
+            sheets_mod.time.sleep = orig_sleep
+        check(not calls, "create_psa_sheet made NO Apps Script call for v1's folder")
         cfg.ALLOW_SHARED_PSA_FOLDER = True
         check(not cfg.psa_folder_unsafe(), "explicit allow -> safe")
         cfg.PSA_FOLDER_ID, cfg.ALLOW_SHARED_PSA_FOLDER = "v2-own-folder-id", False
@@ -1229,13 +1320,17 @@ def test_void():
 
 def main():
     print("botv2 selftest:")
-    for t in (test_certs, test_pricing, test_lots_shipping, test_tracking_digest,
+    if _INHERITED_DATA_DIR:
+        print("  (ignoring the inherited DATA_DIR — the selftest only ever writes to a temp dir)")
+    for t in (test_harness_is_hermetic, test_certs, test_pricing, test_lots_shipping, test_tracking_digest,
               test_payout_flow, test_vip_commands_client, test_psa_folder_guard,
               test_alerts_status, test_analytics, test_delivery, test_register_tracking,
               test_lanes_board, test_stale_tickets, test_delivery_ofd,
               test_webserver_auth, test_audit_fixes, test_lanes_schedule,
               test_owed_accumulation, test_void):
         t()
+    check(not _net_attempts,
+          f"no test attempted a real network connection (attempts: {_net_attempts[:5]})")
     if _fails:
         print(f"\nFAILED ({len(_fails)}):")
         for f in _fails:
