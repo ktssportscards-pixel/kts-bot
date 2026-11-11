@@ -35,6 +35,8 @@ import tempfile
 
 # ── hermetic harness: must run BEFORE any botv2 module reads config at import time ──
 _PRELOADED = sorted(m for m in sys.modules if m.startswith("botv2.") and m != __name__)
+if not _PRELOADED and getattr(sys.modules.get("botv2"), "config", None) is not None:
+    _PRELOADED = ["botv2.config (imported earlier, then removed from sys.modules)"]
 if _PRELOADED:
     raise SystemExit(
         "botv2 selftest: REFUSING to run — these botv2 modules were imported before the selftest "
@@ -103,6 +105,9 @@ def test_harness_is_hermetic():
     check(cfg.DATA_DIR == os.environ["DATA_DIR"] and "botv2-selftest-" in cfg.DATA_DIR
           and cfg.DATA_DIR != _INHERITED_DATA_DIR,
           "harness: DATA_DIR is a fresh temp dir (an inherited DATA_DIR is never used)")
+    from botv2 import state as _state
+    check(_state.config is cfg and _state._path("x").startswith(os.environ["DATA_DIR"] + os.sep),
+          "harness: the stores themselves write into the temp dir (same config object, not a stale copy)")
     check(cfg.PRICE_MOCK is True, "harness: pricing is mocked")
     check(cfg.AUTO_CLAIM is False, "harness: auto-claim flag is off regardless of the caller's env")
     check(cfg.DISCORD_TOKEN == "" and cfg.BOT_API_KEY == "" and cfg.APPS_SCRIPT_SHARED_SECRET == ""
@@ -401,7 +406,7 @@ def test_textsplit():
           "send: two multi-part messages to one destination arrive one after the other, not interleaved")
     first_c = next(i for i, (tid, _t) in enumerate(log) if tid == 2)
     last_ab = max(i for i, (tid, _t) in enumerate(log) if tid == 1)
-    check(first_c < last_ab and not textsplit._send_locks,
+    check(first_c < last_ab and 1 not in textsplit._send_locks and 2 not in textsplit._send_locks,
           "send: another destination is not held up, and no lock is left behind afterwards")
 
     # a message never queues for long behind a send that hangs: after its turn-wait it goes anyway
@@ -500,19 +505,19 @@ def test_textsplit():
                         raise RuntimeError("discord 503")
                     await super().send(text)
             flaky = _Flaky(uid=777, name="kevin")
-            botmod.bot.get_user = lambda _uid: flaky
+            botmod.bot.get_user = lambda uid: flaky if uid == 777 else None
             alerts_mod = __import__("botv2.alerts", fromlist=["x"])
             alerts_mod.reset()
             ok_digest = asyncio.run(botmod._send_digest("payout", digest))
-            botmod.bot.get_user = lambda _uid: h.kevin
+            botmod.bot.get_user = lambda uid: h.kevin if uid == 777 else None
             check(ok_digest is False and len(flaky.dms) == 1 and "Payout digest" in flaky.dms[0]
                   and "Only the first 1 of" in ((alerts_mod.last_error() or {}).get("text") or "")
                   and "could NOT be delivered to your DMs" not in ((alerts_mod.last_error() or {}).get("text") or ""),
                   "digest: when only part of it arrives the alert says so (it used to say none of it did)")
             alerts_mod.reset()
-            botmod.bot.get_user = lambda _uid: _Flaky(uid=777, name="kevin")
+            botmod.bot.get_user = lambda uid: _Flaky(uid=777, name="kevin") if uid == 777 else None
             part_ok = asyncio.run(botmod.alert_kevin("zz_partial", digest))
-            botmod.bot.get_user = lambda _uid: h.kevin
+            botmod.bot.get_user = lambda uid: h.kevin if uid == 777 else None
             check(part_ok is False and alerts_mod.should_alert("zz_partial"),
                   "alert: a part-delivered alert counts as NOT delivered (it can fire again; the quiet window is not used up)")
             alerts_mod.reset()
@@ -602,6 +607,7 @@ def test_state_persistence():
     listener = lambda kind, name, detail: seen.append((kind, name, detail))
     state.add_listener(listener)
     path = lambda n: os.path.join(os.environ["DATA_DIR"], n + ".json")
+    saved_sets = {n: dict(getattr(state, n)) for n in ("_failing", "_must_keep", "_stuck", "_ever_failed", "_preserved")}
     try:
         # missing store = the normal first run: default, no alarm
         check(state.load("zz_missing", list) == [] and not seen and not state.load_failures(),
@@ -849,6 +855,39 @@ def test_state_persistence():
         state.load("zz_empties", list)
         check(any(open(c).read() == "real garbage worth keeping" for c in glob.glob(path("zz_empties") + ".corrupt-*")),
               "state: six empty 'copies' from today do not use up the allowance — the real bytes are still kept")
+        # one failed read, then ordinary saves: exactly ONE copy is kept and nothing is "lost"
+        # (the must-keep state ends with the first good save)
+        del seen[:]
+        with open(path("zz_once"), "w") as f:
+            f.write("{ corrupt once")
+        state.load("zz_once", list)
+        for i in range(12):
+            state.save("zz_once", [i])
+        check(len(glob.glob(path("zz_once") + ".*-*")) == 1 and [k for k, n, _d in seen if n == "zz_once"] == ["load"],
+              "state: after one failed read, twelve ordinary saves keep exactly one copy and report nothing more")
+        # the storm-guard window is a day: a copy from 23 hours ago counts, one from 25 hours ago doesn't
+        from datetime import timedelta as _tdelta, timezone as _tz
+        stamp_ago = lambda hours: (datetime.now(_tz.utc) - _tdelta(hours=hours)).strftime(state._STAMP_FMT)
+        for i in range(4):
+            with open(path("zz_window") + f".corrupt-{stamp_ago(23)}-{i + 1}", "w") as f:
+                f.write("recent copy %d" % i)
+        for i in range(4):
+            with open(path("zz_window") + f".corrupt-{stamp_ago(25)}-{i + 5}", "w") as f:
+                f.write("yesterday's copy %d" % i)
+        check(state._recent_kept(path("zz_window")) == 4,
+              "state: the storm guard counts copies from the last 24 hours only (4 of these 8)")
+        # the same store goes bad AGAIN with different bytes while it is still failing: that is
+        # new evidence, so it is copied and reported too (not swallowed as "same episode")
+        del seen[:]
+        with open(path("zz_changes"), "w") as f:
+            f.write("{ first kind of garbage")
+        state.load("zz_changes", list)
+        with open(path("zz_changes"), "w") as f:
+            f.write("{ a different kind of garbage, longer")
+        state.load("zz_changes", list)
+        check([k for k, n, _d in seen if n == "zz_changes"] == ["load", "load"]
+              and len(glob.glob(path("zz_changes") + ".corrupt-*")) == 2,
+              "state: a still-failing store whose bytes change is copied and reported again")
         # kept-copy names never collide, even inside one clock tick
         class _FrozenClock(datetime):
             @classmethod
@@ -961,7 +1000,6 @@ def test_state_persistence():
 
     # The real path end to end: a store goes bad while the bot is running and is read from a
     # WORKER THREAD (sheet work runs in threads) — the alert has to hop onto the bot's loop.
-    saved_sets = {n: dict(getattr(state, n)) for n in ("_failing", "_must_keep", "_stuck", "_ever_failed", "_preserved")}
     with _BotHarness(8812) as h:
         with open(path("zz_thread"), "w") as f:
             f.write("{ broken")
@@ -2681,8 +2719,8 @@ def test_handlers_and_void_races():
             check(cfg.AUTO_CLAIM is False and not claim_calls,
                   "quote: the claim client is not called while BOTV2_AUTO_CLAIM is off")
             # what the handler sends to pricing decides the customer's rates. Pinned as it is
-            # today: the VIP match key is the cleaned-up CHANNEL NAME (see the review's item A —
-            # changing it changes what sellers are offered, so that is Kevin's decision).
+            # today: the VIP match key is the cleaned-up CHANNEL NAME, not the raw Discord username.
+            # Changing it changes what sellers are offered, so that is Kevin's decision.
             check(h.price_args == {"certs": ["12345678", "23456789"], "customer": "normalq", "rate_override": None},
                   "quote: certs + customer (channel name) + no manual override are what is sent to pricing")
             check(h.sheet_calls == [("normalq", ["12345678", "23456789"])] and h.fill_calls == [URL % 9100]
@@ -3352,6 +3390,23 @@ def test_lot_routing():
         h.say("ship")
         check("Virginia Beach" in h.channel.sent[0] and "Doral" in h.channel.sent[0],
               "mixed lot: a shipped sports card declined later keeps its hub next to the Pokémon one")
+    # A re-quote that declines a card while the tickets store can't be written: the stored
+    # ticket still has the card as quoted, so it must stay in the lot and Kevin must not be
+    # told it "won't be booked" (a ship would still book it).
+    state["pass_hoop"] = False
+    with _BotHarness(9305, name="unsavedpass", rows=requote, sheet_url=URL % 9305) as h:
+        h.say("12345678 CGC 6193949247")
+        state["pass_hoop"] = True
+        real = tracking.state.save
+        tracking.state.save = lambda name, data: False if name == "tickets" else real(name, data)
+        del h.kevin.dms[:]
+        try:
+            h.say("12345678")
+        finally:
+            tracking.state.save = real
+        check(lots.value_by_lane(9305) == (80.0, 300.0) and not any("REMOVED" in d for d in h.kevin.dms)
+              and tracking.find_tickets(channel_id=9305)[0]["ledger"]["12345678"]["status"] == "quoted",
+              "re-quote PASS that could not be saved: the card stays in the lot and is not reported as removed")
     state["pass_hoop"] = False
     lots.remove_certs(424242, ["x"])                        # unknown channel: no error
     for st in ("tickets", "owed", "channel_sheet", "channel_sheets", "voided", "void_cutoff"):
@@ -3511,114 +3566,73 @@ def test_ship_booking():
     tracking.record_accepted_ship(9211, lot("p1"))
     check(owed_row(9211)["tracking"] == "1ZEARLYEARLYEARLY3", "first lot: a number dropped before 'ship' is kept")
 
-    # The NEXT lot's tracking arrives before Kevin pays the first lot (the customer mailed it
-    # without typing ship — the case the new "NOT booked as owed" DM steers Kevin into): that
-    # number is the new lot's, and must show once the lot is booked.
-    tracking.record_quote(9212, lot("n1"), channel_name="nextlot")
-    tracking.record_accepted_ship(9212, lot("n1"))
-    tracking.record_tracking(9212, "1ZFIRSTBOXFIRSTBOX")
-    tracking.record_quote(9212, lot("n2"), channel_name="nextlot")           # lot 2: quoted, not booked
-    tracking.record_tracking(9212, "1ZSECONDBOXSECOND")                       # its package is moving
-    check(tracking.mark_paid(9212) and "paid_tracking" in owed_row(9212)
-          and owed_row(9212)["paid_tracking"] is None,
-          "paid with the next lot's number on file: that number is NOT filed under the paid lot")
-    tracking.record_accepted_ship(9212, lot("n2"))                            # Kevin books lot 2
-    o2 = owed_row(9212)
-    check(o2["paid"] is False and o2["payout"] == 90.0 and o2["tracking"] == "1ZSECONDBOXSECOND"
-          and "1ZSECONDBOXSECOND" in payout_digest.build_digest(),
-          "…so the booked second lot shows ITS tracking number (it showed 'no tracking yet')")
-    # but the FIRST number on a ticket is the booked lot's, even if other cards are quoted
-    tracking.record_quote(9213, lot("m1"), channel_name="firstnum")
-    tracking.record_accepted_ship(9213, lot("m1"))
-    tracking.record_quote(9213, lot("m2"), channel_name="firstnum")
-    tracking.record_tracking(9213, "1ZONLYBOXONLYBOX11")
+    # Which number belongs to which lot can't be known for certain (one number per ticket), so
+    # the rule is deliberately simple: the number on file at `!paid` is the paid lot's, and a
+    # later lot never inherits it. These orderings must all end with the NEW lot showing
+    # "no tracking yet" rather than a paid box's number.
+    def digest_line(user):
+        return next((ln for ln in payout_digest.build_digest().split("\n") if f"**{user}**" in ln), "")
+    snap = lambda user, cert: {"username": user, "comp": 100, "payout": 90, "cards": 1,
+                               "certs": {cert: 100}, "cert_offers": {cert: 90}}
+    # (a) lot 2 is paid WITHOUT a number of its own: the remembered number of lot 1 must survive
+    tracking.record_quote(9212, snap("threelots", "t1"), channel_name="threelots")
+    tracking.record_accepted_ship(9212, snap("threelots", "t1"))
+    tracking.record_tracking(9212, "1ZBOXONEBOXONE1111")
+    tracking.mark_paid(9212)
+    tracking.record_quote(9212, snap("threelots", "t2"), channel_name="threelots")
+    tracking.record_accepted_ship(9212, snap("threelots", "t2"))
+    check(owed_row(9212)["tracking"] is None, "three lots: lot 2 starts with no tracking")
+    tracking.mark_paid(9212)                                              # paid with no number
+    check(owed_row(9212).get("paid_tracking") == "1ZBOXONEBOXONE1111",
+          "three lots: paying a lot that has no number keeps the remembered number of the earlier paid lot")
+    tracking.record_quote(9212, snap("threelots", "t3"), channel_name="threelots")
+    tracking.record_accepted_ship(9212, snap("threelots", "t3"))
+    check(owed_row(9212)["tracking"] is None and "no tracking yet" in digest_line("threelots"),
+          "three lots: lot 3 does not get the first lot's number back (it did, after one number-less lot)")
+    # (b) the next lot's number is posted, the lot is booked ('ship'), THEN both are paid:
+    #     that number is the paid lots' — a later lot must not show it
+    tracking.record_quote(9213, snap("shipfirst", "u1"), channel_name="shipfirst")
+    tracking.record_accepted_ship(9213, snap("shipfirst", "u1"))
+    tracking.record_tracking(9213, "1ZFIRSTBOXFIRSTBOX")
+    tracking.record_quote(9213, snap("shipfirst", "u2"), channel_name="shipfirst")
+    tracking.record_tracking(9213, "1ZSECONDBOXSECOND")                      # bare number, lot 2 not booked yet
+    tracking.record_accepted_ship(9213, snap("shipfirst", "u2"))             # the `ship` Kevin's DM asks for
+    check(owed_row(9213)["tracking"] == "1ZSECONDBOXSECOND" and owed_row(9213)["payout"] == 180.0,
+          "ship before paid: both lots on one unpaid row, with the latest number")
     tracking.mark_paid(9213)
-    tracking.record_accepted_ship(9213, lot("m2"))
-    check(owed_row(9213)["paid_tracking"] == "1ZONLYBOXONLYBOX11" and owed_row(9213)["tracking"] is None,
-          "the first number on a ticket is the booked lot's: a lot booked after the payment doesn't inherit it")
-    # a second number with nothing waiting to be booked is the same lot's second box
-    tracking.record_quote(9214, lot("b1"), channel_name="twoboxes")
-    tracking.record_accepted_ship(9214, lot("b1"))
-    tracking.record_tracking(9214, "1ZBOXONEBOXONE1111")
-    tracking.record_tracking(9214, "1ZBOXTWOBOXTWO2222")
-    tracking.mark_paid(9214)
-    check(owed_row(9214)["paid_tracking"] == "1ZBOXTWOBOXTWO2222",
-          "a second number with no unbooked cards belongs to the lot being paid")
-    # a number posted for the next lot AFTER the payment (row still paid) is kept on booking
-    tracking.record_quote(9215, lot("a1"), channel_name="afterpaid")
-    tracking.record_accepted_ship(9215, lot("a1"))
+    check(owed_row(9213).get("paid_tracking") == "1ZSECONDBOXSECOND",
+          "ship before paid: the number on file is filed under what was just paid")
+    tracking.record_quote(9213, snap("shipfirst", "u3"), channel_name="shipfirst")
+    tracking.record_accepted_ship(9213, snap("shipfirst", "u3"))
+    check(owed_row(9213)["tracking"] is None and "no tracking yet" in digest_line("shipfirst"),
+          "ship before paid: the lot after it does not inherit the paid box's number")
+    # (c) a number posted for the next lot AFTER the payment (row still paid) is the new lot's
+    tracking.record_quote(9215, snap("afterpaid", "a1"), channel_name="afterpaid")
+    tracking.record_accepted_ship(9215, snap("afterpaid", "a1"))
     tracking.record_tracking(9215, "1ZPAIDLOTPAIDLOT11")
     tracking.mark_paid(9215)
-    tracking.record_quote(9215, lot("a2"), channel_name="afterpaid")
+    tracking.record_quote(9215, snap("afterpaid", "a2"), channel_name="afterpaid")
     tracking.record_tracking(9215, "1ZNEXTLOTNEXTLOT22")
-    tracking.record_accepted_ship(9215, lot("a2"))
+    tracking.record_accepted_ship(9215, snap("afterpaid", "a2"))
     check(owed_row(9215)["tracking"] == "1ZNEXTLOTNEXTLOT22", "a number posted after the payment is the new lot's")
-
-    # The TICKET row still describes the paid lot's box (its number, "delivered") until a new
-    # number arrives. That must not be shown against the new, unpaid lot: the stale check
-    # said "delivered, still unpaid — 10 days" for a lot shipped today, and the ops feed
-    # showed the old number with delivered=true next to the open balance.
-    from datetime import date as _date, timedelta as _td
-    for st in ("tickets", "owed"):
-        tracking.state.save(st, [])
-    tracking.record_quote(9222, lot("s1"), channel_name="oldbox")
-    tracking.record_accepted_ship(9222, lot("s1"))
-    tracking.record_tracking(9222, "1ZOLDBOXOLDBOX1111")
-    tracking.mark_delivered(channel_id=9222, delivered_at=(_date.today() - _td(days=10)).isoformat() + "T10:00:00")
-    tracking.mark_paid(9222)
-    tracking.record_quote(9222, lot("s2"), channel_name="oldbox")
-    tracking.record_accepted_ship(9222, lot("s2"))                      # lot 2 ships today
-    st_now = tracking.stale_tickets(_date.today())
-    ops = next(r for r in tracking.ops_view() if r["channel_id"] == 9222)
-    check(not st_now["unpaid_stale"] and not st_now["transit_stale"],
-          "second lot, shipped today: NOT reported as 'delivered, still unpaid' from the first box's delivery")
-    check(ops["owed"] == 90.0 and ops["paid"] is False and ops["tracking"] == "" and ops["delivered"] is False
-          and ops["delivered_at"] is None,
-          "second lot: the ops feed doesn't show the paid lot's tracking / delivered state against the new balance")
-    later = tracking.stale_tickets(_date.today() + _td(days=30))
-    check([x["channel_id"] for x in later["transit_stale"]] == [9222] and not later["unpaid_stale"],
-          "second lot with no tracking for a month: flagged as stuck in transit (aged from ITS ship date)")
-    tracking.record_tracking(9222, "1ZNEWBOXNEWBOX2222")
-    ops = next(r for r in tracking.ops_view() if r["channel_id"] == 9222)
-    check(ops["tracking"] == "1ZNEWBOXNEWBOX2222" and ops["delivered"] is False,
-          "second lot: once its own number is posted the ops feed shows that, in transit")
-    tracking.mark_delivered(channel_id=9222)
-    check(next(r for r in tracking.ops_view() if r["channel_id"] == 9222)["delivered"] is True
-          and [x["channel_id"] for x in tracking.stale_tickets(_date.today() + _td(days=30))["unpaid_stale"]] == [9222],
-          "second lot delivered under its own number: delivered / 'delivered, still unpaid' work as before")
-    # a single-lot ticket is untouched by any of this
-    tracking.record_quote(9223, lot("s3"), channel_name="plain")
-    tracking.record_accepted_ship(9223, lot("s3"))
-    tracking.record_tracking(9223, "1ZPLAINPLAINPLAIN1")
-    tracking.mark_delivered(channel_id=9223)
-    ops = next(r for r in tracking.ops_view() if r["channel_id"] == 9223)
-    check(ops["tracking"] == "1ZPLAINPLAINPLAIN1" and ops["delivered"] is True,
-          "ordinary ticket: tracking + delivered shown exactly as before")
-    for st in ("tickets", "owed"):
-        tracking.state.save(st, [])
-
-    # Rows PAID BEFORE this change have no paid_tracking: the number they hold is the paid
-    # lot's, so a new lot must not show it (it used to get today's date + last month's number).
-    legacy_row = lambda cid, user: {"id": f"owed_{cid}", "channel_id": cid, "user": user, "date": "2026-10-01",
-                                    "status": "accepted", "paid": True, "paid_date": "2026-10-09",
-                                    "certs": {}, "cert_payout": {}, "payout": 0, "comp": 0, "cards": 0,
-                                    "tracking": "1ZOLDOLDOLDOLDOLD1"}
+    # (d) a row paid BEFORE this change (no paid_tracking) is left exactly as the old code showed
+    #     it — old date and old number, visibly stale — not today's date next to last month's number
     rows = tracking.state.load("owed", list)
-    rows += [legacy_row(9216, "legacy"), legacy_row(9217, "legacy2")]
+    rows.append({"id": "owed_9216", "channel_id": 9216, "user": "legacy", "date": "2026-10-01",
+                 "status": "accepted", "paid": True, "paid_date": "2026-10-09", "certs": {}, "cert_payout": {},
+                 "payout": 0, "comp": 0, "cards": 0, "tracking": "1ZOLDOLDOLDOLDOLD1"})
     tracking.state.save("owed", rows)
-    tracking.record_quote(9216, lot("g2"), channel_name="legacy")
-    tracking.record_accepted_ship(9216, lot("g2"))
+    tracking.record_quote(9216, snap("legacy", "g2"), channel_name="legacy")
+    tracking.record_accepted_ship(9216, snap("legacy", "g2"))
     o6 = owed_row(9216)
-    check(o6["payout"] == 90.0 and o6["tracking"] is None and o6["date"] != "2026-10-01"
-          and o6.get("paid_tracking") == "1ZOLDOLDOLDOLDOLD1",
-          "row paid before this change: a new lot gets a fresh date and NOT the old lot's number")
-    tracking.record_accepted_ship(9216, lot("g2"))
-    check(owed_row(9216)["tracking"] is None, "…and the old number doesn't come back on the next projection")
-    tracking.record_quote(9217, lot("h2"), channel_name="legacy2")
-    tracking.record_tracking(9217, "1ZNEWBOXNEWBOX2222")                      # posted while the row is still paid
-    tracking.record_accepted_ship(9217, lot("h2"))
-    check(owed_row(9217)["tracking"] == "1ZNEWBOXNEWBOX2222" and owed_row(9217)["paid_tracking"] == "1ZOLDOLDOLDOLDOLD1",
-          "row paid before this change: a NEW number posted before booking is kept as the new lot's")
+    check(o6["payout"] == 90.0 and o6["date"] == "2026-10-01" and o6["tracking"] == "1ZOLDOLDOLDOLDOLD1",
+          "row paid before this change: shown as before (old date + old number), never a NEW date with the old number")
+    tracking.record_tracking(9216, "1ZNEWBOXNEWBOX2222")
+    check(owed_row(9216)["tracking"] == "1ZNEWBOXNEWBOX2222", "…and its own number, once posted, replaces the old one")
+    # no leftover bookkeeping field from an earlier build of this branch survives a payment
+    check(all("tracking_for_next" not in r for r in tracking.state.load("owed", list)),
+          "owed rows carry no 'tracking_for_next' field")
+
 
     # an UNPAID balance that grows keeps its original ship date (only a re-OPENED row gets a new one)
     tracking.record_quote(9218, lot("d1"), channel_name="grow")
@@ -4095,6 +4109,13 @@ def test_gates():
         asyncio.run(commands.handle(None, _FakeMessage(h.channel, "!paid", author=h.kevin)))
         check(tracking.owed_entry(8980).get("paid") is True, "Kevin's `!paid` in the same ticket does mark it paid")
 
+        # `!help` is public, but its admin block is for Kevin only
+        del h.channel.sent[:]
+        asyncio.run(commands.handle(None, _FakeMessage(h.channel, "!help", author=_FakeUser(uid=4242, name="custticket"))))
+        check(len(h.channel.sent) == 1 and "Admin" not in h.channel.sent[0] and "!void" not in h.channel.sent[0]
+              and "!owe" not in h.channel.sent[0],
+              "!help from a customer: the public lines only — no admin command list")
+
         # 2) The bot never answers a bot (itself included), whatever the message says.
         del h.channel.sent[:], h.kevin.dms[:]
         h.price_args = None
@@ -4248,6 +4269,31 @@ def test_alerts_and_lanes():
             kd = "\n".join(h.kevin.dms)
             check("can't authenticate to pricing** in #ticket-a" in kd and "can't authenticate to pricing** in #ticket-b" in kd,
                   "pricing-auth alert: both tickets are reported inside one alert window")
+            # a cut-off quote in two tickets inside one window: both reported
+            sheets_mod.create_psa_sheet = lambda username, cert_tokens, folder_id=None: ("u", "n", {})
+            long_rows = lambda cl: [PricedRow(cert=c, cert_id=c, category="basketball", market_value=450, value=450,
+                                              decision="PASS", reason="outside the price range we are buying right now")
+                                    for c in cl]
+            h.rows = long_rows
+            many = " ".join(str(30000000 + i) for i in range(90))
+            del h.kevin.dms[:]
+            for ch in (h.channel, other):
+                real_send, n_sent = ch.send, []
+
+                async def _second_fails(text, _real=real_send, _n=n_sent):
+                    if len(_n) == 1:
+                        raise RuntimeError("discord 503")
+                    _n.append(1)
+                    await _real(text)
+                ch.send = _second_fails
+                try:
+                    asyncio.run(botmod._handle_message(_FakeMessage(ch, many)))
+                except RuntimeError:
+                    pass
+                ch.send = real_send
+            kd = "\n".join(h.kevin.dms)
+            check("#ticket-a: the quote was only PARTLY posted" in kd and "#ticket-b: the quote was only PARTLY posted" in kd,
+                  "cut-off quote alert: both tickets are reported inside one alert window")
         finally:
             h.tickets._known.discard(8971)
             botmod._welcomed.discard(8971)
@@ -4386,7 +4432,7 @@ def test_alerts_and_lanes():
     chan = _LanesChan()
     saved = (cfg.LANES_BOARD, cfg.LANES_CHANNEL_ID)
     cfg.LANES_BOARD, cfg.LANES_CHANNEL_ID = True, 4444
-    botmod.bot.get_channel = lambda _cid: chan
+    botmod.bot.get_channel = lambda cid: chan if int(cid) == 4444 else None     # id-aware
     st = lambda: tracking.state.load("lanes_board", dict)
 
     def run(coro):
@@ -4448,6 +4494,35 @@ def test_canary_error_age():
           "canary: 'Z' timestamps are understood")
     # the default window covers TWO hourly runs: with 90 minutes an error recorded just after
     # a run was inside the window for exactly one later run, so a late or dropped run hid it
+    import json as _json
+    real_get, real_key, real_cert, real_fails = canary._get, canary.KEY, canary.CERT, list(canary._fails)
+
+    def _run_canary(flags, last_error=None):
+        """canary.main() against a faked /health + /status (no request leaves the process)."""
+        def _fake_get(path_, key=None, timeout=25):
+            if path_ == "/health":
+                return 200, "KTS botv2 — OK · started 2026-11-10T12:00:00+00:00"
+            return 200, _json.dumps({"ok": True, "last_error": last_error, "flags": flags})
+        canary._get, canary.KEY, canary.CERT = _fake_get, "selftestkey", ""
+        del canary._fails[:]
+        try:
+            canary.main()
+            return 0, list(canary._fails)
+        except SystemExit as e:
+            return e.code, list(canary._fails)
+        finally:
+            canary._get, canary.KEY, canary.CERT = real_get, real_key, real_cert
+            canary._fails[:] = real_fails
+    code, fails = _run_canary({"price_mock": False, "kevin_dm": True, "unreadable_stores": []})
+    check(code == 0 and not fails, "canary run: a healthy bot passes")
+    code, fails = _run_canary({"price_mock": True, "kevin_dm": True})
+    check(code == 1 and any("FAKE" in f for f in fails), "canary run: mock pricing on the live bot fails the run")
+    code, fails = _run_canary({"price_mock": False, "data_dir_default": True, "stuck_stores": ["welcomed"]})
+    check(code == 1 and any("DATA_DIR" in f and "RESTARTED" in f for f in fails),
+          "canary run: standing storage problems fail the run (and say a restart is needed)")
+    code, fails = _run_canary({"price_mock": False}, last_error={"key": "sheet_fail:1", "text": "x",
+                                                                 "at": "2020-01-01T00:00:00+00:00"})
+    check(code == 0, "canary run: an old last_error alone does not fail the run")
     check(canary.ERROR_MAX_AGE_MIN == 150 and canary.is_fresh_error(at(119), now) is True
           and canary.is_fresh_error(at(151), now) is False,
           "canary: by default an error stays red for two hourly runs (150 min), then clears")

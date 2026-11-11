@@ -9,7 +9,9 @@ Source of truth: `botv2/portal_client.py` (+ endpoint URLs in `botv2/config.py`)
 Prices certs against Triumph's scanner. The decision is authoritative (already reflects live Triumph allocation).
 
 **Request:** `{ "certs": ["<cert>", …], "customer"?: "<discord_username>", "rateOverride"?: <rare manual %> }`
-(certs are chunked; `customer` is the raw Discord username used for VIP matching.)
+(certs are chunked; `customer` is the key used for VIP matching. NOTE: the bot currently sends the ticket's
+cleaned-up channel name — the seller's username with dots / symbols dropped, e.g. `j.smith` → `jsmith` — not
+the raw Discord username. Changing that is an open decision for Kevin: it changes who gets VIP rates.)
 
 **Response:** `{ "rows": [ <row>, … ], "customerMatched": <bool> }`
 

@@ -798,9 +798,12 @@ async def _handle_message(message) -> None:
 
     username = tickets.sanitize_channel_name(channel.name) or message.author.name
     # VIP is portal-sourced. Kevin requires every KTS-app user to enter their Discord
-    # username, so the portal's VIP section is keyed by it — send the RAW Discord
-    # username (message.author.name) as the match key (the sanitized channel name
-    # strips dots and could miss). `username` stays the sheet/display identity.
+    # username, so the portal's VIP section is keyed by it. The INTENT written here was to
+    # send the RAW Discord username (message.author.name) as the match key, since the
+    # sanitized channel name strips dots and could miss — but the pricing call below sends
+    # `username` (the sanitized channel name) and `customer` is never used. Deliberately left
+    # as it is: switching the key changes which sellers get VIP rates, so it is Kevin's
+    # decision (the selftest pins what is sent today).
     customer = message.author.name or username
     rate_override = vip.override_for(username)   # rare manual one-off; usually None
 

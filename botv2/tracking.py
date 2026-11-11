@@ -129,20 +129,18 @@ def _project_owed(channel_id, ledger: dict, existing_owed: dict, base: dict, tic
     # keep the paid lot's ship date and tracking number, so Kevin's digest / `!owe` showed the
     # new balance with last time's date and number (and the stale check aged it from then).
     reopened = bool(eo.get("paid")) and payout > 0
-    # paid_tracking = the number that belongs to the lot that was PAID (mark_paid writes the key
-    # every time, None when the number on file was not that lot's). A paid row WITHOUT the key
-    # was paid before the key existed: whatever number it holds is the paid lot's.
-    known = "paid_tracking" in eo
-    paid_trk = eo.get("paid_tracking")
-    if reopened and not known and eo.get("tracking"):
-        paid_trk, known = eo.get("tracking"), True
+    paid_trk = eo.get("paid_tracking")               # the number on file when it was last paid
     trk = eo.get("tracking") or tk.get("tracking") or (tk.get("delivery") or {}).get("number")
     if payout > 0 and trk and paid_trk and trk == paid_trk:
         trk = None                                   # that number belongs to the already-paid lot
+    # A row that was paid BEFORE paid_tracking existed still holds a number nobody can
+    # attribute. It is left exactly as the code before this change showed it (old date + old
+    # number, visibly stale) rather than given today's date next to last month's number.
+    fresh_date = reopened and not (trk and not paid_trk)
     row = {
         "id": f"owed_{channel_id}", "channel_id": channel_id,
         "user": base.get("user") or eo.get("user", ""),
-        "date": base.get("date") if reopened else (eo.get("date") or base.get("date")),
+        "date": base.get("date") if fresh_date else (eo.get("date") or base.get("date")),
         "status": "accepted",
         "paid": payout == 0,
         "certs": {c: e["comp"] for c, e in accepted.items()},
@@ -150,7 +148,7 @@ def _project_owed(channel_id, ledger: dict, existing_owed: dict, base: dict, tic
         "payout": payout, "comp": comp, "cards": cards,
         "tracking": trk,
     }
-    if known:
+    if paid_trk:
         row["paid_tracking"] = paid_trk
     row["paid_date"] = eo.get("paid_date") if row["paid"] else None
     return row
@@ -406,31 +404,18 @@ def record_tracking(channel_id, tracking_num: str) -> bool:
     local tracker + ops dashboard already read that. Never clobbers a 'delivered'
     state when the same number is re-dropped."""
     hit = False
-    unbooked = unbooked_quoted(channel_id)[0] > 0        # cards quoted on this ticket, not yet booked
     for store, key in (("tickets", f"tk_{channel_id}"), ("owed", f"owed_{channel_id}")):
         data = state.load(store, list)
         changed = False
         for r in data:
             if r.get("id") == key:
-                prev = r.get("tracking")
                 r["tracking"] = tracking_num
                 if store == "owed" and not r.get("paid"):
                     # A number posted while a balance is unpaid belongs to THAT lot — even if
                     # it equals the number the previous, paid lot shipped under (two batches
                     # in one box). Forget the "paid lot's number" so _project_owed keeps it.
                     r.pop("paid_tracking", None)
-                    # …unless it is a SECOND, different number while other cards on the ticket
-                    # are quoted but not booked: that is most likely the NEXT lot's package.
-                    # Remember it, so paying the booked lot doesn't file this number under it
-                    # (mark_paid) and then hide it when the next lot is booked.
-                    if prev and prev != tracking_num and unbooked:
-                        r["tracking_for_next"] = tracking_num
-                    else:
-                        r.pop("tracking_for_next", None)
-                elif store == "owed" and "paid_tracking" not in r:
-                    # Paid before paid_tracking existed, and the number is being replaced:
-                    # the one it replaces was the paid lot's.
-                    r["paid_tracking"] = prev
+                    r.pop("tracking_for_next", None)     # (a field an earlier build of this branch wrote)
                 if store == "tickets":
                     d = r.get("delivery") or {}
                     # Only (re)open an in_transit record when the NUMBER actually changes.
@@ -615,11 +600,12 @@ def mark_paid(channel_id) -> bool:
         if r.get("id") == f"owed_{channel_id}":
             r["paid"] = True
             r["paid_date"] = date.today().isoformat()
-            # Remember which number belongs to the lot being paid, so a later lot on this
-            # ticket doesn't inherit it. Always written (None = "the number on file is not this
-            # lot's": it was posted as a second number while the next lot was quoted, not booked).
-            nxt = r.pop("tracking_for_next", None)
-            r["paid_tracking"] = None if (nxt and nxt == r.get("tracking")) else r.get("tracking")
+            # Remember the number on file as the paid lot's, so a later lot on this ticket
+            # doesn't inherit it. A lot paid WITHOUT a number of its own keeps the one already
+            # remembered (the ticket row still carries that older box).
+            if r.get("tracking"):
+                r["paid_tracking"] = r["tracking"]
+            r.pop("tracking_for_next", None)
             hit = True
     if not hit:
         return False
@@ -1031,8 +1017,12 @@ def record_quote(channel_id, snapshot: dict, channel_name: str = "",
     }
     if review:
         rec["review_overlaps"] = review
-    if _upsert("tickets", rec):                       # only reactivate the channel (clear the voided
-        clear_voided(channel_id)                      # guard) once the replacement quote DURABLY persists
+    if not _upsert("tickets", rec):
+        # The stored ticket still holds those cards as quoted, so nothing was really dropped:
+        # telling the caller otherwise took their lane out of the ship reply (and told Kevin
+        # "won't be booked") while a ship would still book them.
+        return []
+    clear_voided(channel_id)      # reactivate the channel only once the replacement quote is DURABLE
     return dropped
 
 
@@ -1065,19 +1055,6 @@ def _as_date(s):
         return None
 
 
-def _delivery_of_paid_lot(ticket: dict, owed: dict) -> bool:
-    """True when the tracking number / delivery record on the TICKET belongs to a lot that
-    has already been PAID, while the owed row now carries a new unpaid balance and no number
-    has been posted for it yet. (The owed row drops that number in _project_owed; the ticket
-    row keeps describing the old box until a new number arrives.) The new lot is then neither
-    "in transit under that number" nor "delivered"."""
-    if not owed or owed.get("paid") or owed.get("tracking"):
-        return False
-    paid_trk = str(owed.get("paid_tracking") or "").upper()
-    num = str((ticket.get("delivery") or {}).get("number") or ticket.get("tracking") or "").upper()
-    return bool(paid_trk) and num == paid_trk
-
-
 def stale_tickets(today) -> dict:
     """PURE — takes `today` (a date) so it's deterministic for tests (never calls
     date.today() itself). Flags tickets stuck too long in a stage, for Kevin's daily
@@ -1094,11 +1071,7 @@ def stale_tickets(today) -> dict:
         cid = t.get("channel_id")
         user = t.get("user", "")
         o = owed.get(cid)
-        # A "delivered" that belongs to the previous, already-paid lot says nothing about the
-        # new one: without this a second lot was reported as "delivered, still unpaid" — aged
-        # from the FIRST box's delivery — the day it shipped.
-        delivered = ((t.get("delivery") or {}).get("status") == "delivered"
-                     and not _delivery_of_paid_lot(t, o))
+        delivered = (t.get("delivery") or {}).get("status") == "delivered"
         if o is None:                                  # never shipped → age from the quote
             qd = _as_date(t.get("quoted_at")) or _as_date(t.get("date"))
             days = (today - qd).days if qd else None
@@ -1147,7 +1120,6 @@ def ops_view(channel_sheet: dict = None, detail: bool = False) -> list:
     for t in state.load("tickets", list):
         cid = t.get("channel_id")
         o = owed.get(f"owed_{cid}", {})
-        old_box = _delivery_of_paid_lot(t, o)          # the ticket still shows the PAID lot's box
         row = {
             "channel_id": cid,
             "name": t.get("channel_name") or t.get("user") or "",
@@ -1157,9 +1129,9 @@ def ops_view(channel_sheet: dict = None, detail: bool = False) -> list:
             "sheet_url": channel_sheet.get(str(cid), ""),
             "claimed": t.get("claimed"),
             "shipped": bool(o),
-            "tracking": "" if old_box else (t.get("tracking") or o.get("tracking") or ""),
-            "delivered": (not old_box) and (t.get("delivery") or {}).get("status") == "delivered",
-            "delivered_at": None if old_box else (t.get("delivery") or {}).get("delivered_at"),
+            "tracking": t.get("tracking") or o.get("tracking") or "",
+            "delivered": (t.get("delivery") or {}).get("status") == "delivered",
+            "delivered_at": (t.get("delivery") or {}).get("delivered_at"),
             "owed": o.get("payout") if o else None,
             "paid": bool(o.get("paid")) if o else None,
             "paid_date": o.get("paid_date"),

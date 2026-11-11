@@ -54,8 +54,11 @@ body {"certs":[...≤200], "customer"?: "<discord_username>", "rateOverride"?: {
 row = {certId, grader, grade, cardTitle, imageUrl, category, marketValue, lastSale,
        status, rejectionReason, clConfidence, decision, offer, reason, vip}
 ```
-VIP is single-source in the portal: `customer` = the raw Discord username (Kevin
-requires it at signup); the portal matches its VIP section case-insensitively and
+VIP is single-source in the portal. What the bot sends as `customer` TODAY is the ticket's
+cleaned-up channel name (normally the seller's username with dots / symbols dropped:
+`j.smith` → `jsmith`), not the raw Discord username; whether to send the raw username
+instead is an open decision for Kevin, because it changes which sellers get VIP rates.
+The portal matches its VIP section case-insensitively and
 applies that seller's rates (per-row `vip`). Precedence: explicit `rateOverride`
 > `customer` VIP > public. `payoutCents`/`memberMultiplier` never leave the portal.
 
@@ -92,8 +95,9 @@ portal does allocation.
 ## Decisions (settled)
 - **Sheet payout**: the portal's number written straight in (H = offer rate); no
   local band formula — the portal is the source of truth. Editing a comp = re-quote.
-- **VIP**: single-source in the portal, keyed by the raw Discord username the bot
-  sends; the portal applies it. A local manual override remains for a one-off.
+- **VIP**: single-source in the portal, matched on the `customer` the bot sends (today the
+  ticket's cleaned-up channel name — see above); the portal applies it. A local manual
+  override remains for a one-off.
 
 ## Still open
 - *(Both pre-cutover items are done: v2 prices against the live `/bot/price` and is
