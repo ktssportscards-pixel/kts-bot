@@ -840,6 +840,15 @@ def test_state_persistence():
         state.load("zz_future", list)
         check(len(glob.glob(path("zz_future") + ".corrupt-*")) == 7,
               "state: kept copies stamped in the future do not block today's copy")
+        # …nor do EMPTY files with a fresh stamp (what a failed copy left behind before it was
+        # cleaned up, or anything else that put a zero-byte file there): they keep nothing
+        for i in range(6):
+            open(path("zz_empties") + f".corrupt-{state._stamp()}", "w").close()
+        with open(path("zz_empties"), "w") as f:
+            f.write("real garbage worth keeping")
+        state.load("zz_empties", list)
+        check(any(open(c).read() == "real garbage worth keeping" for c in glob.glob(path("zz_empties") + ".corrupt-*")),
+              "state: six empty 'copies' from today do not use up the allowance — the real bytes are still kept")
         # kept-copy names never collide, even inside one clock tick
         class _FrozenClock(datetime):
             @classmethod
