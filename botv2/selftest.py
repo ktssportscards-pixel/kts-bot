@@ -2563,6 +2563,38 @@ def test_lot_routing():
               "ship after that: only the hub for cards we're still buying (Doral used to be listed too)")
         check(next(r for r in tracking.state.load("owed", list) if r["id"] == "owed_9302")["payout"] == 72.0,
               "…and only the still-accepted card is owed (ledger behaviour unchanged)")
+    # …but a card that ALREADY SHIPPED is locked in the ledger (still owed), so a later
+    # re-quote that declines it must NOT take its hub away. (The first version of this fix
+    # removed every declined card: a sports lot's next ship reply fell back to the Pokémon
+    # hub while the ledger still owed the sports cards.)
+    state["pass_hoop"] = False
+    with _BotHarness(9303, name="hoops", rows=requote, sheet_url=URL % 9303) as h:
+        h.say("12345678 23456789")
+        h.say("ship")
+        check("Doral" in h.channel.sent[-1] and lots.value_by_lane(9303) == (0.0, 600.0),
+              "shipped sports lot: Doral address, both cards in the lot")
+        state["pass_hoop"] = True
+        h.say("12345678 23456789")                          # re-listed; the portal now declines them
+        check(lots.value_by_lane(9303) == (0.0, 600.0),
+              "re-quote PASS on cards that already shipped: they stay in the running lot (ledger still owes them)")
+        del h.channel.sent[:]
+        h.say("still ship?")
+        check(h.channel.sent and "Doral" in h.channel.sent[0] and "Virginia Beach" not in h.channel.sent[0],
+              "ship after that: still the sports hub (it had fallen back to Virginia Beach)")
+        check(next(r for r in tracking.state.load("owed", list) if r["id"] == "owed_9303")["payout"] == 540.0,
+              "…and the shipped cards are still owed in full")
+    # mixed: the shipped sports card is declined on a re-quote that adds a new Pokémon card
+    state["pass_hoop"] = False
+    with _BotHarness(9304, name="mixedshipped", rows=requote, sheet_url=URL % 9304) as h:
+        h.say("12345678 CGC 6193949247")
+        h.say("ship")
+        state["pass_hoop"] = True
+        h.say("12345678 CGC 6193949248")
+        del h.channel.sent[:]
+        h.say("ship")
+        check("Virginia Beach" in h.channel.sent[0] and "Doral" in h.channel.sent[0],
+              "mixed lot: a shipped sports card declined later keeps its hub next to the Pokémon one")
+    state["pass_hoop"] = False
     lots.remove_certs(424242, ["x"])                        # unknown channel: no error
     for st in ("tickets", "owed", "channel_sheet", "channel_sheets", "voided", "void_cutoff"):
         tracking.state.save(st, {} if st in ("channel_sheet", "channel_sheets", "void_cutoff") else [])

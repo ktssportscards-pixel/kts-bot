@@ -40,7 +40,9 @@ def add_slab_values(cid, cert_value: dict, cert_category: dict = None) -> None:
 def remove_certs(cid, certs) -> None:
     """Take cards OUT of the running lot (a re-quote that declined a card we had quoted). The
     lot only ever grew, so a declined card kept its lane in the ship reply — a customer could
-    be told to send a second package to a hub for a card we are no longer buying."""
+    be told to send a second package to a hub for a card we are no longer buying.
+    Pass only what the ledger dropped (tracking.record_quote's return): a card that already
+    shipped stays owed whatever a later re-quote says, so it must keep its lane."""
     e = _lots.get(cid)
     if not e:
         return

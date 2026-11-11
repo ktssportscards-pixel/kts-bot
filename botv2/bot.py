@@ -722,9 +722,6 @@ async def _handle_message(message) -> None:
     lots.add_slab_values(
         channel.id, _lot_values(quote.accepted),
         {r.cert: r.category for r in quote.accepted})
-    # A card this re-quote declined leaves the running lot too (the ledger already drops it),
-    # so its lane no longer shows up in the ship instructions.
-    lots.remove_certs(channel.id, [r.cert for r in quote.rejected])
     _last_quote[channel.id] = {
         "username": username, "comp": quote.comp_total, "payout": quote.payout_total,
         "cards": quote.n_accepted,
@@ -738,6 +735,11 @@ async def _handle_message(message) -> None:
                       "grader": r.grader, "grade": r.grade, "name": (r.card_name or "")[:60]}
                      for r in quote.accepted],
         passed=[r.cert for r in quote.rejected])   # explicit PASS drops a re-quoted card (combine-all)
+    # The running lot follows the LEDGER: exactly the cards it just dropped (still-'quoted' cards
+    # this re-quote declined) leave the lot, so their lane no longer shows in the ship
+    # instructions. A card that already shipped is locked in the ledger — still owed — and
+    # keeps its lane even if a later re-quote declines it.
+    lots.remove_certs(channel.id, retracted)
     # The buying sheet is built further down, off the customer's path, and can take a minute
     # or more. Remember the channel's cancellation cutoff as of THIS quote: it only ever moves
     # when a void runs, so a different value after the build means the quote was voided meanwhile.
