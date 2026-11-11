@@ -79,8 +79,10 @@ plus optional `"force": true`. **Prefer `channel_id`.**
 | HTTP 400 `{error}` | Bad JSON / not an object / both or neither target / bad `channel_id` / blank `user` / non-boolean `force`. |
 | HTTP 401 | Missing/wrong `x-bot-key` (or `BOT_API_KEY` unset on the bot). |
 
-Idempotent: repeating a void is safe. The call waits for the Drive trash attempt: about 20 s for the Apps
-Script call, and up to a minute more if that fails and the direct Drive fallback runs — size the caller's
-timeout for that. Code wins on drift: `botv2/webserver.py::_void` + `botv2/tracking.py::void_ticket`.
+Repeating a void of the same quote is safe — but a void **by `channel_id`** always targets whatever quote is
+open in that channel now: if the customer has re-quoted since the first call, a retry voids the NEW quote.
+The call waits for the Drive trash attempt: about 20 s for the Apps Script call, and if that fails the direct
+Drive fallback can add a minute or two more (it is not bounded by one timeout) — size the caller's timeout
+generously. Code wins on drift: `botv2/webserver.py::_void` + `botv2/tracking.py::void_ticket`.
 
 **Removed 2026-11-06:** the old `/owed` `/tickets` `/leaderboard` `/links` reads (retired v1 local tracker; portal uses `/ops`). If anything portal-side still hits those, switch it to `/ops`.

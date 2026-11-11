@@ -31,13 +31,20 @@ def _hard_split(line: str, limit: int) -> list:
         n = 2 if ord(ch) > 0xFFFF else 1
         if cur and cur_n + n > limit:
             cut = len(cur)
-            floor_n, run_n = limit * _WORD_MIN_FRACTION, cur_n
-            for i in range(len(cur) - 1, 0, -1):
-                if cur[i] in " ,":
-                    if run_n >= floor_n:
-                        cut = i + 1
+            floor_n = limit * _WORD_MIN_FRACTION
+            # Prefer the last COMMA (an item boundary: "CGC 61…, CGC 62…" must not be cut
+            # between a label and its number), then the last space; either only if the piece
+            # stays at least half full.
+            for breaks in (",", " "):
+                run_n, found = cur_n, False
+                for i in range(len(cur) - 1, 0, -1):
+                    if cur[i] in breaks:
+                        if run_n >= floor_n:
+                            cut, found = i + 1, True
+                        break
+                    run_n -= 2 if ord(cur[i]) > 0xFFFF else 1
+                if found:
                     break
-                run_n -= 2 if ord(cur[i]) > 0xFFFF else 1
             out.append("".join(cur[:cut]))
             cur = cur[cut:]
             cur_n = _units("".join(cur))

@@ -382,6 +382,13 @@ def test_textsplit():
           and "".join(cparts) == cert_line,
           "split: a long comma-separated line is cut between numbers, not through one")
 
+    # …and never between a "CGC" label and its number (the cut prefers the comma)
+    cgc_line = "REMOVED: " + ", ".join(f"CGC {6100000000 + i}" for i in range(300))
+    cgc_parts = sm(cgc_line)
+    check(len(cgc_parts) > 1 and all(not x.rstrip().endswith("CGC") for x in cgc_parts)
+          and "".join(cgc_parts) == cgc_line,
+          "split: a long list of 'CGC <number>' items is cut after a comma, never between the label and its number")
+
     # the parts of one message go out together — two long messages to the same place can't
     # interleave (one seller's cards under another seller's header), other places aren't held up
     class _SlowTarget:
@@ -3606,6 +3613,16 @@ def test_ship_booking():
     tracking.record_accepted_ship(9213, snap("shipfirst", "u3"))
     check(owed_row(9213)["tracking"] is None and "no tracking yet" in digest_line("shipfirst"),
           "ship before paid: the lot after it does not inherit the paid box's number")
+    # the comparison ignores case ("1z…" re-typed for the paid box is still the paid box)
+    tracking.record_quote(9214, snap("casey", "c1"), channel_name="casey")
+    tracking.record_accepted_ship(9214, snap("casey", "c1"))
+    tracking.record_tracking(9214, "1ZCASEBOXCASEBOX11")
+    tracking.mark_paid(9214)
+    tracking.record_quote(9214, snap("casey", "c2"), channel_name="casey")
+    tracking.record_tracking(9214, "1zcaseboxcasebox11")                      # re-typed in lower case, row still paid
+    tracking.record_accepted_ship(9214, snap("casey", "c2"))
+    check(owed_row(9214)["tracking"] is None,
+          "the paid box's number re-typed in another case is still recognised as the paid box's")
     # (c) a number posted for the next lot AFTER the payment (row still paid) is the new lot's
     tracking.record_quote(9215, snap("afterpaid", "a1"), channel_name="afterpaid")
     tracking.record_accepted_ship(9215, snap("afterpaid", "a1"))

@@ -119,7 +119,9 @@ def _project_owed(channel_id, ledger: dict, existing_owed: dict, base: dict, tic
     """Build the owed store row from the ledger: payout = the OUTSTANDING balance
     (accepted + unpaid, plus any still-unpaid carried legacy lots). paid=True once
     nothing is outstanding. Keeps the tracking + ship date already on the row, falling
-    back to the ticket's tracking when none was carried (a number dropped before ship)."""
+    back to the ticket's tracking when none was carried (a number dropped before ship) —
+    except on a row that was PAID and now carries a new lot: it gets the new ship date, and
+    the number filed under the paid lot (paid_tracking) is not shown against the new one."""
     payout, comp, cards = _sum_ledger(ledger, ("accepted",))
     accepted = {c: e for c, e in (ledger or {}).items()
                 if c != _CARRIED and e.get("status") == "accepted"}
@@ -131,7 +133,7 @@ def _project_owed(channel_id, ledger: dict, existing_owed: dict, base: dict, tic
     reopened = bool(eo.get("paid")) and payout > 0
     paid_trk = eo.get("paid_tracking")               # the number on file when it was last paid
     trk = eo.get("tracking") or tk.get("tracking") or (tk.get("delivery") or {}).get("number")
-    if payout > 0 and trk and paid_trk and trk == paid_trk:
+    if payout > 0 and trk and paid_trk and str(trk).upper() == str(paid_trk).upper():
         trk = None                                   # that number belongs to the already-paid lot
     # A row that was paid BEFORE paid_tracking existed still holds a number nobody can
     # attribute. It is left exactly as the code before this change showed it (old date + old
