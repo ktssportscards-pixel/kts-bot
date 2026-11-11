@@ -40,19 +40,29 @@ def _remember_welcomed(cid: int) -> None:
         state.save("welcomed", sorted(_welcomed))
 
 
+async def _dm_kevin(text: str) -> tuple:
+    """DM Kevin. Returns (messages delivered, messages the text needed); (0, 0) when there is
+    nothing to send or no Kevin is configured. Never raises. A long text that fails part-way
+    comes back as e.g. (1, 3) — some of it IS in his DMs."""
+    if not config.KEVIN_USER_ID:
+        return (0, 0)
+    try:
+        user = bot.get_user(config.KEVIN_USER_ID) or await bot.fetch_user(config.KEVIN_USER_ID)
+        n = await textsplit.send_chunked(user, text)
+        return (n, n)
+    except Exception as e:
+        print(f"[bot] ping_kevin failed (non-fatal): {e}")
+        sent, total = textsplit.sent_before_failure(e)
+        return (sent, max(total, 1))
+
+
 async def ping_kevin(text: str) -> bool:
     """DM Kevin. Best-effort — a failed DM never blocks a customer quote. Discord rejects
     a message over 2,000 characters outright, so long text (a big lot's summary, the
     Friday digest, a stale-ticket digest) goes out as several messages instead of being
     dropped. True only if there was something to send and every part was delivered."""
-    if not config.KEVIN_USER_ID:
-        return False
-    try:
-        user = bot.get_user(config.KEVIN_USER_ID) or await bot.fetch_user(config.KEVIN_USER_ID)
-        return await textsplit.send_chunked(user, text) > 0
-    except Exception as e:
-        print(f"[bot] ping_kevin failed (non-fatal): {e}")
-        return False
+    sent, total = await _dm_kevin(text)
+    return total > 0 and sent == total
 
 
 async def alert_kevin(key: str, text: str) -> bool:
@@ -348,11 +358,14 @@ async def _send_digest(kind: str, digest: str) -> bool:
     a short alert (it may fail the same way, but it is short and it is recorded for /status)."""
     if not digest:
         return True
-    if await ping_kevin(digest):
+    sent, total = await _dm_kevin(digest)
+    if total and sent == total:
         return True
+    what = (f"Only the first {sent} of {total} messages of this {kind} digest reached your DMs — "
+            f"the rest could NOT be delivered" if sent
+            else f"This {kind} digest could NOT be delivered to your DMs")
     await alert_kevin(f"digest_send:{kind}",
-                      f"⚠️ This {kind} digest could NOT be delivered to your DMs "
-                      f"({len(digest):,} characters). " +
+                      f"⚠️ {what} ({len(digest):,} characters). " +
                       ("Run `!owe` for the unpaid queue." if kind == "payout"
                        else "Run `!stalecheck` to see it."))
     return False
@@ -733,7 +746,20 @@ async def _handle_message(message) -> None:
     # instant. A long quote (many declined cards listed one per line) is split across
     # messages — one over Discord's 2,000-char cap is rejected whole, which used to abort
     # this handler here: no quote for the customer, no sheet, no summary for Kevin.
-    await textsplit.send_chunked(channel, pricing.customer_message(quote, proceed_override=proceed))
+    try:
+        await textsplit.send_chunked(channel, pricing.customer_message(quote, proceed_override=proceed))
+    except Exception as e:
+        posted, of = textsplit.sent_before_failure(e)
+        if posted:
+            # Part of a multi-message quote is up and the rest is not. The generic on_message
+            # alert (raised below, as before) would not tell Kevin a cut-off quote is showing.
+            await alert_kevin(f"quote_partial:{channel.id}",
+                              f"⚠️ #{channel.name}: the quote was only PARTLY posted ({posted} of {of} "
+                              f"messages) before Discord refused the rest ({e}). The customer is looking "
+                              f"at a cut-off quote. The quoted cards ARE recorded on the ticket, but no "
+                              f"buying sheet was built and no summary follows — it needs a re-send of "
+                              f"the certs.")
+        raise
     if retracted:
         # The customer was just told these don't fit — but they HAD an earlier BUY quote on
         # them. Make the retraction visible to Kevin (the summary only shows "rejected").

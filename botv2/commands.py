@@ -443,22 +443,29 @@ async def handle(bot, message) -> bool:
             return True
         user = parts[1].lstrip("@") if len(parts) > 1 else None
         packet = tracking.build_owe_packets(user)
+        in_guild = getattr(channel, "guild", None) is not None
+        if in_guild:
+            # The command can name a seller: take it out of the channel BEFORE the packets go
+            # out (a long list is several rate-limited DMs), and whether or not they arrive.
+            try:
+                await message.delete()
+            except Exception:
+                pass
         # Packets carry wire details → DM only, never a channel.
         try:
             await textsplit.send_chunked(message.author, packet)
         except Exception as e:
             print(f"[cmd] !owe DM failed: {e}")
-            if getattr(channel, "guild", None) is not None:
+            got, _of = textsplit.sent_before_failure(e)
+            if in_guild:
                 try:
-                    await channel.send("⚠️ Couldn't DM you — open your DMs to the bot and retry.")
+                    await channel.send("⚠️ Only part of the list reached your DMs — run `!owe` again."
+                                       if got else
+                                       "⚠️ Couldn't DM you — open your DMs to the bot and retry.")
                 except Exception:
                     pass
             return True
-        if getattr(channel, "guild", None) is not None:
-            try:
-                await message.delete()
-            except Exception:
-                pass
+        if in_guild:
             try:
                 await channel.send("💸 Payment packet(s) sent to your DMs.")
             except Exception:

@@ -285,9 +285,19 @@ def test_textsplit():
     sm, units = textsplit.split_message, _discord_len
     check(sm("hello") == ["hello"], "split: short text is one unchanged message")
     check(sm("") == [] and sm(None) == [] and sm("  \n ") == [], "split: nothing to send → no messages")
-    edge = "a" * textsplit.SAFE_LIMIT
-    check(sm(edge) == [edge] and [len(x) for x in sm(edge + "a")] == [textsplit.SAFE_LIMIT, 1],
-          "split: exact-limit text stays whole; one over splits")
+    # Anything Discord accepts as it is (≤ 2,000) is sent exactly as before — ONE message.
+    # (The first version of this splitter cut at 1,900, turning a 1,901–2,000-character quote
+    # that used to arrive whole into two posts.)
+    for n in (1900, 1901, 1950, 2000):
+        whole = "a" * n
+        check(sm(whole) == [whole], f"split: a {n:,}-character message is still ONE unchanged message")
+    check([len(x) for x in sm("a" * 2001)] == [textsplit.SAFE_LIMIT, 2001 - textsplit.SAFE_LIMIT],
+          "split: one character over Discord's cap splits (packed to 1,900)")
+    emoji_edge = "🔗" * 1000                                        # 1,000 characters = 2,000 units
+    check(sm(emoji_edge) == [emoji_edge] and len(sm(emoji_edge + "🔗")) == 2,
+          "split: the cap is counted the way Discord counts it (UTF-16 units)")
+    check([len(x) for x in sm("a" * 50, 50)] == [50] and [len(x) for x in sm("a" * 51, 50)] == [50, 1],
+          "split: an explicit limit applies to both the fits-check and the packing")
     lines = [f"• `{10000000 + i}` — **$100.00** → $90.00 — {'Some Card Name Here ' * 2}{i} (PSA 10)"
              for i in range(120)]
     parts = sm("header line\n\n" + "\n".join(lines))
@@ -304,6 +314,62 @@ def test_textsplit():
     wide = sm("x" * 5000 + "\n" + "🔗" * 1500)
     check(all(units(x) <= 2000 for x in wide) and "".join(wide).replace("\n", "") == "x" * 5000 + "🔗" * 1500,
           "split: an over-long single line (and 2-unit emoji) is hard-split without loss")
+    # one very long comma-separated line (the "re-quote REMOVED n cards" DM): the cut falls
+    # between two cert numbers, never inside one
+    cert_line = "REMOVED: " + ", ".join(str(10000000 + i) for i in range(400))
+    cparts = sm(cert_line)
+    numbers = [tok for x in cparts for tok in x.replace("REMOVED:", "").replace(",", " ").split()]
+    check(len(cparts) > 1 and numbers == [str(10000000 + i) for i in range(400)]
+          and "".join(cparts) == cert_line,
+          "split: a long comma-separated line is cut between numbers, not through one")
+
+    # the parts of one message go out together — two long messages to the same place can't
+    # interleave (one seller's cards under another seller's header), other places aren't held up
+    class _SlowTarget:
+        def __init__(self, tid, log):
+            self.id, self.log = tid, log
+
+        async def send(self, text):
+            await asyncio.sleep(0)                                   # let the other sender run
+            self.log.append((self.id, text.split("|")[0]))
+
+    async def _two_at_once():
+        log = []
+        a, b = _SlowTarget(1, log), _SlowTarget(1, log)             # same destination id
+        other = _SlowTarget(2, log)
+        msg = lambda tag: "\n".join(f"{tag}| line {i} " + "x" * 80 for i in range(60))
+        await asyncio.gather(textsplit.send_chunked(a, msg("A")), textsplit.send_chunked(b, msg("B")),
+                             textsplit.send_chunked(other, msg("C")))
+        return log
+    log = asyncio.run(_two_at_once())
+    same = [tag for tid, tag in log if tid == 1]
+    check(len(same) >= 6 and same == sorted(same),
+          "send: two multi-part messages to one destination arrive one after the other, not interleaved")
+    first_c = next(i for i, (tid, _t) in enumerate(log) if tid == 2)
+    last_ab = max(i for i, (tid, _t) in enumerate(log) if tid == 1)
+    check(first_c < last_ab and not textsplit._send_locks,
+          "send: another destination is not held up, and no lock is left behind afterwards")
+
+    # a send that fails part-way says how far it got
+    class _FailsAt:
+        def __init__(self, n):
+            self.id, self.n, self.got = 99, n, []
+
+        async def send(self, text):
+            if len(self.got) + 1 == self.n:
+                raise RuntimeError("discord 503")
+            self.got.append(text)
+
+    async def _partial(n):
+        t = _FailsAt(n)
+        try:
+            await textsplit.send_chunked(t, "\n".join("y" * 90 for _ in range(60)))
+        except RuntimeError as e:
+            return textsplit.sent_before_failure(e), len(t.got)
+    (sent2, total2), got2 = asyncio.run(_partial(2))
+    check((sent2, got2) == (1, 1) and total2 >= 3 and asyncio.run(_partial(1))[0][0] == 0
+          and textsplit.sent_before_failure(ValueError("unrelated")) == (0, 0),
+          "send: a failure on part 2 reports that part 1 was delivered; other errors report nothing sent")
 
     # ping_kevin: a long DM arrives in parts instead of being rejected + swallowed
     from botv2 import bot as botmod
@@ -333,6 +399,37 @@ def test_textsplit():
             check(asyncio.run(commands.handle(None, km)) is True and
                   sum(x.count("Payment packet — seller") for x in h.kevin.dms) >= 40,
                   "!owe: every payment packet is delivered (was: one >2,000-char DM rejected)")
+
+            # Discord refuses the 2nd message of a long DM: say PART arrived, not "nothing did"
+            class _Flaky(_FakeUser):
+                fail_at = 2
+
+                async def send(self, text):
+                    if len(self.dms) + 1 == self.fail_at:
+                        raise RuntimeError("discord 503")
+                    await super().send(text)
+            flaky = _Flaky(uid=777, name="kevin")
+            botmod.bot.get_user = lambda _uid: flaky
+            alerts_mod = __import__("botv2.alerts", fromlist=["x"])
+            alerts_mod.reset()
+            ok_digest = asyncio.run(botmod._send_digest("payout", digest))
+            botmod.bot.get_user = lambda _uid: h.kevin
+            check(ok_digest is False and len(flaky.dms) == 1 and "Payout digest" in flaky.dms[0]
+                  and "Only the first 1 of" in ((alerts_mod.last_error() or {}).get("text") or "")
+                  and "could NOT be delivered to your DMs" not in ((alerts_mod.last_error() or {}).get("text") or ""),
+                  "digest: when only part of it arrives the alert says so (it used to say none of it did)")
+            flaky2 = _Flaky(uid=777, name="kevin")
+            gm = _FakeMessage(_fake_channel(8805, "some-ticket"), "!owe", author=flaky2)
+            asyncio.run(commands.handle(None, gm))
+            check(gm.deleted and len(flaky2.dms) == 1
+                  and gm.channel.sent == ["⚠️ Only part of the list reached your DMs — run `!owe` again."],
+                  "!owe in a channel: the command is removed first, and a part-delivered list is called that")
+            flaky3 = _Flaky(uid=777, name="kevin")
+            flaky3.fail_at = 1
+            gm3 = _FakeMessage(_fake_channel(8806, "some-ticket"), "!owe", author=flaky3)
+            asyncio.run(commands.handle(None, gm3))
+            check(gm3.deleted and gm3.channel.sent == ["⚠️ Couldn't DM you — open your DMs to the bot and retry."],
+                  "!owe in a channel: nothing delivered still says to open DMs")
     finally:
         tracking.state.save("owed", [])
 
@@ -362,6 +459,24 @@ def test_textsplit():
               "quote: Kevin's summary for the same lot arrives too (in parts)")
         check(any(r.get("id") == "tk_8804" for r in tracking.state.load("tickets", list)),
               "quote: ticket recorded")
+    tracking.state.save("tickets", [])
+
+    # Discord refuses the 2nd message of a long quote: the customer is left with a cut-off
+    # quote, and Kevin must be told THAT (the generic handler error doesn't say it).
+    with _BotHarness(8807, name="cutoff", rows=_rows, sheet_url="https://docs.google.com/spreadsheets/d/CUT8807/edit") as h:
+        real_send, posted_n = h.channel.send, []
+
+        async def _refuse_second(text):
+            if len(posted_n) == 1:
+                raise RuntimeError("discord 503")
+            posted_n.append(1)
+            await real_send(text)
+        h.channel.send = _refuse_second
+        h.say(big)
+        kd = "\n".join(h.kevin.dms)
+        check(len(h.errors) == 1 and len(h.channel.sent) == 1 and "PARTLY posted (1 of" in kd
+              and "cut-off quote" in kd and not h.sheet_calls,
+              "quote: a part-posted quote is reported to Kevin as cut off (handler still stops there, as before)")
     tracking.state.save("tickets", [])
 
 
