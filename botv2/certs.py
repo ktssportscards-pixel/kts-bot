@@ -1,11 +1,18 @@
 """
-certs — cert-token extraction (PSA + CGC), ported VERBATIM from v1.
+certs — cert-token extraction (PSA + CGC), ported from v1.
 
 PSA certs are bare 7-9 digit numbers. CGC certs come back as 'cgc:<digits>' tokens,
 detected by a grader label in front, or a CGC-shaped bare number in a CGC context.
 The context guards (tracking/phone/payment words, Discord timestamps, GIF links,
 the 3-word chatter cap) are hard-won — getting extraction wrong is a broken bot,
 so this is a faithful port, not an approximation. Pure/stdlib-only → fully testable.
+
+Two DELIBERATE deviations from v1 (2026-11-10) — do not "restore" v1 here:
+  1. a "PSA" label attached to a number is not counted as chatter (a list of four or more
+     "PSA 12345678" lines used to be dropped in silence);
+  2. a 7–9 digit number labelled BGS / SGC / TAG / Beckett is another grader's serial, not
+     a PSA cert, and is skipped (it used to be priced as the PSA card with that number).
+Everything else is v1's logic unchanged.
 """
 import re
 
@@ -70,7 +77,8 @@ def _strip_cert_noise(text: str) -> str:
 
 # ── extraction ────────────────────────────────────────────────────────────────
 def extract_certs(text: str) -> list:
-    """Cert tokens in a message, in order, deduped. (Verbatim v1 logic.)"""
+    """Cert tokens in a message, in order, deduped. (v1's logic, plus the two deviations
+    listed in the module docstring.)"""
     if not text:
         return []
     text = _strip_links(text)

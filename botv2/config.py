@@ -183,10 +183,12 @@ CUSTOMER_FORBIDDEN_WORDS = ("triumph", "poketrader", "pixel", "allocation", "dor
 
 def psa_folder_blank() -> bool:
     """True when PSA_FOLDER_ID is present but blank / whitespace. Buying sheets are then
-    created with an EMPTY folder id (the Apps Script falls back to its own default folder),
-    and psa_folder_unsafe() below — an equality check against v1's folder id — does not fire,
-    so the "refuse to write into v1's folder" safety net is bypassed. The bot only WARNS about
-    this (creation behaviour is unchanged); see the review notes for the stricter option."""
+    created with an EMPTY folder id (where the Apps Script then puts them is up to the script,
+    whose source is not in this repo), and psa_folder_unsafe() below — an equality check
+    against v1's folder id — does not fire, so the "refuse to write into v1's folder" safety
+    net is bypassed. The bot only WARNS about this; creation behaviour is unchanged. (Treating
+    blank as unset and refusing is a one-line change, deliberately left to Kevin: it would
+    switch sheet creation off if production's value happens to be blank today.)"""
     return not (PSA_FOLDER_ID or "").strip()
 
 

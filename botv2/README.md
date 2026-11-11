@@ -65,7 +65,7 @@ applies that seller's rates (per-row `vip`). Precedence: explicit `rateOverride`
 | `config.py` | env + tunables + confidential-field guard |
 | `portal_client.py` | **the price source** — `price_certs()` → `PricedRow`s (customer/VIP/override) |
 | `pricing.py` | aggregate rows → quote + customer/Kevin messages (no band logic) |
-| `certs.py` | cert + tracking-number extraction (verbatim v1 parser) |
+| `certs.py` | cert + tracking-number extraction (v1's parser, plus two documented deviations: a number-attached "PSA" label isn't chatter; other graders' short serials are skipped) |
 | `sheets.py` | buying-sheet create + fill (portal offer as a number) + tracking save |
 | `tickets.py` | overflow-proof ticket-channel registry |
 | `welcome.py` | one-time greeting |
@@ -76,7 +76,7 @@ applies that seller's rates (per-row `vip`). Precedence: explicit `rateOverride`
 | `payout_digest.py` | Friday 9am ET unpaid-owed digest DM to Kevin |
 | `commands.py` | `!ping` / `!help` + Kevin-only `!adopt` `!paid` `!resolve` `!void` `!bands` `!lanes` `!stats` `!stalecheck` `!payinfo` `!owe` `!synctracking` |
 | `webserver.py` | `/health` (public) + authed `/ops` `/status` `/analytics` `/delivery` `/void` (binds $PORT) |
-| `state.py` | atomic JSON persistence; keeps (never overwrites) a store it couldn't read and reports it |
+| `state.py` | atomic JSON persistence; a store it couldn't read is kept aside before it is replaced (identical bytes once, at most 5 new copies a day) and reported — including when a copy could NOT be kept |
 | `textsplit.py` | splits long text into Discord-sized messages (2,000-char cap) |
 | `alerts.py` / `canary.py` / `analytics.py` | Kevin alert rate-limiter + `/status` last error · live smoke test · volume/payout aggregates |
 | `bot.py` | Discord client, `on_message` router, entry |
@@ -97,7 +97,7 @@ portal does allocation.
 
 ## Still open
 - *(Both pre-cutover items are done: v2 prices against the live `/bot/price` and is
-  deployed via `botv2/railway.json`.)* Open decisions now live in Kevin's roadmap sheet.
+  deployed via `botv2/railway.json`.)* Open decisions are tracked outside this repo (Kevin's roadmap sheet).
 
 ## Backups of v1 (the months of proven work)
 - git tag `v1-stable-2026-11-04`, branch `v1-backup-2026-11-04`

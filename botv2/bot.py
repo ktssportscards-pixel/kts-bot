@@ -142,13 +142,13 @@ def _startup_storage_problems() -> list:
     """(key, text) alerts about configuration that silently loses or misplaces data — checked
     once at startup. Everything money-related (tickets, owed balances, payment info, void
     guards) is a JSON file under DATA_DIR; if that isn't a persistent, writable volume it is
-    lost silently. And a blank PSA_FOLDER_ID sends buying sheets to the Apps Script's default
-    folder while skipping the v1-folder safety check."""
+    lost silently. And a blank PSA_FOLDER_ID creates buying sheets with an empty folder id
+    (wherever the Apps Script then puts them) while skipping the v1-folder safety check."""
     out = []
     if config.psa_folder_blank():
         out.append(("psa_folder_blank",
                     "🚨 `PSA_FOLDER_ID` is set but BLANK — buying sheets are being created with an "
-                    "empty folder id (the Apps Script picks its own default folder) and the "
+                    "empty folder id (where they land is up to the Apps Script) and the "
                     "\"never write into v1's folder\" safety check is skipped. Set it to the real "
                     "buying-sheet folder id."))
     if config.DATA_DIR_IS_DEFAULT:

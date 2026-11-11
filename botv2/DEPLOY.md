@@ -20,8 +20,9 @@
 >   - *"remove `DISCORD_TOKEN` to take v2 offline"* — `config.py` reads `DISCORD_BOT_TOKEN`
 >     first, so that does nothing. To roll back, **redeploy a previous good build** in
 >     Railway (Deployments → Redeploy). Going all the way back to v1 means undoing the
->     cutover (service branch AND config-file path) — check the cutover notes for the exact
->     steps before relying on it in an incident.
+>     cutover in the Railway service settings (the watched branch AND the config-file
+>     path). Those steps are not recorded in this repo — write them down before you need
+>     them in an incident.
 >   - *"New service … v2's own bot token … a different Discord application"* — do not create
 >     a second service or a second bot.
 >   - The `/owed`, `/tickets`, `/leaderboard`, `/links` endpoints no longer exist; see
