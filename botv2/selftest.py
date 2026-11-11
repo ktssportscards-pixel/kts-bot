@@ -334,6 +334,20 @@ def test_textsplit():
     oparts = sm(owe)
     check(len(oparts) > 1 and all(sum(packet(i) in x for x in oparts) == 1 for i in range(14)),
           "split: prefers blank lines, so each payment packet stays in ONE message")
+    # a packet that FITS in a message is never cut, however the ones before it filled the
+    # message: its tail (wire details, no name) must not open the next message, right above
+    # another seller's packet. (The first splitter cut it when the text before the last blank
+    # line was under a quarter of a message.)
+    small_pk = packet(1)
+    big_pk = "\n".join(["💸 **Payment packet — bigseller**", "Amount: **$2,000.00**"]
+                       + [f"detail line {i} " + "z" * 60 for i in range(24)])
+    mixed = sm("💸 **3 to pay** (oldest first):\n\n" + small_pk + "\n\n" + big_pk + "\n\n" + packet(3))
+    check(units(big_pk) <= textsplit.SAFE_LIMIT and sum(big_pk in x for x in mixed) == 1
+          and all(x.lstrip().startswith("💸") for x in mixed) and all(units(x) <= 2000 for x in mixed),
+          "split: a big packet after a small one moves WHOLE to the next message (every message starts at a packet header)")
+    blank_runs = sm("top\n\n\n" + "a" * 1000 + "\n\n\n" + "b" * 1000)
+    check(blank_runs == ["top\n\n\n" + "a" * 1000, "b" * 1000],
+          "split: blank lines inside a message are kept as written; the cut replaces the blank line(s) it falls on")
     wide = sm("x" * 5000 + "\n" + "🔗" * 1500)
     check(all(units(x) <= 2000 for x in wide) and "".join(wide).replace("\n", "") == "x" * 5000 + "🔗" * 1500,
           "split: an over-long single line (and 2-unit emoji) is hard-split without loss")

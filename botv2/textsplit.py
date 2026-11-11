@@ -12,7 +12,6 @@ import weakref
 
 DISCORD_LIMIT = 2000        # Discord's hard cap on message content
 SAFE_LIMIT = 1900           # what we pack to once a split IS needed (headroom under the cap)
-_PARA_MIN_FRACTION = 0.25   # break at a blank line only if the chunk keeps at least this much
 _WORD_MIN_FRACTION = 0.5    # break an over-long line at a space/comma only if the piece keeps this much
 
 
@@ -57,10 +56,13 @@ def split_message(text: str, limit: int = None) -> list:
     does; only longer text is split, and then packed into chunks of at most SAFE_LIMIT. An
     explicit `limit` is used for both (tests).
 
-    Longer text is cut only at line breaks — preferring a blank line (so a payment packet /
-    section stays in one message) when that doesn't leave the chunk mostly empty — and inside
-    a line only when that single line is itself over the limit. Whitespace-only chunks are
-    dropped (Discord rejects an empty message); '' → []."""
+    Longer text is packed PARAGRAPH by paragraph (a paragraph = the lines between blank
+    lines: one payment packet, one section of a quote). A paragraph that fits in a message
+    is never cut — it moves whole to the next message if the current one has no room — so a
+    seller's payment details can't end up, nameless, at the top of the next message above
+    another seller's packet. Only a paragraph that is itself longer than a message is cut,
+    at line breaks, and a line only when that single line is over the limit.
+    Whitespace-only chunks are dropped (Discord rejects an empty message); '' → []."""
     text = "" if text is None else str(text)
     if limit is None:
         whole, limit = DISCORD_LIMIT, SAFE_LIMIT
@@ -71,32 +73,52 @@ def split_message(text: str, limit: int = None) -> list:
     if _units(text) <= whole:
         return [text]
 
-    lines = []
+    # paragraphs, each with the number of blank lines that preceded it (kept when it stays
+    # in the same message as the paragraph before; dropped at a cut)
+    blocks, cur, gap = [], [], 0
     for ln in text.split("\n"):
-        lines.extend(_hard_split(ln, limit) if _units(ln) > limit else [ln])
-
-    chunks, cur = [], []                 # cur = the lines of the chunk being built
-
-    def size(ls):
-        return sum(_units(x) for x in ls) + max(0, len(ls) - 1)      # + the joining newlines
-
-    for ln in lines:
-        while cur and size(cur + [ln]) > limit:
-            # Prefer the LAST blank line as the cut, if what stays is a decent-sized message.
-            cut = None
-            for i in range(len(cur) - 1, 0, -1):
-                if not cur[i].strip() and size(cur[:i]) >= limit * _PARA_MIN_FRACTION:
-                    cut = i
-                    break
-            if cut is None:
-                chunks.append("\n".join(cur))
-                cur = []
-            else:
-                chunks.append("\n".join(cur[:cut]))
-                cur = cur[cut + 1:]
-        cur.append(ln)
+        if ln.strip():
+            cur.append(ln)
+        else:
+            if cur:
+                blocks.append((gap, cur))
+                cur, gap = [], 0
+            gap += 1
     if cur:
-        chunks.append("\n".join(cur))
+        blocks.append((gap, cur))
+
+    chunks, buf, size = [], [], 0        # buf = text pieces of the chunk being built
+
+    def flush():
+        nonlocal buf, size
+        if buf:
+            chunks.append("".join(buf))
+        buf, size = [], 0
+
+    def add(piece: str, newlines: int):
+        """Append `piece` to the current chunk after `newlines` line breaks (none if the
+        chunk is empty); start a new chunk first if it doesn't fit."""
+        nonlocal size
+        need = _units(piece) + (newlines if buf else 0)
+        if buf and size + need > limit:
+            flush()
+            need = _units(piece)
+        if buf:
+            buf.append("\n" * newlines)
+        buf.append(piece)
+        size += need
+
+    for gap, para in blocks:
+        body = "\n".join(para)
+        if _units(body) <= limit:
+            add(body, gap + 1)           # whole paragraph, here or at the top of the next chunk
+            continue
+        first = True                     # a paragraph bigger than a message: line by line
+        for ln in para:
+            for piece in (_hard_split(ln, limit) if _units(ln) > limit else [ln]):
+                add(piece, gap + 1 if first else 1)
+                first = False
+    flush()
     return [c for c in chunks if c.strip()]
 
 
