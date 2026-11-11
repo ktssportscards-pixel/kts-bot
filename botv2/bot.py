@@ -151,11 +151,12 @@ def _startup_storage_problems() -> list:
                     "empty folder id (where they land is up to the Apps Script) and the "
                     "\"never write into v1's folder\" safety check is skipped. Set it to the real "
                     "buying-sheet folder id."))
-    if config.DATA_DIR_IS_DEFAULT:
+    if config.data_dir_in_container():
         out.append(("data_dir_default",
-                    "🚨 `DATA_DIR` is not set on this service — tickets, owed balances, payment info "
-                    "and void guards are being kept INSIDE the container and will be wiped by the next "
-                    "redeploy. Point `DATA_DIR` at the mounted volume."))
+                    "🚨 `DATA_DIR` is not set on this service and the default data folder is not a "
+                    "mounted volume — tickets, owed balances, payment info and void guards are being "
+                    "kept INSIDE the container and will be wiped by the next redeploy. Point `DATA_DIR` "
+                    "at the mounted volume."))
     if not state.writable():
         out.append(("data_dir_write",
                     f"🚨 The data folder (`{config.DATA_DIR}`) is not writable — nothing the bot "

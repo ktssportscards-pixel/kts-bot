@@ -150,6 +150,19 @@ DATA_DIR = os.environ.get("DATA_DIR") or os.path.join(
 # by every redeploy. The bot warns Kevin about this at startup (see bot.on_ready).
 DATA_DIR_IS_DEFAULT = not os.environ.get("DATA_DIR")
 
+
+def data_dir_in_container() -> bool:
+    """True when state is evidently NOT on a persistent volume: DATA_DIR was not set AND the
+    default data folder is not itself a mount point. A volume mounted exactly on the default
+    path keeps state without the variable, so that is not reported; any other arrangement
+    can't be told from in here."""
+    if not DATA_DIR_IS_DEFAULT:
+        return False
+    try:
+        return not os.path.ismount(DATA_DIR)
+    except Exception:
+        return True
+
 # ── Lot minimums + lane status ─────────────────────────────────────────────────
 # No minimum lot size — everything drop-ships now (Kevin removed the floor 2026-11-06);
 # the ship path no longer holds small lots. Kept configurable in case a floor returns.

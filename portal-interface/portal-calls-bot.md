@@ -30,8 +30,8 @@ lanes_schedule, lanes_channel_id, stale_nudges, ship_all_doral, auto_claim, poke
 price_mock, kevin_dm, data_dir_default, psa_folder_blank, unreadable_stores } }`
 `flags` is the non-secret feature-toggle state (added 2026-11-06 so a Railway toggle is verifiable from outside).
 `price_mock: true` on the live bot means it is quoting FAKE mock prices; `kevin_dm: false` means `KEVIN_USER_ID`
-is unset (no admin commands, no alerts). `data_dir_default: true` = `DATA_DIR` is unset, so all state lives in the
-container and is lost on redeploy; `psa_folder_blank: true` = `PSA_FOLDER_ID` is present but empty; `unreadable_stores`
+is unset (no admin commands, no alerts). `data_dir_default: true` = `DATA_DIR` is unset and the default data folder
+is not a mounted volume, so all state lives in the container and is lost on redeploy; `psa_folder_blank: true` = `PSA_FOLDER_ID` is present but empty; `unreadable_stores`
 = names of data files the bot could not read (a list, normally `[]`). These three plus `price_mock` are standing
 conditions: the canary fails on them until they are fixed. `last_error` is the most recent fault since boot and is never cleared —
 judge it by its `at` timestamp (the canary ignores one older than 150 minutes, i.e. two hourly runs).
@@ -52,11 +52,14 @@ Removes the ticket's bot-side state so the quote can never be accepted, shipped 
 quote — and best-effort moves the buying sheet to Drive trash (recoverable). The bot only checks the bot
 key; WHO may void is the portal's responsibility.
 
-**Request:** `{ "user": "<discord username>" }` **or** `{ "channel_id": "<snowflake STRING>" }` — exactly one —
-plus optional `"force": true`.
+**Request:** `{ "user": "<ticket user>" }` **or** `{ "channel_id": "<snowflake STRING>" }` — exactly one —
+plus optional `"force": true`. **Prefer `channel_id`.**
 - `channel_id` must be a JSON **string** holding an integer (surrounding spaces and one leading `-` are tolerated; a JSON number, or any other string, → 400).
-- `user` is matched case-insensitively (leading `@` ignored) against **open (quoted)** tickets only. A blank
-  name (`""`, `" "`, `"@"`) → 400; it never matches "every ticket".
+- `user` is matched case-insensitively (leading `@` ignored) against **open (quoted)** tickets only, and
+  against the ticket's `user` **exactly as `GET /ops` returns it** — that is the cleaned-up ticket-channel
+  name, not the raw Discord username (a dot or symbol in the username is dropped: `john.doe` is stored as
+  `johndoe`, and `{"user":"john.doe"}` answers `not_found` while that quote stays live). A blank name
+  (`""`, `" "`, `"@"`) → 400; it never matches "every ticket".
 - `force` must be a real JSON boolean (a string like `"false"` → 400). It is required to void a ticket that
   has shipped (`accepted`) — that deletes the whole ticket, including an owed balance and paid history.
 

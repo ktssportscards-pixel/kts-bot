@@ -158,10 +158,15 @@ async def handle(bot, message) -> bool:
                         f"ℹ️ No OPEN (quoted) ticket for **{uname}** — their {len(others)} ticket(s) are "
                         f"already shipped/paid. To void one of those, use `!void id:<channel_id> force`.")
                 else:
+                    # Tickets are filed under the cleaned-up channel name (dots / symbols dropped),
+                    # so a raw username can miss a ticket that exists. Never guess the other
+                    # spelling (two different sellers can share one) — just say where to look.
                     await tell(
-                        f"ℹ️ No ticket on record for **{uname}**. (To finish cleaning up after an earlier "
-                        f"partial void, use `!void id:<channel_id>` — a username can't find a ticket "
-                        f"that's already gone.)")
+                        f"ℹ️ No ticket on record for **{uname}**. Tickets are filed under the ticket's "
+                        f"channel name, which drops dots and symbols from a username (`j.smith` → "
+                        f"`jsmith`) — if that could be it, use the name shown on the ops board or "
+                        f"`!void id:<channel_id>`. (`id:` is also how to finish cleaning up after an "
+                        f"earlier partial void: a name can't find a ticket that's already gone.)")
                 return True
             else:
                 lines = [f"⚠️ **{uname}** has {len(quoted)} open quotes — pick one with `!void id:<channel_id>`:"]

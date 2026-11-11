@@ -112,7 +112,7 @@ async def _status(req):
             "kevin_dm": bool(config.KEVIN_USER_ID),          # False = no admin commands / alerts
             # Standing conditions: true until someone fixes them. They are alerted once, at
             # startup, so last_error alone would let them age out of sight — the canary reads these.
-            "data_dir_default": config.DATA_DIR_IS_DEFAULT,  # True = state lives in the container
+            "data_dir_default": config.data_dir_in_container(),  # True = state lives in the container
             "psa_folder_blank": config.psa_folder_blank(),   # True = v1-folder safety check skipped
             "unreadable_stores": sorted({**state.load_failures(), **state.stuck()}),
         },

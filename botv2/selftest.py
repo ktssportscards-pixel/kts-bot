@@ -729,6 +729,16 @@ def test_state_persistence():
         cfg.DATA_DIR_IS_DEFAULT = True
         check([k for k, _t in botmod._startup_storage_problems()] == ["data_dir_default"],
               "startup: DATA_DIR unset → Kevin is warned state will not survive a redeploy")
+        # …unless a volume is mounted exactly on the default data folder: that is persistent
+        # without the variable, and warning on every boot would be a false alarm
+        real_ismount = cfg.os.path.ismount
+        cfg.os.path.ismount = lambda p: p == cfg.DATA_DIR
+        try:
+            check(cfg.data_dir_in_container() is False and botmod._startup_storage_problems() == [],
+                  "startup: DATA_DIR unset but the default folder IS a mounted volume → no warning")
+        finally:
+            cfg.os.path.ismount = real_ismount
+        check(cfg.data_dir_in_container() is True, "startup: default folder, not a mount → reported as in-container")
         saved_folder = cfg.PSA_FOLDER_ID
         try:
             cfg.DATA_DIR_IS_DEFAULT = False
@@ -4202,6 +4212,18 @@ def test_void_callers():
             check(tracking.find_tickets(user=" ", status="quoted") == [] and tracking.find_tickets(user="@") == []
                   and len(tracking.find_tickets(status="quoted")) == 1,
                   "find_tickets: a blank username matches nothing (no user filter still lists all)")
+
+            # 2b) Tickets are filed under the cleaned-up channel name. A raw username with a dot
+            #     must NOT be "helpfully" matched to another spelling (two sellers can share
+            #     one) — it finds nothing, and the reply says where the name comes from.
+            seed(1011, "jsmith", sheet=False, mem=False)
+            ok, dm = kevin_says("!void j.smith")
+            check(ok and has_ticket(1011) and "No ticket on record" in dm and "drops dots and symbols" in dm,
+                  "!void j.smith with a ticket filed as jsmith: nothing voided, and the reply explains the name")
+            r = body_of(post({"user": "j.smith"}))
+            check(r.get("reason") == "not_found" and has_ticket(1011), "/void user=j.smith: not_found, ticket untouched")
+            ok, dm = kevin_says("!void jsmith")
+            check(not has_ticket(1011) and "Voided" in dm, "!void jsmith (the filed name) voids it")
 
             # 3) Channel ids: garbage is refused cleanly instead of raising.
             for bad in ("--5", "²", "12 34", "id:", ""):
