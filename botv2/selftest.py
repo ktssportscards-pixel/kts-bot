@@ -871,6 +871,24 @@ def test_state_persistence():
             asyncio.run(_connect(3))
             check(h.kevin.dms == [] and len(started) == 2,
                   "reconnect: on_ready sends no storage alert and starts no second set of loops")
+            # the other startup alerts go out through the same once-only step: state kept in the
+            # container, a blank folder id, and mock pricing on a connected bot
+            for n in ("_failing", "_must_keep", "_stuck", "_ever_failed", "_preserved"):
+                getattr(state, n).clear()
+            cfg.DATA_DIR_IS_DEFAULT, cfg.PSA_FOLDER_ID, cfg.PRICE_MOCK = True, "", True
+            alerts.reset()
+            botmod._digest_started = False
+            asyncio.run(_connect(2))
+            kd = "\n".join(h.kevin.dms)
+            check(len(h.kevin.dms) == 3 and "`DATA_DIR` is not set" in kd and "`PSA_FOLDER_ID` is set but BLANK" in kd
+                  and "BOTV2_PRICE_MOCK=1" in kd and len(started) == 4,
+                  "startup (through on_ready): DATA_DIR unset, blank folder id and mock pricing each DM Kevin once")
+            cfg.DATA_DIR_IS_DEFAULT, cfg.PSA_FOLDER_ID, cfg.PRICE_MOCK = False, "a-real-folder-id", False
+            alerts.reset()
+            h.kevin.dms.clear()
+            botmod._digest_started = False
+            asyncio.run(_connect(1))
+            check(h.kevin.dms == [], "startup: a correctly configured bot sends no startup alert at all")
     finally:
         botmod._digest_started, botmod._web_runner = saved_started, saved_runner
         (botmod._payout_digest_loop, botmod._heartbeat_loop, botmod.tickets.sweep_overflow) = saved_loops
