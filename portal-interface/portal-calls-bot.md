@@ -39,7 +39,7 @@ Volume + payout aggregates. `?days=N` optional (clamped 1–3650). **Margin is N
 ## POST /delivery  — x-bot-key  (the carrier webhook SINK)
 The portal/EasyPost adapter POSTs carrier events here.
 **Request:** `{ "channel_id"? | "tracking"?, "status"?, "delivered_at"?, "out_for_delivery_at"?, "carrier"? }`
-- Resolves by `channel_id`, else by `tracking` number (both case-insensitive; a numeric tracking is coerced to string).
+- Resolves by `channel_id` when that id has a ticket; otherwise by `tracking` number (case-insensitive; a numeric tracking is coerced to string). So a request whose `channel_id` matches no ticket but whose `tracking` does is applied to the ticket that holds that number (changed 2026-11-10 — it used to answer `found:false`), and **the `channel_id` in the response is the RESOLVED ticket's, which can differ from the one sent**.
 - `status`: **`out_for_delivery`** → posts the customer "🚚 out for delivery today" heads-up (gated by `BOTV2_DELIVERY_TRACKING`, no Kevin DM); **`delivered`** → flips the ticket + ALWAYS DMs Kevin + posts "📦 arrived" (gated). A **missing / blank / unknown** status is acked + **ignored** (NOT treated as delivered). Send an explicit status string.
 - Always 200 on the delivered path (even no-match) so a webhook can't retry-storm; a mark failure also returns 200.
 
@@ -51,7 +51,7 @@ key; WHO may void is the portal's responsibility.
 
 **Request:** `{ "user": "<discord username>" }` **or** `{ "channel_id": "<snowflake STRING>" }` — exactly one —
 plus optional `"force": true`.
-- `channel_id` must be a JSON **string** of plain digits (a number, or anything else, → 400).
+- `channel_id` must be a JSON **string** holding an integer (surrounding spaces and one leading `-` are tolerated; a JSON number, or any other string, → 400).
 - `user` is matched case-insensitively (leading `@` ignored) against **open (quoted)** tickets only. A blank
   name (`""`, `" "`, `"@"`) → 400; it never matches "every ticket".
 - `force` must be a real JSON boolean (a string like `"false"` → 400). It is required to void a ticket that
@@ -60,16 +60,17 @@ plus optional `"force": true`.
 **Responses (all HTTP 200 unless noted):**
 | body | meaning |
 |---|---|
-| `{voided:true, channel_id, user, status, cards, payout, had_owed, had_sheet, sheet_trashed, sheet_url?, other_sheet_urls, cache_cleanup_pending}` | Voided. `had_sheet` = a buying sheet was on record; `sheet_trashed` = the **latest** one was moved to trash. **`sheet_url` is present only when that sheet still needs trashing by hand** (Kevin is DMed the same link). `other_sheet_urls` = EARLIER buying sheets built for the same ticket (one is built per cert message); they are **never trashed automatically** and are still live — listed so they can be dealt with (Kevin is DMed them too). `cache_cleanup_pending:true` = only a trailing cache write failed; the quote is dead — retry **by `channel_id`** to tidy. |
+| `{voided:true, channel_id, user, status, cards, payout, had_owed, had_sheet, sheet_trashed, sheet_url?, other_sheet_urls, cache_cleanup_pending}` | Voided. `had_sheet` = a buying sheet was on record; `sheet_trashed` = the **latest saved** one was moved to trash. **`sheet_url` is present only when a sheet still needs trashing by hand** — it is the first such link (Kevin is DMed it). Normally that is the latest sheet whose trash failed; rarely it is a second sheet the bot only held in memory, in which case `sheet_trashed` can be `true` at the same time. `other_sheet_urls` = the OTHER buying sheets on record for the same ticket (one is built per cert message; recorded since 2026-11-10); they are **never trashed automatically** — listed so they can be dealt with (Kevin is DMed them too). A link given as `sheet_url` is not repeated there. `cache_cleanup_pending:true` = only a trailing cache write failed; the quote is dead — retry **by `channel_id`** to tidy. |
 | `{voided:false, reason:"needs_force", status}` | The ticket has shipped; resend with `force:true` if intended. |
 | `{voided:false, reason:"ambiguous", matches:[{channel_id, channel_name, cards}]}` | The user has several open quotes; resend with one `channel_id`. |
 | `{voided:false, reason:"persist_failed", channel_id, ticket_intact:true, owed_removed, ship_blocked}` | A storage write failed and the **ticket is still live**; nothing was cleaned up or trashed. Safe to retry. `owed_removed:true` = the owed row had already gone; `ship_blocked:true` = the cancel guard got set, so a customer `ship` is ignored until the retry or a re-quote. |
 | `{voided:false, reason:"persist_failed", channel_id, ticket_intact:false, …}` | No live ticket, but cleaning up leftover state failed to persist. Safe to retry. |
-| `{voided:false, reason:"not_found", residual_cleaned, had_sheet, sheet_trashed, sheet_url?, other_sheet_urls}` | No ticket for that target. `residual_cleaned:true` = this call DID remove leftover state from an earlier partial void (and tried to trash its sheet); `false` = nothing existed. A `user` lookup can only find an open ticket — to finish a partial void use `channel_id`. |
+| `{voided:false, reason:"not_found", residual_cleaned, had_sheet, sheet_trashed, sheet_url?, other_sheet_urls}` | No ticket for that target. `residual_cleaned:true` = this call DID remove leftover state from an earlier partial void (and tried to trash its sheet); `false` = nothing existed. A `user` lookup can only find an open ticket, never leftovers: it answers with the same keys, always `residual_cleaned:false, had_sheet:false, sheet_trashed:false, other_sheet_urls:[]` — also when that seller's only tickets have already shipped. To finish a partial void use `channel_id`. |
 | HTTP 400 `{error}` | Bad JSON / not an object / both or neither target / bad `channel_id` / blank `user` / non-boolean `force`. |
 | HTTP 401 | Missing/wrong `x-bot-key` (or `BOT_API_KEY` unset on the bot). |
 
-Idempotent: repeating a void is safe. The call waits for the Drive trash attempt (up to ~20 s). Code wins on
-drift: `botv2/webserver.py::_void` + `botv2/tracking.py::void_ticket`.
+Idempotent: repeating a void is safe. The call waits for the Drive trash attempt: about 20 s for the Apps
+Script call, and up to a minute more if that fails and the direct Drive fallback runs — size the caller's
+timeout for that. Code wins on drift: `botv2/webserver.py::_void` + `botv2/tracking.py::void_ticket`.
 
 **Removed 2026-11-06:** the old `/owed` `/tickets` `/leaderboard` `/links` reads (retired v1 local tracker; portal uses `/ops`). If anything portal-side still hits those, switch it to `/ops`.

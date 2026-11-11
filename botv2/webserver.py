@@ -137,7 +137,8 @@ async def _delivery(req):
     ticket + DMs Kevin. Body: {channel_id? | tracking?, status? (out_for_delivery |
     delivered — a missing/blank/unknown status is acked + ignored, never defaulted to
     delivered), delivered_at?, out_for_delivery_at?, carrier?};
-    resolves by channel_id, else by tracking number. status 'out_for_delivery' posts a
+    resolves by channel_id when that id has a ticket, else by tracking number (so the
+    channel_id in the reply is the RESOLVED ticket's). status 'out_for_delivery' posts a
     customer-safe 'out for delivery today' heads-up (gated, no Kevin DM); 'delivered'
     posts the 'arrived' note + DMs Kevin; any other status is acked + ignored. The bot
     holds NO carrier credentials and makes no outbound carrier calls. Always 200 on the
@@ -245,7 +246,10 @@ async def _void(req):
         if len(quoted) == 1:
             cid = quoted[0].get("channel_id")
         elif not quoted:
-            return _json({"voided": False, "reason": "not_found"})
+            # Same keys as the channel_id not_found below, so a strict decoder written against
+            # the contract doesn't choke on this path (a `user` lookup never purges leftovers).
+            return _json({"voided": False, "reason": "not_found", "residual_cleaned": False,
+                          "had_sheet": False, "sheet_trashed": False, "other_sheet_urls": []})
         else:
             return _json({"voided": False, "reason": "ambiguous",
                           "matches": [{"channel_id": str(r.get("channel_id")),
@@ -266,7 +270,7 @@ async def _void(req):
     vcid = res.get("channel_id", cid)
     removed = bool(res.get("ticket_removed"))
     bailed = bool(res.get("found")) and not removed
-    sheet_url, sheet_trashed, had_mem, mem_sheet, by_hand = "", False, False, "", []
+    sheet_url, sheet_trashed, had_mem, mem_sheet, by_hand, others = "", False, False, "", [], []
     if not bailed:
         try:                                 # the in-memory cache normally mirrors the disk copy
             mem_sheet = (botmod._channel_sheet.pop(str(vcid), None)
@@ -301,18 +305,20 @@ async def _void(req):
             if by_hand:
                 lines.append("• its buying sheet was NOT auto-trashed — do it by hand: " + " , ".join(by_hand))
             if others:
-                lines.append(f"• {len(others)} EARLIER buying sheet(s) of this ticket are still live in Drive "
-                             f"(only the latest is auto-trashed) — trash them by hand if they're dead too:")
+                lines.append(f"• {len(others)} OTHER buying sheet(s) are on record for this ticket and were NOT "
+                             f"auto-trashed (only the latest is) — trash them by hand if they're dead too; "
+                             f"ignore any you already removed:")
                 lines += [f"   {u}" for u in others]
             try:
                 await botmod.ping_kevin("\n".join(lines))
             except Exception as e:
                 print(f"[web] /void sheet DM failed (non-fatal): {e}")
-    # had_sheet tells "trash failed" apart from "there was no sheet"; sheet_url is present only
-    # when a sheet still needs trashing by hand.
-    # other_sheet_urls = earlier sheets of the same ticket, still live (never auto-trashed).
+    # had_sheet tells "trash failed" apart from "there was no sheet"; sheet_url is the first
+    # sheet that still needs trashing by hand (absent when none does).
+    # other_sheet_urls = the other sheets on record for the ticket (never auto-trashed); a link
+    # already given as sheet_url is not repeated here.
     sheet_info = {"had_sheet": bool(sheet_url or mem_sheet), "sheet_trashed": sheet_trashed,
-                  "other_sheet_urls": [] if bailed else list(res.get("other_sheet_urls") or [])}
+                  "other_sheet_urls": list(others)}
     if by_hand:
         sheet_info["sheet_url"] = by_hand[0]
     if removed:

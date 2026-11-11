@@ -216,8 +216,10 @@ async def _handle_ship(channel) -> None:
     await ping_kevin(f"🚚 #{channel.name} — ship: {note}{booked_note}")
 
 
-async def _handle_tracking(channel, tnum) -> None:
-    """Customer dropped a tracking number — acknowledge, note it, save to the sheet."""
+async def _handle_tracking(channel, tnum, silent: bool = False) -> None:
+    """Customer dropped a tracking number — acknowledge, note it, save to the sheet.
+    silent=True: nothing customer-facing (no ack, no delivery-watcher registration); the
+    number is still recorded where there is a ticket, and Kevin still gets it."""
     uname = tickets.sanitize_channel_name(channel.name) or channel.name
     # Record FIRST, so the ack never promises an arrival update that cannot happen. The
     # "I'll let you know…" wording is used only when all three hold: customer updates are on
@@ -228,8 +230,9 @@ async def _handle_tracking(channel, tnum) -> None:
     if config.DELIVERY_TRACKING and config.REGISTER_TRACKING and noted:
         ack = (f"📦 Got it — tracking `{tnum}` noted. I'll let you know right here the "
                f"moment it arrives — no need to check it yourself. 🙌")
-    await channel.send(ack)
-    if config.REGISTER_TRACKING:                        # ask the portal to watch it for delivery
+    if not silent:
+        await channel.send(ack)
+    if config.REGISTER_TRACKING and not silent:         # ask the portal to watch it for delivery
         try:
             await portal_client.register_tracking(channel.id, tnum)
         except Exception as e:                          # fail-soft: never block the ack/sheet-save
@@ -263,7 +266,8 @@ async def _handle_tracking(channel, tnum) -> None:
         warn = (" — ⚠️ no ticket on record for this channel, so the number is NOT stored "
                 "(a delivery update can't fire for it).")
     await ping_kevin(f"📦 Tracking from **{uname}** (#{channel.name}): `{tnum}`{saved}"
-                     + ("" if sheet_url else " — no sheet cached, add by hand") + warn)
+                     + ("" if sheet_url else " — no sheet cached, add by hand") + warn
+                     + (" (No reply was posted to the customer.)" if silent else ""))
 
 
 async def notify_delivered(channel_id, user: str = "") -> bool:
@@ -666,10 +670,15 @@ async def _handle_message(message) -> None:
         # registered. Do both — ship first (unchanged), so the owed row exists when the
         # number is recorded. Messages that are only one or the other behave as before.
         tnum = certs.extract_tracking(text)
-        if shipping.looks_like_agree(text):
+        agreed = shipping.looks_like_agree(text)
+        if agreed:
             await _handle_ship(channel)
         if tnum:
-            await _handle_tracking(channel, tnum)
+            # On a VOIDED channel a ship-shaped message gets no reply at all (the gate in
+            # _handle_ship). Keep it that way when the message also carries a number: Kevin is
+            # told, the customer is not acked and nothing is registered for delivery updates.
+            # (A bare tracking number on a voided channel is acked as it always was.)
+            await _handle_tracking(channel, tnum, silent=agreed and tracking.is_voided(channel.id))
         return
 
     # A lone bare 10-digit CGC candidate might be a phone/payment number — confirm
@@ -741,9 +750,12 @@ async def _handle_message(message) -> None:
     # keeps its lane even if a later re-quote declines it.
     lots.remove_certs(channel.id, retracted)
     # The buying sheet is built further down, off the customer's path, and can take a minute
-    # or more. Remember the channel's cancellation cutoff as of THIS quote: it only ever moves
-    # when a void runs, so a different value after the build means the quote was voided meanwhile.
-    void_mark = tracking.void_cutoff_of(channel.id)
+    # or more. Remember how many voids have gone through on this channel as of THIS quote (no
+    # await since record_quote): a different number later means the quote was voided meanwhile.
+    void_mark = tracking.void_epoch(channel.id)
+
+    def voided_since() -> bool:
+        return tracking.void_epoch(channel.id) != void_mark
     proceed = lots.proceed_or_hold_tail(channel.id)
     # instant. A long quote (many declined cards listed one per line) is split across
     # messages — one over Discord's 2,000-char cap is rejected whole, which used to abort
@@ -770,6 +782,13 @@ async def _handle_message(message) -> None:
                          + ", ".join(certs.cert_label(c) for c in retracted)
                          + ". They won't be booked if the customer ships on the earlier quote.")
 
+    if voided_since():
+        # Voided while the quote was being posted: it is already dead. Stop before the claim
+        # step and the sheet build — neither belongs to a cancelled quote.
+        await ping_kevin(f"🛑 #{channel.name} was VOIDED right after its quote posted — "
+                         f"no buying sheet was built for it.")
+        return
+
     # Auto-claim: reserve Triumph allocation for the BUYs the instant we quote them,
     # to lock a slot before the team pools fill. DOUBLE-GATED — the portal's own kill
     # switch AND config.AUTO_CLAIM must BOTH be on, else claim_certs comes back all-
@@ -794,34 +813,70 @@ async def _handle_message(message) -> None:
     # Apps Script is slow). The customer already has their quote; Kevin gets the
     # sheet link + summary once it's built. A sheet failure never blocks the DM.
     sheet_url = ""
-    if tracking.void_cutoff_of(channel.id) != void_mark:
-        # Voided between the quote and here (the customer post / claim step awaited): the
-        # quote is already dead, so don't build a sheet for it at all.
+    if voided_since():
+        # Voided during the claim step: same as above, no sheet for a dead quote.
         await ping_kevin(f"🛑 #{channel.name} was VOIDED right after its quote posted — "
                          f"no buying sheet was built for it.")
         return
     try:
         sheet_url, _name, _ = await asyncio.to_thread(sheets.create_psa_sheet, username, cert_list)
-        if tracking.void_cutoff_of(channel.id) != void_mark:
+        if voided_since():
             # A void hit this channel while the sheet was building. It found no sheet to trash,
             # so don't hand the dead quote a live one: no cache entry, no fill, no summary —
             # just give Kevin the link. (No automatic trash from here.)
-            await ping_kevin(f"🛑 #{channel.name} was VOIDED while its buying sheet was still building. "
-                             f"I did NOT fill or link that sheet — trash it by hand: {sheet_url}")
+            await _report_late_sheet(channel, sheet_url)
             return
+        earlier = _channel_sheet.get(str(channel.id))
         _channel_sheet[str(channel.id)] = sheet_url          # cache for later tracking-save
         state.save("channel_sheet", _channel_sheet)
-        tracking.remember_sheet(channel.id, sheet_url)       # history: a void reports the earlier ones
+        # History: a void reports the sheets it does not trash. The pointer being replaced goes
+        # in first — for a ticket that was already open when this history was introduced it is
+        # the one earlier sheet the bot still knows about.
+        if earlier and earlier != sheet_url:
+            tracking.remember_sheet(channel.id, earlier)
+        tracking.remember_sheet(channel.id, sheet_url)
         missing = await asyncio.to_thread(sheets.fill_buying_sheet, sheet_url, rows)
-        if missing:
+        if missing and not voided_since():
             await ping_kevin(f"⚠️ {len(missing)} cert(s) didn't land on {username}'s sheet: "
                              + ", ".join(certs.cert_label(c) for c in missing))
     except Exception as e:
+        if voided_since():
+            # The build was failing (it can take minutes before it gives up) and the ticket was
+            # voided meanwhile: "sheet failed — summary below, add rows by hand" would read
+            # like a live quote.
+            await ping_kevin(f"🛑 #{channel.name} was VOIDED while its buying sheet build was failing "
+                             f"({e}) — no summary sent. If the failed build still left a sheet in the "
+                             f"buying folder, nothing links to it.")
+            return
         await alert_kevin(f"sheet_fail:{channel.id}",
                           f"⚠️ buying sheet failed for #{channel.name} ({e}) — "
                           f"summary below, add rows by hand if needed.")
+    if voided_since():
+        # Voided while the sheet was being filled: the sheet was already linked, so the void
+        # itself dealt with it (trashed it, or gave Kevin the link). Don't follow the void
+        # with what looks like a fresh quote summary.
+        await ping_kevin(f"🛑 #{channel.name} was VOIDED while its buying sheet was being filled — "
+                         f"no quote summary sent (the void already handled that sheet).")
+        return
     await ping_kevin(pricing.kevin_summary(quote, username, sheet_url,
                                            ticket_link=f"<#{channel.id}>"))
+
+
+async def _report_late_sheet(channel, sheet_url: str) -> None:
+    """A buying sheet finished building after its quote was voided. It is deliberately not
+    cached, filled or trashed; Kevin gets the link. That DM is best-effort, so the link is
+    also put in the channel's sheet history: a later `!void id:<channel>` lists it."""
+    recorded = tracking.remember_sheet(channel.id, sheet_url)
+    told = await ping_kevin(f"🛑 #{channel.name} was VOIDED while its buying sheet was still building. "
+                            f"I did NOT fill or link that sheet — trash it by hand: {sheet_url}")
+    if not told:
+        how = (f"run `!void id:{channel.id}` to get its link" if recorded
+               else "look in the buying folder for the newest sheet in that seller's name")
+        print(f"[bot] channel {channel.id}: a buying sheet built for a voided quote could not be "
+              f"reported by DM — {how}")
+        alerts.record_error(f"late_sheet:{channel.id}",
+                            f"a buying sheet built for the voided quote in #{channel.name} was never "
+                            f"reported to Kevin — {how}")
 
 
 async def _welcome_if_new(message, channel) -> bool:

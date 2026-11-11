@@ -2319,6 +2319,148 @@ def test_handlers_and_void_races():
               and any("VOIDED right after its quote" in d for d in h.kevin.dms),
               "race: a quote voided before its sheet build starts gets NO sheet (Kevin told)")
 
+    # 3a) A void that BAILED (storage write failed, ticket still LIVE) while the sheet was
+    #     building is not a void: the live quote keeps its sheet, its fill and its summary.
+    #     (The first version keyed on the persisted cutoff, which a bailing void still moves.)
+    for store in ("tickets", "owed"):
+        with _BotHarness(9130, name="bailrace", rows=_rows, sheet_url=URL % 9130) as h:
+            if store == "owed":                                  # an owed row must exist for that write to run
+                h.say("11111111")
+                h.say("ship")
+                del h.sheet_calls[:], h.fill_calls[:], h.kevin.dms[:]
+            results = []
+
+            def _create_while_void_bails(username, cert_tokens, folder_id=None, _store=store):
+                h.sheet_calls.append((username, list(cert_tokens)))
+                real = tracking.state.save
+                tracking.state.save = lambda name, data: False if name == _store else real(name, data)
+                try:
+                    results.append(tracking.void_ticket(9130))
+                finally:
+                    tracking.state.save = real
+                return URL % 9130, f"{username} discord", {}
+            sheets_mod.create_psa_sheet = _create_while_void_bails
+            h.say("12345678")
+            kd = "\n".join(h.kevin.dms)
+            check(results and results[0].get("found") and not results[0].get("ticket_removed")
+                  and tracking.find_tickets(channel_id=9130),
+                  f"bail race ({store} write fails): the void bailed, the ticket is still live")
+            check(not h.errors and h.fill_calls == [URL % 9130] and botmod._channel_sheet.get("9130") == URL % 9130
+                  and "📋" in kd and "VOIDED" not in kd,
+                  f"bail race ({store} write fails): the live quote's sheet is linked + filled and Kevin gets the summary")
+            tracking.void_ticket(9130)
+        lots.drop(9130)
+
+    # 3b) A quote whose ticket row never reached disk, voided mid-build: there is no persisted
+    #     marker for it at all, yet the void must still stop the late sheet.
+    with _BotHarness(9131, name="memrace", rows=_rows, sheet_url=URL % 9131) as h:
+        real = tracking.state.save
+        tracking.state.save = lambda name, data: False if name == "tickets" else real(name, data)
+
+        def _void_memory_only(username, cert_tokens, folder_id=None):
+            h.sheet_calls.append((username, list(cert_tokens)))
+            dmch = _fake_channel(9197, "kevin-dm")
+            dmch.guild = None
+            fut = asyncio.run_coroutine_threadsafe(
+                commands.handle(None, _FakeMessage(dmch, "!void id:9131", author=h.kevin)), loop_box[0])
+            fut.result(timeout=20)                              # Kevin's void runs on the loop, mid-build
+            return URL % 9131, f"{username} discord", {}
+        sheets_mod.create_psa_sheet = _void_memory_only
+        loop_box = []
+
+        async def _drive():
+            loop_box.append(asyncio.get_running_loop())
+            await botmod._handle_message(_FakeMessage(h.channel, "12345678"))
+        try:
+            asyncio.run(_drive())
+        finally:
+            tracking.state.save = real
+        kd = "\n".join(h.kevin.dms)
+        check(not tracking.find_tickets(channel_id=9131) and "in-memory quote" in kd,
+              "memory-only race: the void (real command, mid-build) cleared the unsaved quote")
+        check(not h.fill_calls and "9131" not in botmod._channel_sheet and 9131 not in botmod._last_quote
+              and "VOIDED while its buying sheet was still building" in kd and (URL % 9131) in kd and "📋" not in kd,
+              "memory-only race: the late sheet is not linked, filled or summarised (it used to be, after the void)")
+    tracking.state.save("channel_sheets", {})
+
+    # 3c) A void while the sheet build is FAILING (that can take minutes), and one while the
+    #     sheet is being FILLED: neither may be followed by a normal quote summary.
+    with _BotHarness(9132, name="failrace", rows=_rows, sheet_url=URL % 9132) as h:
+        def _void_then_fail(username, cert_tokens, folder_id=None):
+            tracking.void_ticket(9132)
+            raise RuntimeError("Apps Script timeout")
+        sheets_mod.create_psa_sheet = _void_then_fail
+        h.say("12345678")
+        kd = "\n".join(h.kevin.dms)
+        check(not h.errors and "VOIDED while its buying sheet build was failing" in kd and "📋" not in kd
+              and "summary below" not in kd,
+              "void during a failing sheet build: one 'voided' note, no 'sheet failed — summary below', no summary")
+    with _BotHarness(9133, name="fillrace", rows=_rows, sheet_url=URL % 9133) as h:
+        def _void_during_fill(sheet_id, rows_, sheet_name=None):
+            h.fill_calls.append(sheet_id)
+            tracking.void_ticket(9133)
+            return ["12345678"]                                  # would normally produce a "didn't land" DM
+        sheets_mod.fill_buying_sheet = _void_during_fill
+        h.say("12345678")
+        kd = "\n".join(h.kevin.dms)
+        check(not h.errors and "VOIDED while its buying sheet was being filled" in kd and "📋" not in kd
+              and "didn't land" not in kd,
+              "void during the fill: no quote summary and no 'didn't land on the sheet' follow the void")
+    # a failing build with NO void still alerts and still sends the summary (unchanged)
+    with _BotHarness(9134, name="plainfail", rows=_rows, sheet_url=URL % 9134) as h:
+        def _just_fail(username, cert_tokens, folder_id=None):
+            raise RuntimeError("Apps Script timeout")
+        sheets_mod.create_psa_sheet = _just_fail
+        h.say("12345678")
+        kd = "\n".join(h.kevin.dms)
+        check("buying sheet failed" in kd and "summary below" in kd and "📋" in kd and "VOIDED" not in kd,
+              "sheet build fails with no void: alert + summary exactly as before")
+        tracking.void_ticket(9134)
+    lots.drop(9134)
+
+    # 3d) The late sheet's link must survive a failed DM: it goes into the channel's sheet
+    #     history, /status says so, and a later `!void id:` hands it over.
+    with _BotHarness(9135, name="lostdm", rows=_rows, sheet_url=URL % 9135) as h:
+        def _void_mid_build(username, cert_tokens, folder_id=None):
+            tracking.void_ticket(9135)
+            return URL % 9135, f"{username} discord", {}
+        sheets_mod.create_psa_sheet = _void_mid_build
+        real_dm = h.kevin.send
+
+        async def _dm_down(text):
+            raise RuntimeError("discord 503")
+        h.kevin.send = _dm_down
+        h.say("12345678")
+        h.kevin.send = real_dm
+        from botv2 import alerts as _al
+        check(tracking.state.load("channel_sheets", dict).get("9135") == [URL % 9135]
+              and (_al.last_error() or {}).get("key") == "late_sheet:9135"
+              and (URL % 9135) not in ((_al.last_error() or {}).get("text") or ""),
+              "late sheet, DM failed: the link is kept in the sheet history and /status flags it (without the link)")
+        dmch = _fake_channel(9196, "kevin-dm")
+        dmch.guild = None
+        asyncio.run(commands.handle(None, _FakeMessage(dmch, "!void id:9135", author=h.kevin)))
+        kd = "\n".join(h.kevin.dms)
+        check((URL % 9135) in kd and "OTHER buying sheet(s) are on record" in kd and not h.trash_calls
+              and "9135" not in tracking.state.load("channel_sheets", dict),
+              "late sheet: a later `!void id:` hands Kevin the link (never auto-trashed) and clears the record")
+
+    # 3e) A ticket that was already open when the sheet history was introduced: the one earlier
+    #     sheet the bot still knows (its cache pointer) is recorded before it is replaced.
+    with _BotHarness(9136, name="predeploy", rows=_rows, sheet_url=URL % "9136new") as h:
+        botmod._channel_sheet["9136"] = URL % "9136old"
+        tracking.state.save("channel_sheet", {"9136": URL % "9136old"})
+        tracking.state.save("channel_sheets", {})
+        h.say("12345678")
+        check(tracking.state.load("channel_sheets", dict).get("9136") == [URL % "9136old", URL % "9136new"],
+              "sheet history: the pointer being replaced is recorded first (it used to be dropped unrecorded)")
+        dmch = _fake_channel(9195, "kevin-dm")
+        dmch.guild = None
+        del h.kevin.dms[:]
+        asyncio.run(commands.handle(None, _FakeMessage(dmch, "!void id:9136", author=h.kevin)))
+        check(h.trash_calls == [URL % "9136new"] and any((URL % "9136old") in d for d in h.kevin.dms),
+              "…so the void trashes the latest and tells Kevin about the earlier one")
+
     # 4) ship in a voided channel: ignored (existing gate) …
     with _BotHarness(9102, name="shipvoid", rows=_rows, sheet_url=URL % 9102) as h:
         h.say("12345678")
@@ -2371,6 +2513,56 @@ def test_handlers_and_void_races():
         h.say("1Z999AA10123456784")
         check(any("no ticket on record" in d for d in h.kevin.dms),
               "tracking with no ticket on record: Kevin is told the number isn't stored")
+    # "Shipped! <number>" on a VOIDED channel: a ship-shaped message there gets no reply, and
+    # that must stay true when it also carries a tracking number — no ack, nothing registered
+    # with the delivery watcher. Kevin still gets the number.
+    registered = []
+    real_register = portal_client.register_tracking
+
+    async def _register_spy(cid, tnum):
+        registered.append((cid, tnum))
+    portal_client.register_tracking = _register_spy
+    saved_reg = cfg.REGISTER_TRACKING
+    cfg.REGISTER_TRACKING = True
+    try:
+        with _BotHarness(9113, name="shippedvoid", rows=_rows, sheet_url=URL % 9113) as h:
+            h.say("12345678")
+            tracking.void_ticket(9113)
+            lots.drop(9113)
+            botmod._last_quote.pop(9113, None)
+            botmod._channel_sheet.pop("9113", None)
+            del h.channel.sent[:], h.kevin.dms[:]
+            h.say("Shipped! 1Z999AA10123456784")
+            kd = "\n".join(h.kevin.dms)
+            check(not h.errors and h.channel.sent == [] and not registered,
+                  "'Shipped! <#>' on a voided channel: nothing is posted to the customer, nothing registered")
+            check("ship attempt on a VOIDED channel" in kd and "1Z999AA10123456784" in kd
+                  and "NOT stored" in kd and "No reply was posted to the customer" in kd,
+                  "'Shipped! <#>' on a voided channel: Kevin gets the number and is told the customer saw no reply")
+            h.say("1Z999AA10123456784")                           # a bare number is acked as it always was
+            check(len(h.channel.sent) == 1 and "noted" in h.channel.sent[0] and registered == [(9113, "1Z999AA10123456784")],
+                  "a bare tracking number on a voided channel: acked and registered exactly as before")
+        # A void that BAILED leaves the cancel guard set on a LIVE ticket. A tracking number
+        # there IS stored, and Kevin must not be told it wasn't (29211b1).
+        with _BotHarness(9114, name="bailtrk", rows=_rows, sheet_url=URL % 9114) as h:
+            h.say("12345678")
+            real = tracking.state.save
+            tracking.state.save = lambda name, data: False if name == "tickets" else real(name, data)
+            try:
+                bail = tracking.void_ticket(9114)
+            finally:
+                tracking.state.save = real
+            del h.kevin.dms[:]
+            h.say("1Z999AA10123456784")
+            kd = "\n".join(h.kevin.dms)
+            check(bail.get("found") and not bail.get("ticket_removed") and tracking.is_voided(9114)
+                  and tracking.find_tickets(channel_id=9114)[0].get("tracking") == "1Z999AA10123456784"
+                  and "Tracking from" in kd and "NOT stored" not in kd,
+                  "tracking after a bailed void: the number is stored on the live ticket and Kevin isn't told otherwise")
+            tracking.void_ticket(9114)
+        lots.drop(9114)
+    finally:
+        portal_client.register_tracking, cfg.REGISTER_TRACKING = real_register, saved_reg
 
     # 5a) the tracking ack only PROMISES an arrival update when one can actually happen:
     #     customer updates on + the delivery watcher on + the number stored on a ticket.
@@ -2438,15 +2630,16 @@ def test_handlers_and_void_races():
               "sheets: every sheet built for a ticket is remembered (the cache still holds only the latest)")
         dm = _void_dm(h, 9110)
         check(h.trash_calls == [URL % "9110B"], "void: still auto-trashes ONLY the latest sheet (no new trash)")
-        check("moved to Drive trash" in dm and (URL % "9110A") in dm and "EARLIER buying sheet" in dm,
-              "void: Kevin is told the earlier sheet is still live, with its link")
+        check("moved to Drive trash" in dm and (URL % "9110A") in dm and "OTHER buying sheet(s) are on record" in dm
+              and "NOT auto-trashed" in dm,
+              "void: Kevin is told the earlier sheet was not trashed, with its link")
         check("9110" not in tracking.state.load("channel_sheets", dict)
               and "9110" not in tracking.state.load("channel_sheet", dict),
               "void: the sheet history is cleared with the cache")
     with _BotHarness(9111, name="onesheet", rows=_rows, sheet_url=URL % "9111A") as h:
         h.say("12345678")
         dm = _void_dm(h, 9111)
-        check(h.trash_calls == [URL % "9111A"] and "EARLIER" not in dm and "moved to Drive trash" in dm,
+        check(h.trash_calls == [URL % "9111A"] and "OTHER buying sheet" not in dm and "moved to Drive trash" in dm,
               "void: a single-sheet ticket reads exactly as before")
     # a bailed void keeps the history (nothing is cleaned for a live ticket)
     with _BotHarness(9112, name="bailsheets", rows=_rows, sheet_url=URL % "9112A") as h:
@@ -2459,7 +2652,7 @@ def test_handlers_and_void_races():
             dm = _void_dm(h, 9112)
         finally:
             tracking.state.save = real
-        check("STILL LIVE" in dm and not h.trash_calls and "EARLIER" not in dm
+        check("STILL LIVE" in dm and not h.trash_calls and "OTHER buying sheet" not in dm
               and len(tracking.state.load("channel_sheets", dict).get("9112") or []) == 2,
               "void bail: sheet history untouched, nothing reported as dead")
         _void_dm(h, 9112)
@@ -3603,10 +3796,93 @@ def test_void_callers():
             check(r.get("voided") is True and r.get("sheet_trashed") is True
                   and r.get("other_sheet_urls") == [URL % "1005old"] and trash_calls == [URL % 1005],
                   "/void: earlier sheets are listed in other_sheet_urls; only the latest is trashed")
-            check(any((URL % "1005old") in d and "EARLIER" in d for d in h.kevin.dms),
+            check(any((URL % "1005old") in d and "OTHER buying sheet(s) are on record" in d for d in h.kevin.dms),
                   "/void: Kevin is DMed the earlier sheet's link")
             check(body_of(post({"channel_id": "994"})).get("other_sheet_urls") == [],
                   "/void: other_sheet_urls is an empty list when there are none")
+
+            # 4c) Response shapes the contract documents. A `user` lookup that finds no open
+            #     quote answers with the SAME keys as a channel_id not_found (a strict decoder
+            #     written from the table choked on the bare {voided, reason}).
+            NOT_FOUND_KEYS = {"voided", "reason", "residual_cleaned", "had_sheet", "sheet_trashed", "other_sheet_urls"}
+            r = body_of(post({"user": "nobody-at-all"}))
+            check(set(r) == NOT_FOUND_KEYS and r["reason"] == "not_found" and r["residual_cleaned"] is False
+                  and r["other_sheet_urls"] == [], "/void user with no ticket: full not_found shape")
+            seed(1006, "onlyshipped", status="accepted", sheet=False, mem=False)
+            r = body_of(post({"user": "onlyshipped", "force": True}))
+            check(set(r) == NOT_FOUND_KEYS and has_ticket(1006),
+                  "/void user whose only ticket has shipped: same not_found shape, nothing voided (even with force)")
+            check(set(body_of(post({"channel_id": "7999"}))) == NOT_FOUND_KEYS,
+                  "/void channel_id with nothing there: the same keys")
+            tracking.void_ticket(1006)
+            # the latest sheet is trashed AND a different sheet lives only in memory: sheet_url is
+            # the one still to do by hand, and it is not repeated in other_sheet_urls
+            del trash_calls[:]
+            seed(1007, "twoknown")
+            tracking.remember_sheet(1007, URL % 1007)
+            tracking.remember_sheet(1007, URL % "1007mem")
+            botmod._channel_sheet["1007"] = URL % "1007mem"          # memory moved on; the file didn't
+            r = body_of(post({"channel_id": "1007"}))
+            check(r.get("voided") is True and trash_calls == [URL % 1007] and r.get("sheet_trashed") is True
+                  and r.get("sheet_url") == URL % "1007mem" and r.get("other_sheet_urls") == [],
+                  "/void: a memory-only sheet is given once (sheet_url), not again in other_sheet_urls")
+
+            # 4d) The cache write fails AFTER the ticket is gone (ok=False, ticket_removed): the
+            #     quote is dead, so both callers must still purge memory and trash at once.
+            for caller in ("cmd", "http"):
+                del trash_calls[:]
+                seed(1008, "cachefail")
+                real = failing("channel_sheet")
+                try:
+                    if caller == "cmd":
+                        ok, dm = kevin_says("!void id:1008")
+                        told = "Voided" in dm and "Minor: the sheet-cache entry didn't clear" in dm
+                    else:
+                        r = body_of(post({"channel_id": "1008"}))
+                        told = r.get("voided") is True and r.get("cache_cleanup_pending") is True
+                finally:
+                    tracking.state.save = real
+                check(told and not has_ticket(1008) and trash_calls == [URL % 1008]
+                      and not lots.has_lot(1008) and 1008 not in botmod._last_quote
+                      and "1008" not in botmod._channel_sheet,
+                      f"void with a failed cache write ({caller}): quote dead, memory purged, sheet trashed once, said so")
+                # the retry finds the leftover cache entry and finishes
+                if caller == "cmd":
+                    ok, dm = kevin_says("!void id:1008")
+                    check("cleared leftover state" in dm and "1008" not in tracking.state.load("channel_sheet", dict),
+                          "…and the suggested re-run tidies the leftover cache entry")
+                else:
+                    r = body_of(post({"channel_id": "1008"}))
+                    check(r.get("reason") == "not_found" and r.get("residual_cleaned") is True
+                          and "1008" not in tracking.state.load("channel_sheet", dict),
+                          "…and the retry by channel_id answers residual_cleaned:true")
+            # a leftover purge whose own write fails says so (and is safe to repeat)
+            del trash_calls[:]
+            tracking.state.save("channel_sheet", {"1009": URL % 1009})
+            real = failing("channel_sheet")
+            try:
+                ok, dm = kevin_says("!void id:1009")
+                r = body_of(post({"channel_id": "1009"}))
+            finally:
+                tracking.state.save = real
+            check("A storage write failed during that cleanup" in dm and "fully clean" not in dm,
+                  "!void leftover purge with a failed write: Kevin is told something is still on disk")
+            check(r.get("reason") == "persist_failed" and r.get("ticket_intact") is False,
+                  "/void leftover purge with a failed write: persist_failed, ticket_intact:false")
+            kevin_says("!void id:1009")
+            # a bail at the very first write (the cancel guard itself): ship is NOT blocked
+            seed(1010, "guardfail", sheet=False, mem=False)
+            real = failing("voided")
+            try:
+                ok, dm = kevin_says("!void id:1010")
+                r = body_of(post({"channel_id": "1010"}))
+            finally:
+                tracking.state.save = real
+            check("STILL LIVE" in dm and "`ship` is ignored" not in dm and has_ticket(1010)
+                  and r.get("reason") == "persist_failed" and r.get("ship_blocked") is False,
+                  "void bail at the cancel-guard write: ticket live and ship NOT reported as blocked")
+            kevin_says("!void id:1010")
+            del trash_calls[:]
 
             # 5) Residual cleanup (no ticket, leftover sheet cache): the reply is truthful.
             del trash_calls[:]

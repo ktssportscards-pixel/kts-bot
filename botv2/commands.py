@@ -229,12 +229,14 @@ async def handle(bot, message) -> bool:
             sheet_lines.append(f"⚠️ I also had a buying sheet on record for this channel that wasn't saved "
                                f"to disk — trash it by hand: {mem_sheet}")
         # Every cert message builds its own sheet; only the latest is trashed automatically.
-        # Never let Kevin believe the ticket's sheets are gone when earlier ones are still live.
+        # Never let Kevin believe the ticket's sheets are gone when others were never touched.
+        # (The list is what the bot has on record; it can't see whether one was removed by hand.)
         others = [] if bailed else [u for u in (res.get("other_sheet_urls") or []) if u != mem_sheet]
         if others:
             sheet_lines.append(
-                f"📄 {len(others)} EARLIER buying sheet(s) were built for this ticket and are still live "
-                f"in Drive (only the latest is auto-trashed) — trash them by hand if they're dead too:\n"
+                f"📄 {len(others)} OTHER buying sheet(s) are on record for this ticket and were NOT "
+                f"auto-trashed (only the latest is) — trash them by hand if they're dead too; ignore "
+                f"any you already removed:\n"
                 + "\n".join(f"• {u}" for u in others))
         by_hand = bool((sheet_url and not bailed and not trashed) or (mem_sheet and mem_sheet != sheet_url)
                        or others)

@@ -736,15 +736,35 @@ def remember_sheet(channel_id, sheet_url) -> bool:
         return False
 
 
+# channel -> how many voids (or leftover purges) THIS PROCESS has completed on it. In memory
+# only. The quote handler reads it before and after its slow steps (buying-sheet build, fill): a
+# change means the quote it is working on was voided meanwhile. The persisted cutoff was used for
+# this at first, but it is written before the writes that can still bail — so a void that failed
+# with the ticket still LIVE looked like a completed one — and it is not written at all when the
+# quote's ticket row never reached disk.
+_void_epoch: dict = {}
+
+
+def void_epoch(channel_id) -> int:
+    """See _void_epoch. Changes only when a void / purge of this channel actually went through."""
+    return _void_epoch.get(str(channel_id), 0)
+
+
+def _void_went_through(*channel_ids) -> None:
+    for key in {str(c) for c in channel_ids if c is not None}:
+        _void_epoch[key] = _void_epoch.get(key, 0) + 1
+
+
 def void_ticket(channel_id) -> dict:
     """Completely remove a ticket's bot-side state so its quote can never be accepted,
     shipped, or paid: delete the `tickets` row (which carries the per-cert ledger,
     tracking, delivery sub-record and review flag — all gone with the row), any `owed`
     row, and the `channel_sheet` cache entry. Returns a summary of what was removed —
     {found, channel_id, user, channel_name, status, cards, payout, had_owed, sheet_url,
-    other_sheet_urls} — or {found: False} if there was no ticket. `sheet_url` is the latest
-    buying sheet (the one callers trash); `other_sheet_urls` are EARLIER sheets built for the
-    same channel, returned so the caller can tell Kevin they are still live (never trashed
+    other_sheet_urls}; with no ticket on record `found` is False and the rest describes any
+    leftover state that was purged. `sheet_url` is the latest
+    buying sheet (the one callers trash); `other_sheet_urls` are the OTHER sheets on record for
+    the same channel, returned so the caller can tell Kevin about them (never trashed
     automatically). `ok` is True only when every store write
     persisted; ok=False means a write failed partway — the function BAILS with the ticket
     row left intact so a re-run recovers.
@@ -772,6 +792,8 @@ def void_ticket(channel_id) -> dict:
     # with the ticket already gone) completes the cleanup rather than stalling at not_found.
     cid_val = (row or {}).get("channel_id", channel_id)
     keys = {str(channel_id), str(cid_val)}
+    if row is None:
+        _void_went_through(*keys)                     # a purge with no ticket never "bails"
     cs = state.load("channel_sheet", dict)
     sheet_url = next((cs[k] for k in keys if cs.get(k)), "")   # READ now; delete LAST (step 3)
     all_sheets = state.load(_SHEETS, dict)                      # READ now; delete LAST (step 3)
@@ -823,6 +845,7 @@ def void_ticket(channel_id) -> dict:
             summary["ok"] = False
             return summary
         summary["ticket_removed"] = True
+        _void_went_through(*keys)                     # the quote is dead from here on
     # 3) channel_sheet cache LAST — only once the ticket is gone. A cache-write failure is still
     #    an incomplete void (ok=False), but it is recoverable: a retry re-enters here (even with
     #    the ticket already gone) and removes the entry. The ticket/owed are already consistent.
