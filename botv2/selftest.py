@@ -1171,14 +1171,31 @@ def test_certs():
           and ec("PSA#12345678 PSA#23456789 PSA#34567890 ship", deviations=False) == []
           and ec("PSA#12345678 PSA#23456789 PSA#34567890 ship") == ["12345678", "23456789", "34567890"],
           "deviations=False: the parser is the live one (no label-list discount, no other-grader skip)")
-    # a number-FIRST line ("12345678 PSA …") is read as v1 reads it: the label regex binds a
-    # grader word to the number after it, which would drop the wrong card there
+    # a number-FIRST line ("12345678 PSA 1234567 SGC …", each label AFTER its number) is read
+    # as v1 reads it: the label regex binds a grader word to the number after it, which would
+    # drop the wrong card there. It is recognised by a grader word after its last number.
     check(ec("12345678 PSA 1234567 SGC 23456789 PSA") == ["12345678", "1234567", "23456789"]
           and ogs("12345678 PSA 1234567 SGC 23456789 PSA") == [],
           "number-first line: nothing is skipped (no PSA cert dropped for the label that follows another number)")
-    check(ec("SGC 1234567 SGC 2345678\n12345678 SGC 3456789") == ["12345678", "3456789"]
-          and ogs("SGC 1234567 SGC 2345678\n12345678 SGC 3456789") == ["SGC 1234567", "SGC 2345678"],
-          "decided per line: a label-first line skips its SGC serials, a number-first line is left as v1")
+    # …but the natural mixed line — bare PSA numbers, then the odd one out with its label —
+    # is label-first: the SGC serial is skipped and reported, the PSA certs are kept
+    for line_text in ("12345678, 23456789, SGC 1234567", "12345678 23456789 SGC 1234567 thanks",
+                      "12345678 SGC 1234567"):
+        check("1234567" not in ec(line_text) and "12345678" in ec(line_text) and ogs(line_text) == ["SGC 1234567"],
+              f"mixed line {line_text!r}: the labelled serial is skipped + reported, the bare PSA certs stay")
+    check(ec("PSA 12345678 SGC 1234567") == ["12345678"] and ogs("PSA 12345678 SGC 1234567") == ["SGC 1234567"],
+          "a PSA-labelled cert followed by an SGC-labelled serial: PSA kept, SGC skipped")
+    check(ec("SGC 1234567\n12345678 PSA 2345678 SGC") == ["12345678", "2345678"]
+          and ogs("SGC 1234567\n12345678 PSA 2345678 SGC") == ["SGC 1234567"],
+          "decided per line: a label-first line skips its SGC serial, a number-first line is left as v1")
+    # the guards around the label-list rule, each on its own
+    check(ec("PSA 12345678 PSA 23456789 PSA 34567890 PSA 45678901 shipped") == []
+          and ec("PSA 12345678 PSA 23456789 PSA 34567890 PSA 45678901 payment") == [],
+          "a labelled list with a shipping / payment word (and no tracking number) is still read as before: ignored")
+    check(ec("I sold PSA 12345678 PSA 23456789 PSA 34567890") == [],
+          "three labelled certs inside a sentence (two other words) are not a list")
+    check(ogs("we do not buy SGC 1234567 sorry") == [] and ec("we do not buy SGC 1234567 sorry") == [],
+          "chatter that mentions another grader's serial: nothing parsed, nothing reported")
     et = certs.extract_tracking
     check(et("1Z999AA10123456784") == "1Z999AA10123456784", "UPS tracking")
     check(et("here 9400111899223817200000 ok") == "9400111899223817200000", "USPS tracking")
@@ -3010,8 +3027,41 @@ def test_handlers_and_void_races():
         del h.kevin.dms[:]
         h.say("12345678 34567890")
         check(not any("NOT priced" in d for d in h.kevin.dms), "ordinary cert messages produce no such note")
+        # Kevin's note never holds up the customer: the quote is posted first
+        order = []
+        real_send, real_dm = h.channel.send, h.kevin.send
+
+        async def _chan(text):
+            order.append("customer")
+            await real_send(text)
+
+        async def _dm(text):
+            order.append("kevin: not priced" if "NOT priced" in text else "kevin: other")
+            await real_dm(text)
+        h.channel.send, h.kevin.send = _chan, _dm
+        h.say("PSA 45678901 SGC 1234567")
+        h.channel.send, h.kevin.send = real_send, real_dm
+        check(order[:2] == ["customer", "kevin: not priced"] and order.count("kevin: not priced") == 1,
+              "the 'NOT priced' note goes out after the customer's quote, once")
         tracking.void_ticket(9116)
     lots.drop(9116)
+    # …and it is sent for the FIRST message of a brand-new ticket too (welcome, then the note)
+    with _BotHarness(9118, name="newticket", rows=_rows, sheet_url=URL % 9118) as h:
+        botmod._welcomed.discard(9118)                          # not welcomed yet
+
+        class _History:
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                raise StopAsyncIteration
+        h.channel.history = lambda **_k: _History()
+        real_welcomed = tracking.state.load("welcomed", list)
+        h.say("SGC 1234567\nSGC 2345678")
+        check(not h.errors and len(h.channel.sent) == 1 and "Welcome to KTS Collectibles" in h.channel.sent[0]
+              and any("SGC 1234567, SGC 2345678" in d and "NOT priced" in d for d in h.kevin.dms),
+              "first message of a new ticket with only another grader's serials: welcome, and Kevin is told")
+        tracking.state.save("welcomed", real_welcomed)
 
     # 5c) a ticket quoted over TWO messages has TWO buying sheets. A void trashes only the
     #     latest (unchanged) — but it must tell Kevin the earlier one is still live. It used

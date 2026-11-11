@@ -14,7 +14,8 @@ Two DELIBERATE, NARROW deviations from v1 (2026-11-10) — do not "restore" v1 h
      shipping/payment word in the message. Anything else is counted exactly as v1 did.
   2. A 7–9 digit number labelled BGS / SGC / TAG / Beckett is another grader's serial, not
      a PSA cert, and is skipped (it used to be priced as the PSA card with that number) —
-     only on a line that starts label-first; see other_grader_serials(). The label is matched
+     except on a number-first line ("12345678 PSA 1234567 SGC …", where each label FOLLOWS
+     its number), which is read as v1 reads it; see other_grader_serials(). The label is matched
      in any case, so the words "tag" / "Beckett" right in front of a number count too: a
      skipped number is reported to Kevin, which is the recoverable mistake; pricing another
      grader's serial as a PSA card is not.
@@ -132,13 +133,23 @@ def _scan(text: str, deviations: bool = True) -> tuple:
     if chatter > 3:
         return [], []
     says_cgc = bool(re.search(r'cgc', text, re.I))
-    # Does each line start label-first ("SGC 1234567 …") or number-first ("12345678 PSA …")?
-    # The regex binds a grader word to the number AFTER it, which is wrong for a number-first
-    # line — so other graders' serials are only skipped on label-first lines; a number-first
-    # line is read exactly as v1 reads it.
+    # Is a line written label-first ("SGC 1234567, PSA 23456789") or number-first
+    # ("12345678 PSA 1234567 SGC")? The regex binds a grader word to the number AFTER it,
+    # which is wrong for a number-first line — skipping there would drop the wrong card. A
+    # line is number-first when its first number has no label in front AND a grader word
+    # follows its last number; such a line is read exactly as v1 reads it. Every other line is
+    # label-first, including the natural mixed one, "12345678, 23456789, SGC 1234567".
+    first_labelled, last_end = {}, {}
+    for d, lab, pos, _r in found:
+        line = scan.rfind('\n', 0, pos)
+        first_labelled.setdefault(line, bool(lab))
+        last_end[line] = pos + len(d)
     label_first = {}
-    for _d, lab, pos, _r in found:
-        label_first.setdefault(scan.rfind('\n', 0, pos), bool(lab))
+    for line, end in last_end.items():
+        stop = scan.find('\n', end)
+        tail = scan[end:len(scan) if stop < 0 else stop]
+        trailing_label = re.match(r'[ \t]*[:#\-]?[ \t]*(?:cgc|psa|bgs|sgc|tag|beckett)\b', tail, re.I)
+        label_first[line] = first_labelled[line] or not trailing_label
     seen = set()
     unique = []
     skipped = []

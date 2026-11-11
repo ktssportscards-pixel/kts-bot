@@ -720,21 +720,27 @@ async def _handle_message(message) -> None:
     agree_shaped = shipping.looks_like_agree(text)
     cert_list = certs.extract_certs(text, deviations=not agree_shaped)
 
+    # A number labelled as another grader's (SGC / BGS / Beckett / TAG) is not priced. Kevin is
+    # told — the seller gets no line for it in the quote (or no reply at all, if it was the
+    # only number), and nobody else would know a card was left out. Sent AFTER whatever the
+    # customer is waiting for (a DM to Kevin must never hold up a quote), once per message.
+    not_ours = certs.other_grader_serials(text, deviations=not agree_shaped)
+
+    async def tell_not_ours():
+        nonlocal not_ours
+        if not_ours:
+            skipped, not_ours = not_ours, []
+            await ping_kevin(f"ℹ️ #{channel.name}: {len(skipped)} number(s) labelled as another grader "
+                             f"were NOT priced (PSA / CGC only): " + ", ".join(skipped[:20])
+                             + (" …" if len(skipped) > 20 else "")
+                             + ". Nothing was said to the customer about them.")
+
     # Welcome exactly once; a fresh greet with no certs ends here.
     if channel.id not in _welcomed:
         welcomed_now = await _welcome_if_new(message, channel)
         if welcomed_now and not cert_list:
+            await tell_not_ours()                  # a ticket's FIRST message is where a list arrives
             return
-
-    # A number labelled as another grader's (SGC / BGS / Beckett / TAG) is not priced. Tell
-    # Kevin — the seller gets no line for it in the quote (or no reply at all, if it was the
-    # only number), and nobody else would know a card was left out.
-    not_ours = certs.other_grader_serials(text, deviations=not agree_shaped)
-    if not_ours:
-        await ping_kevin(f"ℹ️ #{channel.name}: {len(not_ours)} number(s) labelled as another grader "
-                         f"were NOT priced (PSA / CGC only): " + ", ".join(not_ours[:20])
-                         + (" …" if len(not_ours) > 20 else "")
-                         + ". Nothing was said to the customer about them.")
 
     if not cert_list:
         # A short "Shipped! 1Z…" is BOTH agree-shaped and a tracking drop. It used to take the
@@ -751,6 +757,7 @@ async def _handle_message(message) -> None:
             # told, the customer is not acked and nothing is registered for delivery updates.
             # (A bare tracking number on a voided channel is acked as it always was.)
             await _handle_tracking(channel, tnum, silent=agreed and tracking.is_voided(channel.id))
+        await tell_not_ours()
         return
 
     # A lone bare 10-digit CGC candidate might be a phone/payment number — confirm
@@ -768,12 +775,14 @@ async def _handle_message(message) -> None:
                               f"🚨 **botv2 pricing error** in #{channel.name} while checking a lone "
                               f"number `{certs.cert_digits(cert_list[0])}`: {e} — no quote made. If it "
                               f"was a real CGC cert, have them resend it.")
+            await tell_not_ours()
             return
         if not pre or not pre[0].priced:
             await ping_kevin(
                 f"ℹ️ **#{channel.name}** sent a lone number "
                 f"`{certs.cert_digits(cert_list[0])}` that didn't resolve as a slab — "
                 f"ignored (phone/payment?). No quote made.")
+            await tell_not_ours()
             return
 
     username = tickets.sanitize_channel_name(channel.name) or message.author.name
@@ -795,10 +804,12 @@ async def _handle_message(message) -> None:
                               f"ticket needs a re-quote once it's fixed.")
             await channel.send("⚠️ Pricing is briefly unavailable — hang tight, I'll "
                                "get your quote shortly.")
+            await tell_not_ours()
             return
         except portal_client.PortalError as e:
             await alert_kevin("price_error", f"🚨 **botv2 pricing error** in #{channel.name}: {e}")
             await channel.send("⚠️ Pricing is briefly unavailable — please resend in a minute.")
+            await tell_not_ours()
             return
 
     quote = pricing.build_quote(rows)
@@ -849,6 +860,7 @@ async def _handle_message(message) -> None:
                               f"buying sheet was built and no summary follows — it needs a re-send of "
                               f"the certs.")
         raise
+    await tell_not_ours()                          # the customer has their quote; now Kevin's note
     if retracted:
         # The customer was just told these don't fit — but they HAD an earlier BUY quote on
         # them. Make the retraction visible to Kevin (the summary only shows "rejected").

@@ -65,7 +65,7 @@ applies that seller's rates (per-row `vip`). Precedence: explicit `rateOverride`
 | `config.py` | env + tunables + confidential-field guard |
 | `portal_client.py` | **the price source** — `price_certs()` → `PricedRow`s (customer/VIP/override) |
 | `pricing.py` | aggregate rows → quote + customer/Kevin messages (no band logic) |
-| `certs.py` | cert + tracking-number extraction (v1's parser, plus two documented deviations: a number-attached "PSA" label isn't chatter; other graders' short serials are skipped) |
+| `certs.py` | cert + tracking-number extraction: v1's parser, plus two narrow, documented deviations. (1) "PSA" labels aren't counted as chatter in a label *list* (4+ labelled numbers, or labelled numbers with at most one other word; never with a tracking number or a shipping/payment word). (2) A 7–9 digit number labelled BGS / SGC / TAG / Beckett is skipped and reported to Kevin, except on a number-first line. Neither applies to a message read as "ship" / "proceed" |
 | `sheets.py` | buying-sheet create + fill (portal offer as a number) + tracking save |
 | `tickets.py` | overflow-proof ticket-channel registry |
 | `welcome.py` | one-time greeting |
