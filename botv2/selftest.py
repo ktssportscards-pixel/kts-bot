@@ -396,6 +396,8 @@ def test_state_persistence():
         check(seen == [("load", "zz_corrupt", seen[0][2])] and "corrupt" in seen[0][2]
               and state.load_failures().get("zz_corrupt") == "corrupt",
               "state: listeners are told once, and the failure is remembered")
+        check(f"copy kept: {os.path.basename(copies[0])}" in seen[0][2],
+              "state: the alert names the copy that was actually kept")
         state.load("zz_corrupt", list); state.load("zz_corrupt", list)
         check(len(seen) == 1 and len(glob.glob(path("zz_corrupt") + ".corrupt-*")) == 1,
               "state: repeated loads of the same bad file don't re-alert or re-copy")
@@ -419,35 +421,148 @@ def test_state_persistence():
         check(state.load("zz_unreadable", dict) == {"k": "v"}, "state: new data readable afterwards")
 
         # ONE failed read poisons whatever was built from it (bot/tickets/vip cache a store at
-        # import and never re-read it), so the flag must survive a later successful read and
-        # the next save must keep what is on disk — here, a file that became readable again.
+        # import and never re-read it), so the next save must keep what is on disk even after
+        # a later successful read — here, a file that became readable again. "Failing right
+        # now" is a different fact and DOES end with that good read.
+        del seen[:]
         with open(path("zz_flaky"), "w") as f:
             f.write("not json")
-        cached = state.load("zz_flaky", list)                       # → [] (the "import-time cache")
+        cached = state.load("zz_flaky", list, cached=True)          # → [] (the "import-time cache")
+        check(state.stuck().get("zz_flaky") == "corrupt" and state.load_failures().get("zz_flaky") == "corrupt",
+              "state: a load-once cache built from a failed read is reported as stuck")
         with open(path("zz_flaky"), "w") as f:
             json.dump(["real", "history"], f)                       # the file is healthy again
-        check(state.load("zz_flaky", list) == ["real", "history"] and "zz_flaky" in state.load_failures(),
-              "state: a later successful read does NOT clear the failure flag")
+        check(state.load("zz_flaky", list) == ["real", "history"] and "zz_flaky" not in state.load_failures(),
+              "state: a later successful read ends the 'failing right now' state…")
+        check(state.stuck().get("zz_flaky") == "corrupt" and "zz_flaky" in state.failures_since_start(),
+              "state: …but the cache is still stuck on the default, and startup still reports it")
         check(state.save("zz_flaky", cached + ["one new row"]), "state: the stale cache is written back…")
         kept = glob.glob(path("zz_flaky") + ".unreadable-*")
         check(len(kept) == 1 and json.load(open(kept[0])) == ["real", "history"]
               and state.load("zz_flaky", list) == ["one new row"] and "zz_flaky" not in state.load_failures(),
               "state: …but the healthy file it replaced was kept (it used to be destroyed)")
-        # kept copies are capped per store, so a flapping store can't fill the volume
+        check([k for k, n, _d in seen if n == "zz_flaky"] == ["load"],
+              "state: keeping the old file is not itself an alarm (one alert for the episode)")
+        # a store that fails, recovers, and fails AGAIN is a new episode → a new alert
+        del seen[:]
+        with open(path("zz_again"), "w") as f:
+            f.write("bad one")
+        state.load("zz_again", list)
+        with open(path("zz_again"), "w") as f:
+            json.dump([1], f)
+        state.load("zz_again", list)                                # healed, never saved
+        with open(path("zz_again"), "w") as f:
+            f.write("bad two")
+        state.load("zz_again", list)
+        check([k for k, n, _d in seen if n == "zz_again"] == ["load", "load"],
+              "state: a second failure after a recovery alerts again (it used to be silent until a save)")
+
+        # the same corrupt bytes are never kept twice — a restart re-reads the same bad file
+        with open(path("zz_same"), "w") as f:
+            f.write("still the same garbage")
+        state.load("zz_same", list)
+        del seen[:]
+        with state._LOCK:                                           # "restart": the process forgets
+            for d in (state._failing, state._must_keep, state._preserved):
+                d.pop("zz_same", None)
+        state.load("zz_same", list)
+        first_copy = glob.glob(path("zz_same") + ".corrupt-*")
+        check(len(first_copy) == 1 and len(seen) == 1
+              and f"already kept as {os.path.basename(first_copy[0])}" in seen[0][2],
+              "state: after a restart the same corrupt file is not copied again (and the alert says where it is)")
+
+        # storm guard: at most 5 NEW copies per store per day; beyond that Kevin is told the
+        # old bytes were NOT kept (he used to be told they were)
+        del seen[:]
         for i in range(8):
             with open(path("zz_flap"), "w") as f:
                 f.write("garbage %d" % i)
             state.load("zz_flap", list)
             state.save("zz_flap", [i])
-        check(len(glob.glob(path("zz_flap") + ".*-*")) == 5, "state: at most 5 kept copies per store")
+        lost = [d for k, n, d in seen if (k, n) == ("lost", "zz_flap")]
+        loads = [d for k, n, d in seen if (k, n) == ("load", "zz_flap")]
+        check(len(glob.glob(path("zz_flap") + ".*-*")) == 5, "state: at most 5 kept copies per store per day")
+        check(len(loads) == 8 and sum("(copy kept:" in d for d in loads) == 5
+              and sum("(NO copy kept:" in d for d in loads) == 3,
+              "state: each alert says truthfully whether a copy was kept")
+        check(len(lost) == 3 and all("already kept in the last 24 h" in d for d in lost),
+              "state: a store rewritten with nothing kept is reported as LOST, not passed over")
+        # …and copies from an old incident don't block keeping new ones (no lifetime cap)
+        for i in range(6):
+            with open(path("zz_old") + f".corrupt-20250101T00000000000{i}Z-{i + 1}", "w") as f:
+                f.write("an incident from long ago %d" % i)
+        del seen[:]
+        with open(path("zz_old"), "w") as f:
+            f.write("fresh garbage")
+        state.load("zz_old", list)
+        state.save("zz_old", ["new"])
+        check(len(glob.glob(path("zz_old") + ".corrupt-*")) == 7 and not any(k == "lost" for k, _n, _d in seen),
+              "state: six kept copies from last year do not stop today's copy being kept")
+        # the old bytes can't be kept for another reason (no hard link, no rename) → also LOST
+        del seen[:]
+        with open(path("zz_nolink"), "w") as f:
+            f.write("{ nope")
+        state.load("zz_nolink", list)
+        for stale in glob.glob(path("zz_nolink") + ".corrupt-*"):
+            os.unlink(stale)                                        # the copy made at load is gone
+        with state._LOCK:
+            state._preserved.pop("zz_nolink", None)
+        real_link, real_replace = state.os.link, state.os.replace
+
+        def _no_link(*_a, **_k):
+            raise OSError("links not supported")
+
+        def _replace_only_tmp(src, dst):
+            if not str(src).endswith(".tmp"):
+                raise OSError("rename refused")
+            return real_replace(src, dst)
+        state.os.link, state.os.replace = _no_link, _replace_only_tmp
+        try:
+            ok_save = state.save("zz_nolink", ["rebuilt"])
+        finally:
+            state.os.link, state.os.replace = real_link, real_replace
+        check(ok_save and [(k, n) for k, n, _d in seen] == [("load", "zz_nolink"), ("lost", "zz_nolink")]
+              and "rename refused" in seen[1][2],
+              "state: when the old file can't be linked or moved aside, the save still works and Kevin is told it's LOST")
 
         # SAVE failure: reported, old contents untouched, no partial temp file
         del seen[:]
         state.save("zz_keep", ["old"])
-        check(state.save("zz_keep", {"bad": object()}) is False, "state: an unwritable save returns False")
+        check(state.save("zz_keep", {"bad": object()}) is False, "state: an unserialisable save returns False")
         check(seen and seen[0][:2] == ("save", "zz_keep") and state.load("zz_keep", list) == ["old"]
               and not os.path.exists(path("zz_keep") + ".tmp"),
-              "state: failed save is reported; previous contents intact; no temp file left")
+              "state: failed save is reported; previous contents intact")
+        # …and a failure at the WRITE itself (the rename), which is where a partial temp file
+        # would be left behind
+        del seen[:]
+
+        def _replace_fails(src, dst):
+            raise OSError("No space left on device")
+        state.os.replace = _replace_fails
+        try:
+            failed = state.save("zz_keep", ["new"])
+        finally:
+            state.os.replace = real_replace
+        check(failed is False and [(k, n) for k, n, _d in seen] == [("save", "zz_keep")]
+              and "No space left" in seen[0][2] and state.load("zz_keep", list) == ["old"]
+              and not os.path.exists(path("zz_keep") + ".tmp"),
+              "state: a save that fails at the rename is reported, leaves the old contents and no temp file")
+        # a failed save must NOT forget that the old file still has to be kept
+        with open(path("zz_keep2"), "w") as f:
+            f.write("unparseable but precious")
+        state.load("zz_keep2", list)
+        for stale in glob.glob(path("zz_keep2") + ".corrupt-*"):
+            os.unlink(stale)
+        with state._LOCK:
+            state._preserved.pop("zz_keep2", None)
+        state.os.replace = _replace_fails
+        try:
+            state.save("zz_keep2", ["x"])
+        finally:
+            state.os.replace = real_replace
+        check(state.save("zz_keep2", ["x"]) and any(
+                  open(c).read() == "unparseable but precious" for c in glob.glob(path("zz_keep2") + ".*-*")),
+              "state: after a failed save, the next save still keeps the unread file first")
     finally:
         state._listeners.remove(listener)
 
@@ -523,6 +638,108 @@ def test_state_persistence():
         asyncio.run(_go())
         check(len(h.kevin.dms) == 1 and "tickets.json" in h.kevin.dms[0] and "could not be read" in h.kevin.dms[0],
               "state→bot: Kevin is DMed when a data file can't be read")
+        h.kevin.dms.clear()
+        alerts.reset()
+
+        async def _lost():
+            botmod._on_state_problem("lost", "owed", "5 copies of it were already kept in the last 24 h")
+            for _ in range(5):
+                await asyncio.sleep(0)
+        asyncio.run(_lost())
+        check(len(h.kevin.dms) == 1 and "could NOT be kept" in h.kevin.dms[0] and "owed.json" in h.kevin.dms[0]
+              and (alerts.last_error() or {}).get("key") == "state_lost:owed",
+              "state→bot: Kevin is told when a store was rewritten and its old contents could not be kept")
+    alerts.reset()
+
+    # The real path end to end: a store goes bad while the bot is running and is read from a
+    # WORKER THREAD (sheet work runs in threads) — the alert has to hop onto the bot's loop.
+    saved_sets = {n: dict(getattr(state, n)) for n in ("_failing", "_must_keep", "_stuck", "_ever_failed", "_preserved")}
+    with _BotHarness(8812) as h:
+        with open(path("zz_thread"), "w") as f:
+            f.write("{ broken")
+
+        async def _threaded():
+            botmod.bot.loop = asyncio.get_running_loop()            # what discord.py does at login
+            try:
+                got = await asyncio.to_thread(state.load, "zz_thread", dict)
+                for _ in range(10):
+                    await asyncio.sleep(0)
+                return got
+            finally:
+                botmod.bot.__dict__.pop("loop", None)
+        got = asyncio.run(_threaded())
+        check(got == {} and len(h.kevin.dms) == 1 and "zz_thread.json" in h.kevin.dms[0]
+              and "While it can't be read I treat `zz_thread` as EMPTY" in h.kevin.dms[0]
+              and "copy kept: zz_thread.json.corrupt-" in h.kevin.dms[0],
+              "state→bot: a read that fails on a worker thread reaches Kevin's DMs, saying what was kept")
+
+    # Startup: failures from before the connection are reported ONCE, with wording that is
+    # true at that moment; a reconnect repeats nothing.
+    for n in ("_failing", "_must_keep", "_stuck", "_ever_failed", "_preserved"):
+        getattr(state, n).clear()
+    saved_default2, saved_folder2, saved_mock = cfg.DATA_DIR_IS_DEFAULT, cfg.PSA_FOLDER_ID, cfg.PRICE_MOCK
+    saved_started, saved_runner = botmod._digest_started, botmod._web_runner
+    saved_loops = (botmod._payout_digest_loop, botmod._heartbeat_loop, botmod.tickets.sweep_overflow)
+    cfg.DATA_DIR_IS_DEFAULT, cfg.PSA_FOLDER_ID, cfg.PRICE_MOCK = False, "a-real-folder-id", False
+    try:
+        with open(path("zz_boot_cached"), "w") as f:
+            f.write("<<garbage at boot>>")
+        with open(path("zz_boot_reread"), "w") as f:
+            f.write("<<garbage at boot>>")
+        with open(path("zz_boot_healed"), "w") as f:
+            f.write("<<garbage at boot>>")
+        state.load("zz_boot_cached", dict, cached=True)             # e.g. channel_sheet / vip_rates
+        state.load("zz_boot_reread", list)                          # e.g. owed, still bad at connect
+        state.load("zz_boot_healed", list)
+        with open(path("zz_boot_healed"), "w") as f:
+            json.dump([], f)
+        state.load("zz_boot_healed", list)                          # reads fine by the time we connect
+        started = []
+
+        async def _noop_loop():
+            started.append(1)
+
+        async def _noop_sweep(_bot):
+            return None
+        botmod._payout_digest_loop = botmod._heartbeat_loop = _noop_loop
+        botmod.tickets.sweep_overflow = _noop_sweep
+        with _BotHarness(8813) as h:
+            botmod._web_runner, botmod._digest_started = object(), False     # web server "already up"
+
+            async def _connect(times):
+                botmod.bot.loop = asyncio.get_running_loop()
+                try:
+                    for _ in range(times):
+                        await botmod.on_ready()
+                    for _ in range(5):
+                        await asyncio.sleep(0)
+                finally:
+                    botmod.bot.__dict__.pop("loop", None)
+            asyncio.run(_connect(1))
+            by = {n: next((d for d in h.kevin.dms if f"`{n}.json`" in d), "") for n in
+                  ("zz_boot_cached", "zz_boot_reread", "zz_boot_healed")}
+            check(len(h.kevin.dms) == 3 and all(by.values()),
+                  "startup: every store that failed to read before the connection is reported at the first connect")
+            check("then restart me" in by["zz_boot_cached"] and "loaded once" in by["zz_boot_cached"],
+                  "startup: a load-once store says restore AND restart (a restore alone is overwritten)")
+            check("While it can't be read I treat `zz_boot_reread` as EMPTY" in by["zz_boot_reread"],
+                  "startup: a store that is still unreadable says so")
+            check("reads again now" in by["zz_boot_healed"] and "EMPTY" not in by["zz_boot_healed"],
+                  "startup: a store that has recovered is not described as empty")
+            check(botmod._digest_started is True and len(started) == 2,
+                  "startup: the scheduled loops are started once")
+            h.kevin.dms.clear()
+            alerts.reset()                                           # even with the rate limit out of the way…
+            asyncio.run(_connect(3))
+            check(h.kevin.dms == [] and len(started) == 2,
+                  "reconnect: on_ready sends no storage alert and starts no second set of loops")
+    finally:
+        botmod._digest_started, botmod._web_runner = saved_started, saved_runner
+        (botmod._payout_digest_loop, botmod._heartbeat_loop, botmod.tickets.sweep_overflow) = saved_loops
+        cfg.DATA_DIR_IS_DEFAULT, cfg.PSA_FOLDER_ID, cfg.PRICE_MOCK = saved_default2, saved_folder2, saved_mock
+        for n, old in saved_sets.items():
+            getattr(state, n).clear()
+            getattr(state, n).update(old)
     alerts.reset()
 
 

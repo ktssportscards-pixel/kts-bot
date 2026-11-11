@@ -16,7 +16,7 @@ each category → a flat percent OR [{min,max,rate}] bands (the portal's rateOve
 from . import state
 
 _STORE = "vip_rates"
-_vip: dict = state.load(_STORE, dict)
+_vip: dict = state.load(_STORE, dict, cached=True)
 
 
 def override_for(username: str):

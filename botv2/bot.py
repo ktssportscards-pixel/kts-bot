@@ -27,11 +27,11 @@ intents.members = True       # ticket detection reads member permission overwrit
 bot = discord.Client(intents=intents)
 
 # Welcomed ticket channels (persisted; survives redeploys with a DATA_DIR volume).
-_welcomed: set = set(int(x) for x in state.load("welcomed", list))
+_welcomed: set = set(int(x) for x in state.load("welcomed", list, cached=True))
 # Per-channel snapshot of the latest accepted quote, used to record the lot on ship.
 _last_quote: dict = {}
 # Per-channel buying-sheet URL (persisted) — used to save a tracking number later.
-_channel_sheet: dict = state.load("channel_sheet", dict)
+_channel_sheet: dict = state.load("channel_sheet", dict, cached=True)
 
 
 def _remember_welcomed(cid: int) -> None:
@@ -75,11 +75,29 @@ _bg_tasks: set = set()          # strong refs to fire-and-forget alert tasks (ne
 
 
 def _state_problem_text(kind: str, name: str, detail: str) -> str:
+    """What Kevin is told about a storage problem. Built from what is true when it is sent
+    (state.stuck / state.load_failures), so it never says "running on an empty store" about
+    one that reads fine again, or "restore it" where a restore alone would be overwritten."""
     if kind == "load":
-        return (f"🚨 **Data file `{name}.json` could not be read** ({detail}). I'm running on an "
-                f"EMPTY `{name}` until it's fixed, so anything that depends on it (owed balances, "
-                f"tickets, payment info, void guards…) may be wrong or missing. The unreadable file "
-                f"is kept next to it in the data folder — restore it before trusting `{name}` again.")
+        kept = (f"Kept copies, if any, sit next to it in the data folder as `{name}.json.corrupt-…` "
+                f"or `{name}.json.unreadable-…`.")
+        if name in state.stuck():
+            return (f"🚨 **Data file `{name}.json` could not be read when I loaded it** ({detail}). "
+                    f"`{name}` is loaded once, at startup, so I'm running on an EMPTY `{name}` until "
+                    f"I'm restarted. Fix or restore the file FIRST, then restart me — a restore "
+                    f"without a restart is overwritten by my next save. {kept}")
+        if name in state.load_failures():
+            return (f"🚨 **Data file `{name}.json` could not be read** ({detail}). While it can't be "
+                    f"read I treat `{name}` as EMPTY, so anything that depends on it (owed balances, "
+                    f"tickets, payment info, void guards…) may be wrong or missing, and anything I "
+                    f"save to it starts from empty. {kept}")
+        return (f"⚠️ **Data file `{name}.json` could not be read earlier** ({detail}). It reads "
+                f"again now. If I saved to `{name}` while it was unreadable, that save started from "
+                f"empty — check `{name}` against the kept copy. {kept}")
+    if kind == "lost":
+        return (f"🚨 **`{name}.json` was just rewritten and its previous contents could NOT be kept** "
+                f"({detail}). An earlier read of that file had failed, so what I wrote may not include "
+                f"what was in it. A backup of the data volume is now the only copy of the old `{name}`.")
     return (f"🚨 **Couldn't save `{name}`** ({detail}). The latest change to it is NOT on disk "
             f"(quotes / shipments / payments recorded since may be lost on a restart). "
             f"Check the data volume — full or read-only?")
@@ -518,6 +536,24 @@ async def _stale_nudge_loop():
             await asyncio.sleep(3600)              # back off an hour, then re-arm
 
 
+async def _startup_alerts() -> None:
+    """Things Kevin is told ONCE per process, at the first connect — never on a reconnect
+    (on_ready re-fires on each one, and a repeated "data file could not be read" hours after
+    the fact is a false alarm). Each is also recorded for /status."""
+    if not config.KEVIN_USER_ID:
+        print("[bot] ⚠️ KEVIN_USER_ID is unset — admin commands and ALL Kevin DMs/alerts are disabled.")
+    # A store that failed to read during import / before the connection had nobody to tell.
+    for name, detail in state.failures_since_start().items():
+        await alert_kevin(f"state_load:{name}", _state_problem_text("load", name, detail))
+    for key, text in _startup_storage_problems():
+        print(f"[bot] {text}")
+        await alert_kevin(key, text)
+    if config.PRICE_MOCK:                          # a live Discord connection + mock pricing = fake quotes
+        print("[bot] ⚠️ BOTV2_PRICE_MOCK is ON — quotes are MOCK prices, not real ones.")
+        await alert_kevin("price_mock", "🚨 botv2 is running with `BOTV2_PRICE_MOCK=1` — every quote "
+                          "is a FAKE mock price. Turn it off unless this is a test bot.")
+
+
 _web_runner = None
 _digest_started = False
 
@@ -537,21 +573,9 @@ async def on_ready():
             print(f"[bot] web server start failed (non-fatal): {e}")
             await alert_kevin("webserver", f"🚨 botv2 web server failed to start: {e} — "
                               f"/health, /status and the owed tracker are down.")
-    # A store that was already unreadable when the bot booted was reported before the loop
-    # (and Kevin's DM) existed — say so now. Rate-limited, so reconnects don't repeat it.
-    for name, why in state.load_failures().items():
-        await alert_kevin(f"state_load:{name}", _state_problem_text("load", name, why))
-    if not _digest_started:                        # start the scheduled loops once
+    if not _digest_started:                        # once per process: on_ready re-fires on every reconnect
         _digest_started = True
-        if not config.KEVIN_USER_ID:
-            print("[bot] ⚠️ KEVIN_USER_ID is unset — admin commands and ALL Kevin DMs/alerts are disabled.")
-        for key, text in _startup_storage_problems():
-            print(f"[bot] {text}")
-            await alert_kevin(key, text)
-        if config.PRICE_MOCK:                      # a live Discord connection + mock pricing = fake quotes
-            print("[bot] ⚠️ BOTV2_PRICE_MOCK is ON — quotes are MOCK prices, not real ones.")
-            await alert_kevin("price_mock", "🚨 botv2 is running with `BOTV2_PRICE_MOCK=1` — every quote "
-                              "is a FAKE mock price. Turn it off unless this is a test bot.")
+        await _startup_alerts()
         bot.loop.create_task(_payout_digest_loop())
         bot.loop.create_task(_heartbeat_loop())
         if config.LANES_BOARD and config.LANES_CHANNEL_ID:

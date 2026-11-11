@@ -18,7 +18,7 @@ import discord
 from . import state
 
 _STORE = "ticket_channels"
-_known: set = set(int(x) for x in state.load(_STORE, list))
+_known: set = set(int(x) for x in state.load(_STORE, list, cached=True))
 
 
 def remember(channel_id: int) -> None:
