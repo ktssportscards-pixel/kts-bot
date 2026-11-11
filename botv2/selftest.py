@@ -217,7 +217,7 @@ class _BotHarness:
     module, with pricing / sheet calls replaceable per test. Restores everything on exit."""
     def __init__(self, cid, name="harness", rows=None, sheet_url=None):
         self.cid, self.name, self.rows, self.sheet_url = cid, name, rows, sheet_url
-        self.sheet_calls, self.fill_calls, self.errors = [], [], []
+        self.sheet_calls, self.fill_calls, self._errors, self._errors_read = [], [], [], False
         self.tracking_saves, self.trash_calls = [], []
 
     def __enter__(self):
@@ -274,6 +274,14 @@ class _BotHarness:
             sheets_mod.create_psa_sheet, sheets_mod.fill_buying_sheet = _create, _fill
         return self
 
+    @property
+    def errors(self):
+        """Exceptions the handler raised (say() catches them, as the live on_message wrapper
+        does). Reading this marks them as looked at; an exception no test looked at fails the
+        run when the harness closes — a handler that crashes must never pass unnoticed."""
+        self._errors_read = True
+        return self._errors
+
     def say(self, content, author=None):
         """Feed one message through the real on_message core. Like the live on_message
         wrapper, an exception is caught — it lands in .errors for the test to assert on."""
@@ -281,10 +289,13 @@ class _BotHarness:
         try:
             asyncio.run(self.botmod._handle_message(msg))
         except Exception as e:
-            self.errors.append(e)
+            self._errors.append(e)
         return msg
 
     def __exit__(self, *exc):
+        if self._errors and not self._errors_read and exc[0] is None:
+            check(False, f"harness #{self.name}: the handler raised and no check looked at it: "
+                         f"{[repr(e)[:120] for e in self._errors[:3]]}")
         cfg, botmod, sheets_mod = self.cfg, self.botmod, self.sheets_mod
         (cfg.KEVIN_USER_ID, portal_client.price_certs,
          sheets_mod.create_psa_sheet, sheets_mod.fill_buying_sheet,
