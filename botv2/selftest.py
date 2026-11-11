@@ -2772,6 +2772,36 @@ def test_handlers_and_void_races():
         check(not h.errors and "VOIDED while its buying sheet was being filled" in kd and "📋" not in kd
               and "didn't land" not in kd,
               "void during the fill: no quote summary and no 'didn't land on the sheet' follow the void")
+    # the note names the step that was really running: a FILL that raises after the void…
+    with _BotHarness(9137, name="fillraise", rows=_rows, sheet_url=URL % 9137) as h:
+        def _void_then_fill_fails(sheet_id, rows_, sheet_name=None):
+            tracking.void_ticket(9137)
+            raise RuntimeError("gspread APIError 503")
+        sheets_mod.fill_buying_sheet = _void_then_fill_fails
+        h.say("12345678")
+        kd = "\n".join(h.kevin.dms)
+        check(not h.errors and "VOIDED while its buying sheet was being filled (the fill then failed" in kd
+              and "build was failing" not in kd and "📋" not in kd,
+              "void during a fill that then fails: the note says FILL, not 'build was failing'")
+    # …and a void that lands right after a failed BUILD was already reported
+    with _BotHarness(9138, name="failthenvoid", rows=_rows, sheet_url=URL % 9138) as h:
+        def _build_fails(username, cert_tokens, folder_id=None):
+            raise RuntimeError("Apps Script timeout")
+        sheets_mod.create_psa_sheet = _build_fails
+        real_dm = h.kevin.send
+
+        async def _void_during_alert(text):
+            await real_dm(text)
+            if "buying sheet failed" in text:
+                tracking.void_ticket(9138)                      # Kevin voids on seeing the failure
+        h.kevin.send = _void_during_alert
+        h.say("12345678")
+        h.kevin.send = real_dm
+        kd = "\n".join(h.kevin.dms)
+        check(not h.errors and "buying sheet failed" in kd and "VOIDED right after its buying-sheet build failed" in kd
+              and "was being filled" not in kd and "📋" not in kd,
+              "void right after a failed build: says so (not 'the void already handled that sheet'), no summary")
+
     # a failing build with NO void still alerts and still sends the summary (unchanged)
     with _BotHarness(9134, name="plainfail", rows=_rows, sheet_url=URL % 9134) as h:
         def _just_fail(username, cert_tokens, folder_id=None):
@@ -2799,17 +2829,24 @@ def test_handlers_and_void_races():
         h.say("12345678")
         h.kevin.send = real_dm
         from botv2 import alerts as _al
-        check(tracking.state.load("channel_sheets", dict).get("9135") == [URL % 9135]
-              and (_al.last_error() or {}).get("key") == "late_sheet:9135"
-              and (URL % 9135) not in ((_al.last_error() or {}).get("text") or ""),
-              "late sheet, DM failed: the link is kept in the sheet history and /status flags it (without the link)")
+        held = [k for k in botmod._pending_alerts if k.startswith("late_sheet:9135:")]
+        le = _al.last_error() or {}
+        check(tracking.state.load("channel_sheets", dict).get("9135") == [URL % 9135] and len(held) == 1
+              and le.get("key") == held[0] and "!void" not in (le.get("text") or ""),
+              "late sheet, DM failed: the link is on record, the DM is HELD, and nothing advises running `!void`")
+        _al._last_sent.clear()                                  # …the quiet window passes / a reconnect
+        asyncio.run(botmod._send_pending(held[0]))
+        check(len(h.kevin.dms) == 1 and (URL % 9135) in h.kevin.dms[0] and "trash it by hand" in h.kevin.dms[0]
+              and not botmod._pending_alerts,
+              "late sheet: the held DM is delivered once DMs work again (the link is not lost)")
+        del h.kevin.dms[:]
         dmch = _fake_channel(9196, "kevin-dm")
         dmch.guild = None
         asyncio.run(commands.handle(None, _FakeMessage(dmch, "!void id:9135", author=h.kevin)))
         kd = "\n".join(h.kevin.dms)
         check((URL % 9135) in kd and "OTHER buying sheet(s) are on record" in kd and not h.trash_calls
               and "9135" not in tracking.state.load("channel_sheets", dict),
-              "late sheet: a later `!void id:` hands Kevin the link (never auto-trashed) and clears the record")
+              "late sheet: the next void of that channel also lists the link (never auto-trashed) and clears the record")
 
     # 3e) A ticket that was already open when the sheet history was introduced: the one earlier
     #     sheet the bot still knows (its cache pointer) is recorded before it is replaced.
@@ -2925,6 +2962,15 @@ def test_handlers_and_void_races():
                   and tracking.find_tickets(channel_id=9114)[0].get("tracking") == "1Z999AA10123456784"
                   and "Tracking from" in kd and "NOT stored" not in kd,
                   "tracking after a bailed void: the number is stored on the live ticket and Kevin isn't told otherwise")
+            check("`ship` is being IGNORED on this channel" in kd and "A `ship` message in the ticket books them" not in kd,
+                  "…and Kevin is not advised that `ship` books the lot while the cancel guard is set")
+            del h.channel.sent[:], h.kevin.dms[:], registered[:]
+            h.say("Shipped! 1Z999AA10123456785")
+            kd = "\n".join(h.kevin.dms)
+            check(h.channel.sent == [] and not registered and "ship attempt on a VOIDED channel" in kd
+                  and "No reply was posted to the customer, and the number was not registered with the delivery watcher" in kd
+                  and "is being IGNORED" in kd,
+                  "'Shipped! <#>' after a bailed void: silent to the customer, and Kevin's DMs agree with each other")
             tracking.void_ticket(9114)
         lots.drop(9114)
     finally:
@@ -4567,7 +4613,8 @@ def test_void_callers():
             # 4c) Response shapes the contract documents. A `user` lookup that finds no open
             #     quote answers with the SAME keys as a channel_id not_found (a strict decoder
             #     written from the table choked on the bare {voided, reason}).
-            NOT_FOUND_KEYS = {"voided", "reason", "residual_cleaned", "had_sheet", "sheet_trashed", "other_sheet_urls"}
+            NOT_FOUND_KEYS = {"voided", "reason", "residual_cleaned", "ship_blocked", "had_sheet", "sheet_trashed",
+                              "other_sheet_urls"}
             r = body_of(post({"user": "nobody-at-all"}))
             check(set(r) == NOT_FOUND_KEYS and r["reason"] == "not_found" and r["residual_cleaned"] is False
                   and r["other_sheet_urls"] == [], "/void user with no ticket: full not_found shape")
@@ -4589,6 +4636,20 @@ def test_void_callers():
             check(r.get("voided") is True and trash_calls == [URL % 1007] and r.get("sheet_trashed") is True
                   and r.get("sheet_url") == URL % "1007mem" and r.get("other_sheet_urls") == [],
                   "/void: a memory-only sheet is given once (sheet_url), not again in other_sheet_urls")
+
+            # the latest sheet's trash FAILS and a second sheet is only in memory: both still need
+            # a hand, so both must be in the response — once each
+            del trash_calls[:]
+            trash_result[0] = False
+            seed(1014, "twobyhand")
+            tracking.remember_sheet(1014, URL % 1014)
+            tracking.remember_sheet(1014, URL % "1014mem")
+            botmod._channel_sheet["1014"] = URL % "1014mem"
+            r = body_of(post({"channel_id": "1014"}))
+            trash_result[0] = True
+            check(r.get("voided") is True and r.get("sheet_trashed") is False and r.get("sheet_url") == URL % 1014
+                  and r.get("other_sheet_urls") == [URL % "1014mem"],
+                  "/void: when two sheets need trashing by hand, the second is not dropped from the response")
 
             # 4d) The cache write fails AFTER the ticket is gone (ok=False, ticket_removed): the
             #     quote is dead, so both callers must still purge memory and trash at once.
@@ -4673,8 +4734,42 @@ def test_void_callers():
             ok, dm = kevin_says("!void id:999")
             check(999 not in botmod._last_quote and not lots.has_lot(999) and "in-memory quote" in dm,
                   "!void on a memory-only quote: the unsaved quote + lot are dropped (used to survive and stay shippable)")
+            # …and the channel is CANCELLED like any voided one: there was no ticket for the void
+            # to set the guard on, so `ship` there was still answered with the default address.
+            check(tracking.is_voided(999) and tracking.void_cutoff_of(999) and "ignored until they re-quote" in dm,
+                  "!void on a memory-only quote: the cancel guard and the rebuild cutoff are set, and the reply says so")
+            ship_ch = _fake_channel(999, "memonly")
+            h.tickets._known.add(999)
+            botmod._welcomed.add(999)
+            del h.kevin.dms[:]
+            try:
+                asyncio.run(botmod._handle_message(_FakeMessage(ship_ch, "ship")))
+            finally:
+                h.tickets._known.discard(999)
+                botmod._welcomed.discard(999)
+            check(ship_ch.sent == [] and any("VOIDED channel" in d for d in h.kevin.dms),
+                  "…so a customer `ship` there gets no address (it used to get the default one)")
             ok, dm = kevin_says("!void id:999")
             check("Nothing to void" in dm, "!void again: nothing left")
+            # the same through the app, and when the guard itself can't be saved
+            lots.add_slab_values(1012, {"q1": 100.0}, {"q1": "pokemon"})
+            botmod._last_quote[1012] = {"username": "memonly2", "comp": 100, "payout": 90, "cards": 1,
+                                        "certs": {"q1": 100}, "cert_offers": {"q1": 90}}
+            r = body_of(post({"channel_id": "1012"}))
+            check(r.get("reason") == "not_found" and r.get("residual_cleaned") is True and r.get("ship_blocked") is True
+                  and tracking.is_voided(1012) and 1012 not in botmod._last_quote,
+                  "/void on a memory-only quote: cleaned, cancel guard set, ship_blocked:true")
+            check(body_of(post({"channel_id": "7998"})).get("ship_blocked") is False and not tracking.is_voided(7998),
+                  "/void on a channel with nothing at all: no guard is set (ship_blocked:false)")
+            lots.add_slab_values(1013, {"q1": 100.0}, {"q1": "pokemon"})
+            real = failing("voided")
+            try:
+                ok, dm = kevin_says("!void id:1013")
+            finally:
+                tracking.state.save = real
+            check(not tracking.is_voided(1013) and "could NOT save the cancel guard" in dm and not lots.has_lot(1013),
+                  "!void on a memory-only quote when the guard can't be saved: Kevin is told `ship` is still answered")
+            tracking.clear_voided(999), tracking.clear_voided(1012)
 
             # a sheet the bot only remembers in memory (its cache-file write failed) is NOT
             # auto-trashed (the trash acts on the persisted pointer only) — but its link is handed over.

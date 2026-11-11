@@ -931,6 +931,16 @@ def mark_void_cutoff(channel_id, ts: str) -> bool:
         return False
 
 
+def mark_cancelled(channel_id) -> bool:
+    """Set the cancel guard and the rebuild cutoff for a channel that has NO ticket row —
+    the two writes void_ticket makes first for a real ticket. Used when a void purged a
+    quote that only existed in memory (its ticket write had failed): without them the
+    "voided" quote's channel still answered `ship` with the default address, and a sheet
+    left from it could be rebuilt into a lot later. True only if both persisted."""
+    ok = mark_voided(channel_id)
+    return mark_void_cutoff(channel_id, datetime.utcnow().isoformat() + "+00:00") and ok
+
+
 def void_cutoff_of(channel_id) -> str:
     """The channel's cancellation cutoff (ISO UTC), or '' if none — rebuild_from_sheets skips any
     sheet created at/before it."""

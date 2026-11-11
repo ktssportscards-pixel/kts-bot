@@ -257,7 +257,8 @@ async def _void(req):
             # Same keys as the channel_id not_found below, so a strict decoder written against
             # the contract doesn't choke on this path (a `user` lookup never purges leftovers).
             return _json({"voided": False, "reason": "not_found", "residual_cleaned": False,
-                          "had_sheet": False, "sheet_trashed": False, "other_sheet_urls": []})
+                          "ship_blocked": False, "had_sheet": False, "sheet_trashed": False,
+                          "other_sheet_urls": []})
         else:
             return _json({"voided": False, "reason": "ambiguous",
                           "matches": [{"channel_id": str(r.get("channel_id")),
@@ -325,8 +326,12 @@ async def _void(req):
     # sheet that still needs trashing by hand (absent when none does).
     # other_sheet_urls = the other sheets on record for the ticket (never auto-trashed); a link
     # already given as sheet_url is not repeated here.
+    # (Every link that still needs a hand is returned exactly once: the first as sheet_url, any
+    # further one — e.g. a memory-only sheet when the latest sheet's trash also failed — here.)
+    returned = by_hand[0] if by_hand else ""
+    listed = [] if bailed else list(dict.fromkeys(by_hand[1:] + list(res.get("other_sheet_urls") or [])))
     sheet_info = {"had_sheet": bool(sheet_url or mem_sheet), "sheet_trashed": sheet_trashed,
-                  "other_sheet_urls": list(others)}
+                  "other_sheet_urls": [u for u in listed if u != returned]}
     if by_hand:
         sheet_info["sheet_url"] = by_hand[0]
     if removed:
@@ -348,7 +353,12 @@ async def _void(req):
                       "ticket_intact": False, **sheet_info})
     # No ticket. residual_cleaned=True means this call DID remove leftover state from an
     # earlier partial void (so "not_found" isn't mistaken for "nothing happened").
-    return _json({"voided": False, "reason": "not_found", "residual_cleaned": residual, **sheet_info})
+    # If what it removed was a quote that only existed in memory (its ticket never saved), set
+    # the cancel guard void_ticket had no ticket to set it on; ship_blocked reports the result.
+    if had_mem or mem_sheet:
+        tracking.mark_cancelled(vcid)
+    return _json({"voided": False, "reason": "not_found", "residual_cleaned": residual,
+                  "ship_blocked": bool(tracking.is_voided(vcid)), **sheet_info})
 
 
 async def start():

@@ -14,6 +14,7 @@ The buying sheet, shipping, tracking, void and command flows live in their own m
 (sheets / shipping / tracking / commands) and hook into this loop.
 """
 import asyncio
+import itertools
 
 import discord
 
@@ -301,10 +302,18 @@ async def _handle_tracking(channel, tnum, silent: bool = False) -> None:
         # that are still merely QUOTED means a package is coming for a lot that is not in the
         # payout queue (no digest line, no `!owe` packet) — tell Kevin; never auto-book here.
         n_q, amt_q = tracking.unbooked_quoted(channel.id)
-        warn = (f" — ⚠️ {n_q} quoted card(s) (${amt_q:,.2f}) on this ticket are NOT booked as owed "
-                f"yet. A `ship` message in the ticket books them — the bot answers it by posting "
-                f"the shipping address there again."
-                if n_q else "")
+        if n_q and tracking.is_voided(channel.id):
+            # A void that did not complete: the ticket is live (so the number IS stored) but the
+            # cancel guard is set, so the usual "a `ship` books them" advice would be wrong.
+            warn = (f" — ⚠️ {n_q} quoted card(s) (${amt_q:,.2f}) on this ticket are NOT booked as owed, "
+                    f"and `ship` is being IGNORED on this channel: a void of it did not complete (the "
+                    f"ticket is still live, the cancel guard is set). Re-run the void, or have them "
+                    f"re-quote.")
+        else:
+            warn = (f" — ⚠️ {n_q} quoted card(s) (${amt_q:,.2f}) on this ticket are NOT booked as owed "
+                    f"yet. A `ship` message in the ticket books them — the bot answers it by posting "
+                    f"the shipping address there again."
+                    if n_q else "")
     elif tracking.is_voided(channel.id):
         warn = (" — ⚠️ this channel's quote was VOIDED: no ticket/owed on record, so the number "
                 "is NOT stored and nothing is booked.")
@@ -313,7 +322,9 @@ async def _handle_tracking(channel, tnum, silent: bool = False) -> None:
                 "(a delivery update can't fire for it).")
     await ping_kevin(f"📦 Tracking from **{uname}** (#{channel.name}): `{tnum}`{saved}"
                      + ("" if sheet_url else " — no sheet cached, add by hand") + warn
-                     + (" (No reply was posted to the customer.)" if silent else ""))
+                     + ((" (No reply was posted to the customer"
+                         + (", and the number was not registered with the delivery watcher"
+                            if config.REGISTER_TRACKING else "") + ".)") if silent else ""))
 
 
 async def notify_delivered(channel_id, user: str = "") -> bool:
@@ -928,12 +939,17 @@ async def _handle_message(message) -> None:
                              + ", ".join(certs.cert_label(c) for c in missing))
     except Exception as e:
         if voided_since():
-            # The build was failing (it can take minutes before it gives up) and the ticket was
-            # voided meanwhile: "sheet failed — summary below, add rows by hand" would read
-            # like a live quote.
-            await ping_kevin(f"🛑 #{channel.name} was VOIDED while its buying sheet build was failing "
-                             f"({e}) — no summary sent. If the failed build still left a sheet in the "
-                             f"buying folder, nothing links to it.")
+            # Voided while the build was failing (it can take minutes before it gives up), or
+            # while the fill was: "sheet failed — summary below, add rows by hand" would read
+            # like a live quote. sheet_url says which step it was.
+            if sheet_url:
+                await ping_kevin(f"🛑 #{channel.name} was VOIDED while its buying sheet was being filled "
+                                 f"(the fill then failed: {e}) — no quote summary sent; the void "
+                                 f"already handled that sheet.")
+            else:
+                await ping_kevin(f"🛑 #{channel.name} was VOIDED while its buying sheet build was failing "
+                                 f"({e}) — no summary sent. If the failed build still left a sheet in "
+                                 f"the buying folder, nothing links to it.")
             return
         await alert_kevin(f"sheet_fail:{channel.id}",
                           f"⚠️ buying sheet failed for #{channel.name} ({e}) — "
@@ -942,28 +958,38 @@ async def _handle_message(message) -> None:
         # Voided while the sheet was being filled: the sheet was already linked, so the void
         # itself dealt with it (trashed it, or gave Kevin the link). Don't follow the void
         # with what looks like a fresh quote summary.
-        await ping_kevin(f"🛑 #{channel.name} was VOIDED while its buying sheet was being filled — "
-                         f"no quote summary sent (the void already handled that sheet).")
+        if sheet_url:
+            await ping_kevin(f"🛑 #{channel.name} was VOIDED while its buying sheet was being filled — "
+                             f"no quote summary sent (the void already handled that sheet).")
+        else:                                      # the build had failed (alert above), then the void
+            await ping_kevin(f"🛑 #{channel.name} was VOIDED right after its buying-sheet build failed — "
+                             f"no quote summary follows. If the failed build still left a sheet in "
+                             f"the buying folder, nothing links to it.")
         return
     await ping_kevin(pricing.kevin_summary(quote, username, sheet_url,
                                            ticket_link=f"<#{channel.id}>"))
 
 
+_late_seq = itertools.count(1)
+
+
 async def _report_late_sheet(channel, sheet_url: str) -> None:
     """A buying sheet finished building after its quote was voided. It is deliberately not
-    cached, filled or trashed; Kevin gets the link. That DM is best-effort, so the link is
-    also put in the channel's sheet history: a later `!void id:<channel>` lists it."""
-    recorded = tracking.remember_sheet(channel.id, sheet_url)
-    told = await ping_kevin(f"🛑 #{channel.name} was VOIDED while its buying sheet was still building. "
-                            f"I did NOT fill or link that sheet — trash it by hand: {sheet_url}")
-    if not told:
-        how = (f"run `!void id:{channel.id}` to get its link" if recorded
-               else "look in the buying folder for the newest sheet in that seller's name")
-        print(f"[bot] channel {channel.id}: a buying sheet built for a voided quote could not be "
-              f"reported by DM — {how}")
-        alerts.record_error(f"late_sheet:{channel.id}",
-                            f"a buying sheet built for the voided quote in #{channel.name} was never "
-                            f"reported to Kevin — {how}")
+    cached, filled or trashed; Kevin gets the link. If that DM can't be delivered it is held
+    and re-sent until it is (and the link goes to the container log), and the link is also
+    kept in the channel's sheet history, so the next void of that channel lists it. Nothing
+    here tells Kevin to run a command: `!void id:` on that channel would void whatever quote
+    is live there by then."""
+    tracking.remember_sheet(channel.id, sheet_url)
+    text = (f"🛑 #{channel.name}: a quote was VOIDED while its buying sheet was still building. I did "
+            f"NOT fill or link that sheet (it belongs to no quote that is live there now) — trash it "
+            f"by hand: {sheet_url}")
+    if not await ping_kevin(text):
+        print(f"[bot] channel {channel.id}: sheet built for a voided quote, DM failed (will retry): "
+              f"{sheet_url}")
+        key = f"late_sheet:{channel.id}:{next(_late_seq)}"
+        _pending_alerts[key] = lambda t=text: t
+        await _send_pending(key)
 
 
 async def _welcome_if_new(message, channel) -> bool:

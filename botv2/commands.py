@@ -279,6 +279,17 @@ async def handle(bot, message) -> bool:
                                         ("in-memory quote / lot", had_mem)) if hit]
             out = [f"🧹 Channel `{cid}` had no live ticket, but I cleared leftover state"
                    + (f" ({', '.join(cleared)})" if cleared else "") + "."]
+            if had_mem or mem_sheet:
+                # A quote that only existed in memory (its ticket never saved) was just killed.
+                # There was no ticket for void_ticket to set the cancel guard on, so set it here:
+                # otherwise a customer `ship` in that channel is still answered with the address.
+                if tracking.mark_cancelled(cid):
+                    out.append("That was an unsaved quote: the channel is now cancelled like any "
+                               "voided one (a `ship` there is ignored until they re-quote).")
+                else:
+                    out.append("⚠️ That was an unsaved quote, and I could NOT save the cancel guard — a "
+                               "`ship` in that channel will still be answered with the default address "
+                               "(nothing would be booked). Re-run this once storage is healthy.")
             out += sheet_lines
             if not res.get("ok", True):
                 out.append(f"⚠️ A storage write failed during that cleanup — something is still on disk. "
