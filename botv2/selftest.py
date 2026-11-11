@@ -3818,6 +3818,46 @@ def test_alerts_and_lanes():
         flags = _j.loads(loop.run_until_complete(webserver._status(req)).body.decode())["flags"]
         check(flags.get("price_mock") is True and flags.get("kevin_dm") is False and flags.get("auto_claim") is False,
               "status: price_mock / kevin_dm flags reported (mock is ON only because this is the selftest)")
+        # the standing conditions the canary must stay red on (they are only alerted once, at boot)
+        from botv2 import state as state_mod
+        import botv2.canary as canary
+        status_flags = lambda: _j.loads(loop.run_until_complete(webserver._status(req)).body.decode())["flags"]
+        saved = (cfg.DATA_DIR_IS_DEFAULT, cfg.PSA_FOLDER_ID, cfg.PRICE_MOCK)
+        kept = {n: dict(getattr(state_mod, n)) for n in ("_failing", "_must_keep", "_stuck", "_ever_failed", "_preserved")}
+        try:
+            cfg.DATA_DIR_IS_DEFAULT, cfg.PSA_FOLDER_ID, cfg.PRICE_MOCK = False, "a-real-folder-id", False
+            for n in kept:
+                getattr(state_mod, n).clear()
+            f = status_flags()
+            check((f.get("data_dir_default"), f.get("psa_folder_blank"), f.get("unreadable_stores"), f.get("price_mock"))
+                  == (False, False, [], False) and canary.standing_problems(f) == [],
+                  "status + canary: a correctly configured bot reports no standing problem")
+            cfg.DATA_DIR_IS_DEFAULT, cfg.PSA_FOLDER_ID, cfg.PRICE_MOCK = True, "  ", True
+            with open(os.path.join(cfg.DATA_DIR, "zz_status_bad.json"), "w") as fh:
+                fh.write("{ not json")
+            state_mod.load("zz_status_bad", dict)
+            with open(os.path.join(cfg.DATA_DIR, "zz_status_cached.json"), "w") as fh:
+                fh.write("{ not json")
+            state_mod.load("zz_status_cached", dict, cached=True)
+            with open(os.path.join(cfg.DATA_DIR, "zz_status_cached.json"), "w") as fh:
+                fh.write("{}")
+            state_mod.load("zz_status_cached", dict)             # reads again — but the cache is still empty
+            f = status_flags()
+            probs = canary.standing_problems(f)
+            check(f.get("data_dir_default") is True and f.get("psa_folder_blank") is True
+                  and f.get("unreadable_stores") == ["zz_status_bad", "zz_status_cached"],
+                  "status: DATA_DIR unset, a blank folder id and unreadable / stuck stores are reported as flags")
+            check(len(probs) == 4 and any("FAKE" in x for x in probs) and any("DATA_DIR" in x for x in probs)
+                  and any("PSA_FOLDER_ID" in x for x in probs) and any("zz_status_bad, zz_status_cached" in x for x in probs),
+                  "canary: each standing problem fails the run until it is fixed (no age window)")
+            check(canary.standing_problems(None) == [] and canary.standing_problems({"delivery_tracking": True}) == []
+                  and canary.standing_problems({"unreadable_stores": "tickets"}) == [],
+                  "canary: a bot that doesn't report these flags (an older build) is not failed for it")
+        finally:
+            cfg.DATA_DIR_IS_DEFAULT, cfg.PSA_FOLDER_ID, cfg.PRICE_MOCK = saved
+            for n, old_v in kept.items():
+                getattr(state_mod, n).clear()
+                getattr(state_mod, n).update(old_v)
     finally:
         cfg.BOT_API_KEY = saved_key
         loop.close()

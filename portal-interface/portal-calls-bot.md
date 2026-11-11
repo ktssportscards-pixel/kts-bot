@@ -27,10 +27,13 @@ per ticket (the Triumph-value reconcile feed). Default omits `card_detail`.
 `{ "ok", "started", "uptime_seconds", "counts": { tickets_total, tickets_open, owed_open, owed_total },
 "last_error": { key, text, at } | null, "flags": { delivery_tracking, register_tracking, lanes_board,
 lanes_schedule, lanes_channel_id, stale_nudges, ship_all_doral, auto_claim, pokemon_lane_open,
-price_mock, kevin_dm } }`
+price_mock, kevin_dm, data_dir_default, psa_folder_blank, unreadable_stores } }`
 `flags` is the non-secret feature-toggle state (added 2026-11-06 so a Railway toggle is verifiable from outside).
 `price_mock: true` on the live bot means it is quoting FAKE mock prices; `kevin_dm: false` means `KEVIN_USER_ID`
-is unset (no admin commands, no alerts). `last_error` is the most recent fault since boot and is never cleared —
+is unset (no admin commands, no alerts). `data_dir_default: true` = `DATA_DIR` is unset, so all state lives in the
+container and is lost on redeploy; `psa_folder_blank: true` = `PSA_FOLDER_ID` is present but empty; `unreadable_stores`
+= names of data files the bot could not read (a list, normally `[]`). These three plus `price_mock` are standing
+conditions: the canary fails on them until they are fixed. `last_error` is the most recent fault since boot and is never cleared —
 judge it by its `at` timestamp (the canary ignores one older than 150 minutes, i.e. two hourly runs).
 
 ## GET /analytics  — x-bot-key

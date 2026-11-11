@@ -74,6 +74,26 @@ def is_fresh_error(last_error, now=None, max_age_min=None) -> bool:
     return age is None or age <= limit
 
 
+def standing_problems(flags) -> list:
+    """Conditions /status reports that stay true until someone fixes them. The bot alerts
+    each of them once, at startup — so judging only by last_error's age would turn the canary
+    green on an unfixed fault 150 minutes after boot. A bot older than a flag reports nothing
+    for it, which is not a problem."""
+    f = flags if isinstance(flags, dict) else {}
+    out = []
+    if f.get("price_mock") is True:
+        out.append("mock pricing is ON — customers are being quoted FAKE prices")
+    if f.get("data_dir_default") is True:
+        out.append("DATA_DIR is not set — tickets / owed balances live in the container and are "
+                   "wiped by every redeploy")
+    if f.get("psa_folder_blank") is True:
+        out.append("PSA_FOLDER_ID is blank — the 'never write into v1's folder' check is skipped")
+    stores = f.get("unreadable_stores")
+    if isinstance(stores, list) and stores:
+        out.append("data file(s) could not be read: " + ", ".join(str(s) for s in stores[:10]))
+    return out
+
+
 def _price_check():
     """The core function: price a known cert through the bot's own client against the
     LIVE portal (not the mock) and confirm a clean, valid decision comes back. Reuses
@@ -114,10 +134,10 @@ def main():
                   + (f" — {le.get('key')} at {le.get('at')}" if fresh and isinstance(le, dict) else ""))
             if le and not fresh:
                 print(f"  ··  older last_error on record ({le.get('key')} at {le.get('at')}) — not failing on it")
-            # A live bot in mock-pricing mode quotes customers FAKE prices. (Bots older than the
-            # flag report nothing here → not a failure.)
-            check((d.get("flags") or {}).get("price_mock") is not True,
-                  "/status: the live bot is NOT in mock-pricing mode")
+            # Standing misconfiguration (mock pricing on a live bot, state kept in the container,
+            # an unreadable data file…): red until fixed, however long ago the bot booted.
+            standing = standing_problems(d.get("flags"))
+            check(not standing, "/status: no standing problem" + (" — " + "; ".join(standing) if standing else ""))
         except Exception as e:
             check(False, f"/status — {e}")
         if CERT:
