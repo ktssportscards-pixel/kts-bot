@@ -832,6 +832,7 @@ def test_state_persistence():
             f.write("{ broken")
 
         async def _threaded():
+            before_login = botmod.bot.loop                          # discord.py's "not started" placeholder
             botmod.bot.loop = asyncio.get_running_loop()            # what discord.py does at login
             try:
                 got = await asyncio.to_thread(state.load, "zz_thread", dict)
@@ -839,7 +840,7 @@ def test_state_persistence():
                     await asyncio.sleep(0)
                 return got
             finally:
-                botmod.bot.__dict__.pop("loop", None)
+                botmod.bot.loop = before_login
         got = asyncio.run(_threaded())
         check(got == {} and len(h.kevin.dms) == 1 and "zz_thread.json" in h.kevin.dms[0]
               and "While it can't be read I treat `zz_thread` as EMPTY" in h.kevin.dms[0]
@@ -880,6 +881,7 @@ def test_state_persistence():
             botmod._web_runner, botmod._digest_started = object(), False     # web server "already up"
 
             async def _connect(times):
+                before_login = botmod.bot.loop
                 botmod.bot.loop = asyncio.get_running_loop()
                 try:
                     for _ in range(times):
@@ -887,7 +889,7 @@ def test_state_persistence():
                     for _ in range(5):
                         await asyncio.sleep(0)
                 finally:
-                    botmod.bot.__dict__.pop("loop", None)
+                    botmod.bot.loop = before_login
             asyncio.run(_connect(1))
             by = {n: next((d for d in h.kevin.dms if f"`{n}.json`" in d), "") for n in
                   ("zz_boot_cached", "zz_boot_reread", "zz_boot_healed")}
