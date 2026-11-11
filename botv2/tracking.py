@@ -1055,6 +1055,19 @@ def _as_date(s):
         return None
 
 
+def _delivery_of_paid_lot(ticket: dict, owed: dict) -> bool:
+    """True when the tracking number / delivery record on the TICKET belongs to a lot that
+    has already been PAID, while the owed row now carries a new unpaid balance and no number
+    has been posted for it yet. (The owed row drops that number in _project_owed; the ticket
+    row keeps describing the old box until a new number arrives.) The new lot is then neither
+    "in transit under that number" nor "delivered"."""
+    if not owed or owed.get("paid") or owed.get("tracking"):
+        return False
+    paid_trk = str(owed.get("paid_tracking") or "").upper()
+    num = str((ticket.get("delivery") or {}).get("number") or ticket.get("tracking") or "").upper()
+    return bool(paid_trk) and num == paid_trk
+
+
 def stale_tickets(today) -> dict:
     """PURE — takes `today` (a date) so it's deterministic for tests (never calls
     date.today() itself). Flags tickets stuck too long in a stage, for Kevin's daily
@@ -1071,7 +1084,11 @@ def stale_tickets(today) -> dict:
         cid = t.get("channel_id")
         user = t.get("user", "")
         o = owed.get(cid)
-        delivered = (t.get("delivery") or {}).get("status") == "delivered"
+        # A "delivered" that belongs to the previous, already-paid lot says nothing about the
+        # new one: without this a second lot was reported as "delivered, still unpaid" — aged
+        # from the FIRST box's delivery — the day it shipped.
+        delivered = ((t.get("delivery") or {}).get("status") == "delivered"
+                     and not _delivery_of_paid_lot(t, o))
         if o is None:                                  # never shipped → age from the quote
             qd = _as_date(t.get("quoted_at")) or _as_date(t.get("date"))
             days = (today - qd).days if qd else None
@@ -1120,6 +1137,7 @@ def ops_view(channel_sheet: dict = None, detail: bool = False) -> list:
     for t in state.load("tickets", list):
         cid = t.get("channel_id")
         o = owed.get(f"owed_{cid}", {})
+        old_box = _delivery_of_paid_lot(t, o)          # the ticket still shows the PAID lot's box
         row = {
             "channel_id": cid,
             "name": t.get("channel_name") or t.get("user") or "",
@@ -1129,9 +1147,9 @@ def ops_view(channel_sheet: dict = None, detail: bool = False) -> list:
             "sheet_url": channel_sheet.get(str(cid), ""),
             "claimed": t.get("claimed"),
             "shipped": bool(o),
-            "tracking": t.get("tracking") or o.get("tracking") or "",
-            "delivered": (t.get("delivery") or {}).get("status") == "delivered",
-            "delivered_at": (t.get("delivery") or {}).get("delivered_at"),
+            "tracking": "" if old_box else (t.get("tracking") or o.get("tracking") or ""),
+            "delivered": (not old_box) and (t.get("delivery") or {}).get("status") == "delivered",
+            "delivered_at": None if old_box else (t.get("delivery") or {}).get("delivered_at"),
             "owed": o.get("payout") if o else None,
             "paid": bool(o.get("paid")) if o else None,
             "paid_date": o.get("paid_date"),

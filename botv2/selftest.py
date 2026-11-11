@@ -3154,6 +3154,49 @@ def test_ship_booking():
     tracking.record_accepted_ship(9215, lot("a2"))
     check(owed_row(9215)["tracking"] == "1ZNEXTLOTNEXTLOT22", "a number posted after the payment is the new lot's")
 
+    # The TICKET row still describes the paid lot's box (its number, "delivered") until a new
+    # number arrives. That must not be shown against the new, unpaid lot: the stale check
+    # said "delivered, still unpaid — 10 days" for a lot shipped today, and the ops feed
+    # showed the old number with delivered=true next to the open balance.
+    from datetime import date as _date, timedelta as _td
+    for st in ("tickets", "owed"):
+        tracking.state.save(st, [])
+    tracking.record_quote(9222, lot("s1"), channel_name="oldbox")
+    tracking.record_accepted_ship(9222, lot("s1"))
+    tracking.record_tracking(9222, "1ZOLDBOXOLDBOX1111")
+    tracking.mark_delivered(channel_id=9222, delivered_at=(_date.today() - _td(days=10)).isoformat() + "T10:00:00")
+    tracking.mark_paid(9222)
+    tracking.record_quote(9222, lot("s2"), channel_name="oldbox")
+    tracking.record_accepted_ship(9222, lot("s2"))                      # lot 2 ships today
+    st_now = tracking.stale_tickets(_date.today())
+    ops = next(r for r in tracking.ops_view() if r["channel_id"] == 9222)
+    check(not st_now["unpaid_stale"] and not st_now["transit_stale"],
+          "second lot, shipped today: NOT reported as 'delivered, still unpaid' from the first box's delivery")
+    check(ops["owed"] == 90.0 and ops["paid"] is False and ops["tracking"] == "" and ops["delivered"] is False
+          and ops["delivered_at"] is None,
+          "second lot: the ops feed doesn't show the paid lot's tracking / delivered state against the new balance")
+    later = tracking.stale_tickets(_date.today() + _td(days=30))
+    check([x["channel_id"] for x in later["transit_stale"]] == [9222] and not later["unpaid_stale"],
+          "second lot with no tracking for a month: flagged as stuck in transit (aged from ITS ship date)")
+    tracking.record_tracking(9222, "1ZNEWBOXNEWBOX2222")
+    ops = next(r for r in tracking.ops_view() if r["channel_id"] == 9222)
+    check(ops["tracking"] == "1ZNEWBOXNEWBOX2222" and ops["delivered"] is False,
+          "second lot: once its own number is posted the ops feed shows that, in transit")
+    tracking.mark_delivered(channel_id=9222)
+    check(next(r for r in tracking.ops_view() if r["channel_id"] == 9222)["delivered"] is True
+          and [x["channel_id"] for x in tracking.stale_tickets(_date.today() + _td(days=30))["unpaid_stale"]] == [9222],
+          "second lot delivered under its own number: delivered / 'delivered, still unpaid' work as before")
+    # a single-lot ticket is untouched by any of this
+    tracking.record_quote(9223, lot("s3"), channel_name="plain")
+    tracking.record_accepted_ship(9223, lot("s3"))
+    tracking.record_tracking(9223, "1ZPLAINPLAINPLAIN1")
+    tracking.mark_delivered(channel_id=9223)
+    ops = next(r for r in tracking.ops_view() if r["channel_id"] == 9223)
+    check(ops["tracking"] == "1ZPLAINPLAINPLAIN1" and ops["delivered"] is True,
+          "ordinary ticket: tracking + delivered shown exactly as before")
+    for st in ("tickets", "owed"):
+        tracking.state.save(st, [])
+
     # Rows PAID BEFORE this change have no paid_tracking: the number they hold is the paid
     # lot's, so a new lot must not show it (it used to get today's date + last month's number).
     legacy_row = lambda cid, user: {"id": f"owed_{cid}", "channel_id": cid, "user": user, "date": "2026-10-01",
