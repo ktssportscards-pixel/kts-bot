@@ -12,9 +12,14 @@ Two DELIBERATE, NARROW deviations from v1 (2026-11-10) — do not "restore" v1 h
      "PSA 12345678" lines used to be dropped in silence). A list = four or more labelled
      numbers, or labelled numbers with at most one other word — and no tracking number or
      shipping/payment word in the message. Anything else is counted exactly as v1 did.
-  2. A 7–9 digit number labelled BGS / SGC / Beckett / TAG (upper case) is another grader's
-     serial, not a PSA cert, and is skipped (it used to be priced as the PSA card with that
-     number) — only on a line that starts label-first; see other_grader_serials().
+  2. A 7–9 digit number labelled BGS / SGC / TAG / Beckett is another grader's serial, not
+     a PSA cert, and is skipped (it used to be priced as the PSA card with that number) —
+     only on a line that starts label-first; see other_grader_serials(). The label is matched
+     in any case, so the words "tag" / "Beckett" right in front of a number count too: a
+     skipped number is reported to Kevin, which is the recoverable mistake; pricing another
+     grader's serial as a PSA card is not.
+Neither applies to a message the bot reads as "ship" / "proceed" (extract_certs(...,
+deviations=False)): which messages count as agreeing to ship stays exactly as v1 had it.
 Everything else is v1's logic unchanged.
 """
 import re
@@ -79,21 +84,21 @@ def _strip_cert_noise(text: str) -> str:
 
 
 # ── extraction ────────────────────────────────────────────────────────────────
-def extract_certs(text: str) -> list:
+def extract_certs(text: str, deviations: bool = True) -> list:
     """Cert tokens in a message, in order, deduped. (v1's logic, plus the two deviations
-    listed in the module docstring.)"""
-    return _scan(text)[0]
+    listed in the module docstring; deviations=False reads the message exactly as v1 did.)"""
+    return _scan(text, deviations)[0]
 
 
-def other_grader_serials(text: str) -> list:
+def other_grader_serials(text: str, deviations: bool = True) -> list:
     """Numbers in a message that were NOT read as certs because they carry another grader's
     label, as display strings ('SGC 1234567'), in order. Only the 7–9 digit ones — the size
     that would otherwise be priced as a PSA cert. The bot tells Kevin about them: skipping a
     number without a word to anyone hides a card the seller thinks they submitted."""
-    return _scan(text)[1]
+    return _scan(text, deviations)[1]
 
 
-def _scan(text: str) -> tuple:
+def _scan(text: str, deviations: bool = True) -> tuple:
     """(cert tokens, skipped other-grader serials) for one message."""
     if not text:
         return [], []
@@ -121,7 +126,7 @@ def _scan(text: str) -> tuple:
     not_cert_ctx = any(p in _NOT_A_CERT_WORDS for p in plain)
     psa_labels = min(sum(1 for _d, lab, _p, _r in found if lab == 'psa'), plain.count('psa'))
     other_words = sum(1 for p in plain if p != 'cgc') - psa_labels
-    label_list = ((psa_labels >= 4 or other_words <= 1)
+    label_list = (deviations and (psa_labels >= 4 or other_words <= 1)
                   and not not_cert_ctx and not extract_tracking(text))
     chatter = other_words if label_list else other_words + psa_labels
     if chatter > 3:
@@ -144,9 +149,8 @@ def _scan(text: str) -> tuple:
             # was never a match before — keep it so.
             if pos > 0 and (scan[pos - 1].isalnum() or scan[pos - 1] == '_'):
                 continue
-            # Another grader's SHORT serial ("SGC 1234567") is not a PSA cert. "tag" is also an
-            # ordinary word ("price tag 12345678"), so the grader is only TAG in capitals.
-            if ((label in ('bgs', 'sgc', 'beckett') or raw_label == 'TAG')
+            # Another grader's SHORT serial ("SGC 1234567") is not a PSA cert.
+            if (deviations and label in ('bgs', 'sgc', 'tag', 'beckett')
                     and label_first[scan.rfind('\n', 0, pos)]):
                 shown = f"{raw_label.upper()} {digits}"
                 if shown not in skipped:

@@ -972,10 +972,16 @@ def test_certs():
     check(ogs("SGC 1234567 PSA 23456789 34567890") == ["SGC 1234567"] and ogs("12345678 23456789") == []
           and ogs("sgc 1234567\nBeckett #12345678\nTAG 2345678") == ["SGC 1234567", "BECKETT 12345678", "TAG 2345678"],
           "skipped other-grader serials are reported (so Kevin can be told)")
-    # "tag" is also an ordinary word: only TAG in capitals is the grader
-    check(ec("price tag 12345678") == ["12345678"] and ec("tag 12345678") == ["12345678"]
-          and ec("Tag: 12345678 and 23456789") == ["12345678", "23456789"] and ogs("tag 12345678") == [],
-          "'tag' / 'Tag' as a word does not swallow a cert (only TAG in capitals is a grader label)")
+    # the grader label is matched in any case ("tag 1234567" is as likely a TAG slab as a word):
+    # a skipped number is reported to Kevin, the recoverable mistake of the two
+    check(ec("tag 1234567") == [] and ogs("tag 1234567") == ["TAG 1234567"]
+          and ec("Tag: 12345678 and 23456789") == ["23456789"] and ogs("Josh Beckett 12345678") == ["BECKETT 12345678"],
+          "a grader label in any case skips the number — and it is always reported, never silent")
+    # deviations=False reads a message exactly as before the branch (used for ship-shaped messages)
+    check(ec("SGC 1234567", deviations=False) == ["1234567"] and ogs("SGC 1234567", deviations=False) == []
+          and ec("PSA#12345678 PSA#23456789 PSA#34567890 ship", deviations=False) == []
+          and ec("PSA#12345678 PSA#23456789 PSA#34567890 ship") == ["12345678", "23456789", "34567890"],
+          "deviations=False: the parser is the live one (no label-list discount, no other-grader skip)")
     # a number-FIRST line ("12345678 PSA …") is read as v1 reads it: the label regex binds a
     # grader word to the number after it, which would drop the wrong card there
     check(ec("12345678 PSA 1234567 SGC 23456789 PSA") == ["12345678", "1234567", "23456789"]
@@ -2784,6 +2790,23 @@ def test_handlers_and_void_races():
                   f"labelled cert(s) + tracking number: handled as tracking, no re-quote, no new sheet ({want[:6]}…)")
         tracking.void_ticket(9115)
     lots.drop(9115)
+    # A ship-shaped message is parsed exactly as it always was, so nothing changes about WHICH
+    # messages ship: three glued labels + "ship" (4 tokens) still ships and books, it is not
+    # turned into a re-quote by the label-list fix.
+    with _BotHarness(9117, name="gluedship", rows=_rows, sheet_url=URL % 9117) as h:
+        h.say("12345678 23456789 34567890")
+        del h.channel.sent[:], h.kevin.dms[:], h.sheet_calls[:]
+        h.say("PSA#12345678 PSA#23456789 PSA#34567890 ship")
+        t = tracking.find_tickets(channel_id=9117)[0]
+        check(not h.errors and not h.sheet_calls and t.get("status") == "accepted"
+              and "Ship" in "\n".join(h.channel.sent) and "Total payout" not in "\n".join(h.channel.sent),
+              "'PSA#1 PSA#2 PSA#3 ship': still a ship (address + lot booked), not a re-quote")
+        del h.channel.sent[:], h.kevin.dms[:]
+        h.say("BGS 12345678 Shipped!")
+        check(not any("NOT priced" in d for d in h.kevin.dms),
+              "a ship-shaped message is read the old way: no other-grader note is generated for it")
+        tracking.void_ticket(9117)
+    lots.drop(9117)
     # Another grader's serial is not priced — and Kevin is told, since nobody else is.
     with _BotHarness(9116, name="othergrader", rows=_rows, sheet_url=URL % 9116) as h:
         h.say("SGC 1234567 PSA 23456789")

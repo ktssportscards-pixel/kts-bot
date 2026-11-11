@@ -659,7 +659,12 @@ async def _handle_message(message) -> None:
         return
 
     text = message.content or ""
-    cert_list = certs.extract_certs(text)
+    # A message the bot reads as "ship" / "proceed" is parsed exactly as it always was (none
+    # of the two parser deviations), so nothing about WHICH messages count as agreeing to ship
+    # changes: a short "PSA#1 PSA#2 PSA#3 ship" still ships, "BGS 12345678 Shipped!" is still
+    # read the old way.
+    agree_shaped = shipping.looks_like_agree(text)
+    cert_list = certs.extract_certs(text, deviations=not agree_shaped)
 
     # Welcome exactly once; a fresh greet with no certs ends here.
     if channel.id not in _welcomed:
@@ -670,7 +675,7 @@ async def _handle_message(message) -> None:
     # A number labelled as another grader's (SGC / BGS / Beckett / TAG) is not priced. Tell
     # Kevin — the seller gets no line for it in the quote (or no reply at all, if it was the
     # only number), and nobody else would know a card was left out.
-    not_ours = certs.other_grader_serials(text)
+    not_ours = certs.other_grader_serials(text, deviations=not agree_shaped)
     if not_ours:
         await ping_kevin(f"ℹ️ #{channel.name}: {len(not_ours)} number(s) labelled as another grader "
                          f"were NOT priced (PSA / CGC only): " + ", ".join(not_ours[:20])
@@ -683,7 +688,7 @@ async def _handle_message(message) -> None:
         # registered. Do both — ship first (unchanged), so the owed row exists when the
         # number is recorded. Messages that are only one or the other behave as before.
         tnum = certs.extract_tracking(text)
-        agreed = shipping.looks_like_agree(text)
+        agreed = agree_shaped
         if agreed:
             await _handle_ship(channel)
         if tnum:
