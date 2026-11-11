@@ -207,7 +207,8 @@ async def _handle_ship(channel) -> None:
                            "(the address was still posted).")
         elif not booked.get("persisted", True):
             booked_note = (" · 🚨 the lot did NOT save (storage write failed) — it is NOT reliably in "
-                           "the owed queue. Fix storage, then have `ship` sent again in the ticket.")
+                           "the owed queue. Fix storage, then have `ship` sent again in the ticket "
+                           "(the bot answers it by posting the shipping address there again).")
             alerts.record_error(f"ship_book:{channel.id}",
                                 f"ship booking did not persist for #{channel.name}")
         else:
@@ -257,7 +258,8 @@ async def _handle_tracking(channel, tnum, silent: bool = False) -> None:
         # payout queue (no digest line, no `!owe` packet) — tell Kevin; never auto-book here.
         n_q, amt_q = tracking.unbooked_quoted(channel.id)
         warn = (f" — ⚠️ {n_q} quoted card(s) (${amt_q:,.2f}) on this ticket are NOT booked as owed "
-                f"(no ship/proceed was handled). `ship` in the ticket books them."
+                f"(no ship/proceed was handled). A `ship` message in the ticket books them — "
+                f"the bot answers it by posting the shipping address there again."
                 if n_q else "")
     elif tracking.is_voided(channel.id):
         warn = (" — ⚠️ this channel's quote was VOIDED: no ticket/owed on record, so the number "
@@ -689,7 +691,10 @@ async def _handle_message(message) -> None:
         except portal_client.PortalError as e:
             # Pricing is down, so we can't tell a slab from a phone number — say THAT, not
             # "didn't resolve as a slab" (which sent Kevin looking for a typo during an outage).
-            await alert_kevin("price_error",
+            # Keyed per ticket: this message gets NO reply in the channel, so this DM is the
+            # only trace — sharing the main path's global "price_error" key silenced every
+            # ticket after the first for 15 minutes (before this branch each one was reported).
+            await alert_kevin(f"price_error_lone:{channel.id}",
                               f"🚨 **botv2 pricing error** in #{channel.name} while checking a lone "
                               f"number `{certs.cert_digits(cert_list[0])}`: {e} — no quote made. If it "
                               f"was a real CGC cert, have them resend it.")

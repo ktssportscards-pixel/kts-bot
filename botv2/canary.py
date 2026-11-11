@@ -9,9 +9,11 @@ Env:
   BOT_API_KEY   x-bot-key — enables the authed /status + the pricing check
   CANARY_CERT   a known PSA/CGC cert number to price-check (e.g. a sports slab)
   CANARY_ERROR_MAX_AGE_MIN  how old /status's last_error may be and still fail the
-                run (default 90). The bot never clears last_error, so without this one
-                transient alert kept every hourly run red until the next redeploy —
-                which would hide any later, real breakage behind a permanently red check.
+                run (default 150 = two hourly runs plus slack, so a fault is seen by at
+                least two scheduled runs even if one starts late or is dropped). The bot
+                never clears last_error, so without a window one transient alert kept every
+                hourly run red until the next redeploy — which would hide any later, real
+                breakage behind a permanently red check.
 
 Exit 0 = all green · 1 = a check failed (printed). SIDE-EFFECT-FREE: /bot/price is a
 read; the canary never claims, registers, or writes anything.
@@ -27,9 +29,9 @@ BOT = os.environ.get("BOT_BASE_URL", "https://worker-production-1175.up.railway.
 KEY = os.environ.get("BOT_API_KEY", "")
 CERT = os.environ.get("CANARY_CERT", "")
 try:
-    ERROR_MAX_AGE_MIN = float(os.environ.get("CANARY_ERROR_MAX_AGE_MIN") or 90)
+    ERROR_MAX_AGE_MIN = float(os.environ.get("CANARY_ERROR_MAX_AGE_MIN") or 150)
 except ValueError:
-    ERROR_MAX_AGE_MIN = 90.0
+    ERROR_MAX_AGE_MIN = 150.0
 
 _fails = []
 

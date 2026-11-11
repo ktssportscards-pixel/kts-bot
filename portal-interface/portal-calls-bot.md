@@ -31,7 +31,7 @@ price_mock, kevin_dm } }`
 `flags` is the non-secret feature-toggle state (added 2026-11-06 so a Railway toggle is verifiable from outside).
 `price_mock: true` on the live bot means it is quoting FAKE mock prices; `kevin_dm: false` means `KEVIN_USER_ID`
 is unset (no admin commands, no alerts). `last_error` is the most recent fault since boot and is never cleared —
-judge it by its `at` timestamp (the canary ignores one older than 90 minutes).
+judge it by its `at` timestamp (the canary ignores one older than 150 minutes, i.e. two hourly runs).
 
 ## GET /analytics  — x-bot-key
 Volume + payout aggregates. `?days=N` optional (clamped 1–3650). **Margin is NOT included** — stays portal-side.

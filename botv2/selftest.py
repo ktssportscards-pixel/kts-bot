@@ -2210,6 +2210,28 @@ def test_truthful_replies():
         kd = "\n".join(h.kevin.dms)
         check(not h.errors and "pricing error" in kd and "didn't resolve as a slab" not in kd and not h.channel.sent,
               "lone number during a pricing outage: Kevin is told pricing failed (not 'not a slab')")
+        # …for EVERY ticket: the customer gets no reply here, so a DM suppressed by another
+        # ticket's alert would leave nobody knowing to ask for a resend. Same alert window,
+        # a normal quote failing first, then two more tickets with a lone number.
+        del h.kevin.dms[:]
+        portal_client.price_certs = _down
+        try:
+            h.say("12345678 23456789")                               # main path: the global pricing alert
+            for cid, nm in ((8953, "lone-b"), (8954, "lone-c")):
+                other = _fake_channel(cid, nm)
+                h.tickets._known.add(cid)
+                h.botmod._welcomed.add(cid)
+                try:
+                    asyncio.run(h.botmod._handle_message(_FakeMessage(other, "6193949247")))
+                finally:
+                    h.tickets._known.discard(cid)
+                    h.botmod._welcomed.discard(cid)
+                check(not other.sent, f"lone number in #{nm} during the outage: no reply in the channel (unchanged)")
+        finally:
+            portal_client.price_certs = real_price
+        kd = "\n".join(h.kevin.dms)
+        check("#lone-b while checking a lone number" in kd and "#lone-c while checking a lone number" in kd,
+              "lone numbers during an outage: Kevin hears about each ticket (they were silenced by the first alert)")
 
     # ship with no in-memory lot and a failing Drive rebuild: the 'lot rebuild failed' alert fires.
     real_drive = sheets_mod.get_drive_service
@@ -3586,6 +3608,11 @@ def test_canary_error_age():
           "canary: an undatable last_error fails closed")
     check(canary.is_fresh_error({"key": "k", "at": "2026-11-10T11:30:00Z"}, now, 90) is True,
           "canary: 'Z' timestamps are understood")
+    # the default window covers TWO hourly runs: with 90 minutes an error recorded just after
+    # a run was inside the window for exactly one later run, so a late or dropped run hid it
+    check(canary.ERROR_MAX_AGE_MIN == 150 and canary.is_fresh_error(at(119), now) is True
+          and canary.is_fresh_error(at(151), now) is False,
+          "canary: by default an error stays red for two hourly runs (150 min), then clears")
 
 
 # ── scheduled DMs across a daylight-saving change ───────────────────────────────
