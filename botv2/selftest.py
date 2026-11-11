@@ -1733,7 +1733,7 @@ def test_lanes_schedule():
     check(b._lanes_in_window(at(0, 2)), "mon 2am -> still open")
     check(not b._lanes_in_window(at(0, 3)), "mon 3am -> closed")
     check(not b._lanes_in_window(at(0, 10)), "mon 10am -> closed")
-    # real seconds (86a71dd): across a clock change the wait is a week ± one hour, so the
+    # real seconds (since the DST fix): across a clock change the wait is a week ± one hour, so the
     # live-clock bound needs the extra hour — without it this check failed for the hour after
     # Saturday 03:00 ET on the fall-back weekend, every year.
     check(0 < b._seconds_until_lanes_open() <= 7 * 86400 + 3600, "until-open is within a week (+1 h across fall-back)")
@@ -2673,7 +2673,7 @@ def test_handlers_and_void_races():
             check(len(h.channel.sent) == 1 and "noted" in h.channel.sent[0] and registered == [(9113, "1Z999AA10123456784")],
                   "a bare tracking number on a voided channel: acked and registered exactly as before")
         # A void that BAILED leaves the cancel guard set on a LIVE ticket. A tracking number
-        # there IS stored, and Kevin must not be told it wasn't (29211b1).
+        # there IS stored, and Kevin must not be told it wasn't.
         with _BotHarness(9114, name="bailtrk", rows=_rows, sheet_url=URL % 9114) as h:
             h.say("12345678")
             real = tracking.state.save
@@ -3759,7 +3759,7 @@ def test_alerts_and_lanes():
     # Every per-ticket alert key, inside ONE alert window (the harness resets the limiter on
     # entry, so a second ticket was never tried): a fault on ticket A must not silence the
     # same fault on ticket B for 15 minutes. Covers the sheet-build, lot-rebuild,
-    # tracking-save and pricing-auth alerts (79bed0e / fa57ff5).
+    # tracking-save and pricing-auth alerts.
     from botv2 import sheets as sheets_mod
     buy_rows = lambda cl: [PricedRow(cert=c, cert_id=c, category="pokemon", market_value=100, value=100,
                                      decision="BUY", offer=90, grader="PSA", grade="10") for c in cl]
