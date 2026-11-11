@@ -291,7 +291,9 @@ class _BotHarness:
         try:
             asyncio.run(self.botmod._handle_message(msg))
         except Exception as e:
-            self._errors.append(e)
+            # keep the exception, drop its traceback: a kept traceback pins the handler's frame
+            # (and with it the per-destination send lock) into the next test's event loop
+            self._errors.append(e.with_traceback(None))
         return msg
 
     def __exit__(self, *exc):
@@ -402,6 +404,43 @@ def test_textsplit():
     check(first_c < last_ab and not textsplit._send_locks,
           "send: another destination is not held up, and no lock is left behind afterwards")
 
+    # a message never queues for long behind a send that hangs: after its turn-wait it goes anyway
+    class _Hangs:
+        id = 4242
+
+        def __init__(self):
+            self.got, self.release = [], None
+
+        async def send(self, text):
+            if not self.got:
+                self.got.append("first (hung)")
+                self.release = asyncio.get_running_loop().create_future()
+                await self.release                              # never answers on its own
+            else:
+                self.got.append(text)
+
+    async def _behind_a_hung_send():
+        t = _Hangs()
+        real_wait = textsplit._TURN_WAIT_S
+        textsplit._TURN_WAIT_S = 0.05
+        try:
+            first = asyncio.ensure_future(textsplit.send_chunked(t, "A"))
+            await asyncio.sleep(0)
+            n = await asyncio.wait_for(textsplit.send_chunked(t, "B"), 2)   # must not wait forever
+            t.release.set_result(None)
+            await first
+            return n, t.got
+        finally:
+            textsplit._TURN_WAIT_S = real_wait
+    n_b, got = asyncio.run(_behind_a_hung_send())
+    check(n_b == 1 and got == ["first (hung)", "B"],
+          "send: a message stuck behind a hung send to the same destination goes out after a bounded wait")
+    # an over-long line is cut at a space/comma only when the piece stays at least half full
+    early = "id " + "9" * 3000
+    pieces = textsplit._hard_split(early, 1900)
+    check(len(pieces[0]) == 1900 and "".join(pieces) == early,
+          "split: a break right at the start of a long token is not used (no 3-character message)")
+
     # a send that fails part-way says how far it got
     class _FailsAt:
         def __init__(self, n):
@@ -470,6 +509,13 @@ def test_textsplit():
                   and "Only the first 1 of" in ((alerts_mod.last_error() or {}).get("text") or "")
                   and "could NOT be delivered to your DMs" not in ((alerts_mod.last_error() or {}).get("text") or ""),
                   "digest: when only part of it arrives the alert says so (it used to say none of it did)")
+            alerts_mod.reset()
+            botmod.bot.get_user = lambda _uid: _Flaky(uid=777, name="kevin")
+            part_ok = asyncio.run(botmod.alert_kevin("zz_partial", digest))
+            botmod.bot.get_user = lambda _uid: h.kevin
+            check(part_ok is False and alerts_mod.should_alert("zz_partial"),
+                  "alert: a part-delivered alert counts as NOT delivered (it can fire again; the quiet window is not used up)")
+            alerts_mod.reset()
             flaky2 = _Flaky(uid=777, name="kevin")
             gm = _FakeMessage(_fake_channel(8805, "some-ticket"), "!owe", author=flaky2)
             asyncio.run(commands.handle(None, gm))
@@ -511,6 +557,17 @@ def test_textsplit():
               "quote: Kevin's summary for the same lot arrives too (in parts)")
         check(any(r.get("id") == "tk_8804" for r in tracking.state.load("tickets", list)),
               "quote: ticket recorded")
+    tracking.state.save("tickets", [])
+
+    # Discord refuses the FIRST message of a long quote: nothing is up, so Kevin must not be
+    # told a cut-off quote is showing (the generic handler alert covers a total failure).
+    with _BotHarness(8808, name="nonepost", rows=_rows, sheet_url="https://docs.google.com/spreadsheets/d/NONE8808/edit") as h:
+        async def _refuse_all(text):
+            raise RuntimeError("discord 503")
+        h.channel.send = _refuse_all
+        h.say(big)
+        check(len(h.errors) == 1 and not any("PARTLY posted" in d for d in h.kevin.dms) and not h.sheet_calls,
+              "quote: when not even the first part is posted, no 'partly posted' alert is raised")
     tracking.state.save("tickets", [])
 
     # Discord refuses the 2nd message of a long quote: the customer is left with a cut-off
@@ -2684,6 +2741,8 @@ def test_handlers_and_void_races():
         check(not h.errors and not h.sheet_calls and not h.fill_calls and "9108" not in botmod._channel_sheet
               and any("VOIDED right after its quote" in d for d in h.kevin.dms),
               "race: a quote voided before its sheet build starts gets NO sheet (Kevin told)")
+        check(not any("during the claim step" in d for d in h.kevin.dms),
+              "race: …and it is stopped by the check BEFORE the (dormant) claim step, not the one after it")
 
     # 3a) A void that BAILED (storage write failed, ticket still LIVE) while the sheet was
     #     building is not a void: the live quote keeps its sheet, its fill and its summary.

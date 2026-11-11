@@ -122,9 +122,14 @@ def split_message(text: str, limit: int = None) -> list:
     return [c for c in chunks if c.strip()]
 
 
-# One lock per destination, alive only while something is sending to it (weak values: no
-# growth, and never a lock left over from another event loop).
+# One lock per destination, normally dropped as soon as nobody is sending to it (weak values:
+# no growth). The bot runs a single event loop, so a lock never outlives its loop there.
 _send_locks = weakref.WeakValueDictionary()
+# How long a send waits its turn behind another send to the same destination. One request that
+# hangs (Discord can take minutes to give up) must not hold every later message to that
+# destination behind it — after this long the waiting message goes out anyway: late and in
+# order beats later still, and it is never dropped.
+_TURN_WAIT_S = 20
 
 
 def sent_before_failure(exc) -> tuple:
@@ -156,7 +161,12 @@ async def send_chunked(target, text, limit: int = None) -> int:
         lock = asyncio.Lock()
         _send_locks[key] = lock
     sent = 0
-    async with lock:
+    try:
+        await asyncio.wait_for(lock.acquire(), _TURN_WAIT_S)
+        mine = True
+    except asyncio.TimeoutError:
+        mine = False                              # whoever holds it is stuck — don't queue behind it
+    try:
         for part in parts:
             try:
                 await target.send(part)
@@ -167,4 +177,7 @@ async def send_chunked(target, text, limit: int = None) -> int:
                     pass                          # an exception type that refuses attributes
                 raise
             sent += 1
+    finally:
+        if mine:
+            lock.release()
     return sent

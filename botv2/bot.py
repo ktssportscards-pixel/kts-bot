@@ -809,17 +809,19 @@ async def _handle_message(message) -> None:
             rows = await portal_client.price_certs(cert_list, customer=username,
                                                    rate_override=rate_override)
         except portal_client.PortalAuthError as e:
+            # The customer's notice goes out FIRST: a DM to Kevin must never hold up a reply
+            # in a ticket (his DMs are sent one at a time, and one can be slow).
+            await channel.send("⚠️ Pricing is briefly unavailable — hang tight, I'll "
+                               "get your quote shortly.")
             await alert_kevin(f"price_auth:{channel.id}",
                               f"🚨 **botv2 can't authenticate to pricing** in #{channel.name} — {e}. "
                               f"Check BOT_API_KEY / the portal. Nothing retries on its own: this "
                               f"ticket needs a re-quote once it's fixed.")
-            await channel.send("⚠️ Pricing is briefly unavailable — hang tight, I'll "
-                               "get your quote shortly.")
             await tell_not_ours()
             return
         except portal_client.PortalError as e:
-            await alert_kevin("price_error", f"🚨 **botv2 pricing error** in #{channel.name}: {e}")
             await channel.send("⚠️ Pricing is briefly unavailable — please resend in a minute.")
+            await alert_kevin("price_error", f"🚨 **botv2 pricing error** in #{channel.name}: {e}")
             await tell_not_ours()
             return
 
@@ -912,9 +914,9 @@ async def _handle_message(message) -> None:
     # sheet link + summary once it's built. A sheet failure never blocks the DM.
     sheet_url = ""
     if voided_since():
-        # Voided during the claim step: same as above, no sheet for a dead quote.
-        await ping_kevin(f"🛑 #{channel.name} was VOIDED right after its quote posted — "
-                         f"no buying sheet was built for it.")
+        # Voided during the claim step (the check above ran before it): no sheet for a dead quote.
+        await ping_kevin(f"🛑 #{channel.name} was VOIDED during the claim step, right after its "
+                         f"quote posted — no buying sheet was built for it.")
         return
     try:
         sheet_url, _name, _ = await asyncio.to_thread(sheets.create_psa_sheet, username, cert_list)
