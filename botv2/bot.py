@@ -119,20 +119,63 @@ def _spawn(coro) -> None:
     task.add_done_callback(_bg_tasks.discard)
 
 
+# Alerts that must reach Kevin EVENTUALLY. A storage or startup-configuration alert describes
+# something that stays wrong until someone acts, and each is raised once. Through alert_kevin
+# alone it was lost for good when its one DM failed (Discord hiccup at boot), or when the same
+# key had alerted in the last 15 minutes — e.g. a file that fails, recovers, and then really
+# breaks five minutes later. So these are held here until a DM has actually gone out, and are
+# retried after the quiet window and on every reconnect. The text is built when it is SENT,
+# so it describes the state at that moment, not at the moment of the first failure.
+_pending_alerts: dict = {}          # key -> zero-argument function returning the text
+_pending_retry: set = set()         # keys with a retry already scheduled
+
+
+async def _send_pending(key: str) -> bool:
+    """Try to deliver one held alert (rate-limited like any other). Delivered → no longer
+    held. Not delivered → stays held and one retry is scheduled after the quiet window."""
+    make = _pending_alerts.get(key)
+    if make is None:
+        return False
+    text = make()
+    alerts.record_error(key, text)
+    delivered = False
+    if alerts.should_alert(key):
+        delivered = await ping_kevin(text)
+        if not delivered:
+            alerts.forget(key)       # never delivered → don't let it use up the quiet window
+    if delivered and _pending_alerts.get(key) is make:      # (a newer one may have replaced it)
+        _pending_alerts.pop(key, None)
+    if key in _pending_alerts and key not in _pending_retry and config.KEVIN_USER_ID:
+        _pending_retry.add(key)
+        _spawn(_retry_pending(key))
+    return delivered
+
+
+async def _retry_pending(key: str) -> None:
+    try:
+        await asyncio.sleep(alerts.ALERT_WINDOW_S + 5)
+    finally:
+        _pending_retry.discard(key)
+    await _send_pending(key)
+
+
 def _on_state_problem(kind: str, name: str, detail: str) -> None:
-    """state.py could not read or write a store. Record it for /status and DM Kevin
-    (rate-limited per store by alert_kevin) — from whichever thread it happened on.
-    Never raises: persistence must not fail harder because the alert couldn't go out."""
-    key, text = f"state_{kind}:{name}", _state_problem_text(kind, name, detail)
-    alerts.record_error(key, text)                       # visible on /status even with no loop
+    """state.py could not read or write a store. Record it for /status and get it to Kevin
+    (rate-limited per store; held and retried until one DM has gone out) — from whichever
+    thread it happened on. Never raises: persistence must not fail harder because the alert
+    couldn't go out."""
+    key = f"state_{kind}:{name}"
+    make = lambda: _state_problem_text(kind, name, detail)
+    alerts.record_error(key, make())                     # visible on /status even with no loop
+    _pending_alerts[key] = make
     try:
         try:
             asyncio.get_running_loop()
-            _spawn(alert_kevin(key, text))               # on the bot's loop already
+            _spawn(_send_pending(key))                   # on the bot's loop already
         except RuntimeError:                             # a worker thread (or not started yet)
-            bot.loop.call_soon_threadsafe(lambda: _spawn(alert_kevin(key, text)))
+            bot.loop.call_soon_threadsafe(lambda: _spawn(_send_pending(key)))
     except Exception:
-        pass                                             # no loop yet → /status + the log have it
+        pass                                             # no loop yet → held; the first connect sends it
 
 
 state.add_listener(_on_state_problem)
@@ -563,15 +606,20 @@ async def _startup_alerts() -> None:
     if not config.KEVIN_USER_ID:
         print("[bot] ⚠️ KEVIN_USER_ID is unset — admin commands and ALL Kevin DMs/alerts are disabled.")
     # A store that failed to read during import / before the connection had nobody to tell.
+    # (One the listener already holds for the same store keeps its newer detail.)
     for name, detail in state.failures_since_start().items():
-        await alert_kevin(f"state_load:{name}", _state_problem_text("load", name, detail))
+        _pending_alerts.setdefault(f"state_load:{name}",
+                                   lambda n=name, d=detail: _state_problem_text("load", n, d))
     for key, text in _startup_storage_problems():
         print(f"[bot] {text}")
-        await alert_kevin(key, text)
+        _pending_alerts[key] = lambda t=text: t
     if config.PRICE_MOCK:                          # a live Discord connection + mock pricing = fake quotes
         print("[bot] ⚠️ BOTV2_PRICE_MOCK is ON — quotes are MOCK prices, not real ones.")
-        await alert_kevin("price_mock", "🚨 botv2 is running with `BOTV2_PRICE_MOCK=1` — every quote "
-                          "is a FAKE mock price. Turn it off unless this is a test bot.")
+        _pending_alerts["price_mock"] = lambda: ("🚨 botv2 is running with `BOTV2_PRICE_MOCK=1` — every "
+                                                 "quote is a FAKE mock price. Turn it off unless this "
+                                                 "is a test bot.")
+    for key in list(_pending_alerts):              # held until delivered: see _send_pending
+        await _send_pending(key)
 
 
 _web_runner = None
@@ -593,7 +641,13 @@ async def on_ready():
             print(f"[bot] web server start failed (non-fatal): {e}")
             await alert_kevin("webserver", f"🚨 botv2 web server failed to start: {e} — "
                               f"/health, /status and the owed tracker are down.")
-    if not _digest_started:                        # once per process: on_ready re-fires on every reconnect
+    if _digest_started:
+        # A reconnect. Nothing new is raised here (a repeated "file could not be read" hours
+        # later would be a false alarm) — but an alert whose DM never went out, typically
+        # because Discord was unreachable when it was raised, gets another try now.
+        for key in list(_pending_alerts):
+            await _send_pending(key)
+    else:                                          # once per process: on_ready re-fires on every reconnect
         _digest_started = True
         await _startup_alerts()
         bot.loop.create_task(_payout_digest_loop())

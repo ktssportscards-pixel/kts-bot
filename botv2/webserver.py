@@ -114,7 +114,10 @@ async def _status(req):
             # startup, so last_error alone would let them age out of sight — the canary reads these.
             "data_dir_default": config.data_dir_in_container(),  # True = state lives in the container
             "psa_folder_blank": config.psa_folder_blank(),   # True = v1-folder safety check skipped
-            "unreadable_stores": sorted({**state.load_failures(), **state.stuck()}),
+            "unreadable_stores": sorted(state.load_failures()),  # failing to read right now
+            "stuck_stores": sorted(state.stuck()),           # empty in memory until a RESTART
+            "unsaved_stores": sorted(state.save_failures()),  # most recent save failed
+            "data_dir_writable": state.write_ok(),           # False = the last write attempt failed
         },
     }))
 

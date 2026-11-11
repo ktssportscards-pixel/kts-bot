@@ -9,8 +9,8 @@ Env:
   BOT_API_KEY   x-bot-key — enables the authed /status + the pricing check
   CANARY_CERT   a known PSA/CGC cert number to price-check (e.g. a sports slab)
   CANARY_ERROR_MAX_AGE_MIN  how old /status's last_error may be and still fail the
-                run (default 150 = two hourly runs plus slack, so a fault is seen by at
-                least two scheduled runs even if one starts late or is dropped). The bot
+                run (default 150 = two hourly runs plus slack: a fault is normally seen
+                by two scheduled runs, so by one if the other is dropped or late). The bot
                 never clears last_error, so without a window one transient alert kept every
                 hourly run red until the next redeploy — which would hide any later, real
                 breakage behind a permanently red check.
@@ -88,9 +88,20 @@ def standing_problems(flags) -> list:
                    "wiped by every redeploy")
     if f.get("psa_folder_blank") is True:
         out.append("PSA_FOLDER_ID is blank — the 'never write into v1's folder' check is skipped")
-    stores = f.get("unreadable_stores")
-    if isinstance(stores, list) and stores:
-        out.append("data file(s) could not be read: " + ", ".join(str(s) for s in stores[:10]))
+    def names(key):
+        v = f.get(key)
+        return ", ".join(str(s) for s in v[:10]) if isinstance(v, list) and v else ""
+    if names("unreadable_stores"):
+        out.append("data file(s) can't be read right now: " + names("unreadable_stores"))
+    if names("stuck_stores"):
+        out.append("data file(s) could not be read when the bot started, so it runs on an EMPTY copy "
+                   "until it is RESTARTED (even if the file reads fine now): " + names("stuck_stores"))
+    if names("unsaved_stores"):
+        out.append("the last save failed — latest changes are NOT on disk: " + names("unsaved_stores"))
+    if f.get("data_dir_writable") is False:
+        out.append("the data folder is not writable — nothing the bot records is being saved")
+    if f.get("kevin_dm") is False:
+        out.append("KEVIN_USER_ID is not set — no alert or admin command can reach Kevin")
     return out
 
 

@@ -256,6 +256,8 @@ class _BotHarness:
         tickets._known.add(self.cid)
         botmod._welcomed.add(self.cid)
         alerts.reset()
+        botmod._pending_alerts.clear()
+        botmod._pending_retry.clear()
         if self.rows is not None:
             async def _price(cert_list, customer=None, rate_override=None, session=None):
                 self.price_args = {"certs": list(cert_list), "customer": customer,
@@ -310,6 +312,8 @@ class _BotHarness:
         lots.drop(self.cid)
         from botv2 import alerts
         alerts.reset()
+        botmod._pending_alerts.clear()
+        botmod._pending_retry.clear()
         return False
 
 
@@ -532,7 +536,9 @@ def test_textsplit():
 def test_state_persistence():
     section("state persistence (corrupt / unreadable stores)")
     import glob
+    import importlib
     import json
+    from datetime import datetime
     from botv2 import alerts, state
     from botv2 import bot as botmod
     seen = []
@@ -718,14 +724,77 @@ def test_state_persistence():
             os.unlink(stale)
         with state._LOCK:
             state._preserved.pop("zz_keep2", None)
-        state.os.replace = _replace_fails
+        def _nothing_works(*_a, **_k):
+            raise OSError("No space left on device")
+        state.os.replace = state.os.link = _nothing_works            # the first attempt can keep NOTHING
         try:
-            state.save("zz_keep2", ["x"])
+            first_try = state.save("zz_keep2", ["x"])
         finally:
-            state.os.replace = real_replace
+            state.os.replace, state.os.link = real_replace, real_link
+        check(first_try is False and not glob.glob(path("zz_keep2") + ".*-*")
+              and "zz_keep2" in state._must_keep and state.save_failures().get("zz_keep2")
+              and state.write_ok() is False,
+              "state: a save that fails keeps nothing yet, stays flagged, and is reported as a failed save")
         check(state.save("zz_keep2", ["x"]) and any(
-                  open(c).read() == "unparseable but precious" for c in glob.glob(path("zz_keep2") + ".*-*")),
-              "state: after a failed save, the next save still keeps the unread file first")
+                  open(c).read() == "unparseable but precious" for c in glob.glob(path("zz_keep2") + ".*-*"))
+              and "zz_keep2" not in state.save_failures() and state.write_ok() is True,
+              "state: …and the next save still keeps the unread file first (the failed one did not forget it)")
+        # the same bytes are not kept twice at SAVE time either (an unreadable file that turned
+        # out fine: two fail->save cycles over identical bytes leave one copy)
+        for _round in range(2):
+            with open(path("zz_twice"), "w") as f:
+                json.dump(["same", "bytes"], f)
+            with state._LOCK:
+                state._must_keep["zz_twice"] = "unreadable"          # as after a failed read
+            state.save("zz_twice", ["same", "bytes"])
+        check(len(glob.glob(path("zz_twice") + ".*-*")) == 1,
+              "state: identical bytes are kept once at save time too")
+        # a copy that fails part-way leaves nothing behind and is not counted as a kept copy;
+        # neither is a name stamped in the future (clock stepped back)
+        del seen[:]
+        real_copy2 = state.shutil.copy2
+
+        def _copy_dies(src, dst, *a, **k):
+            open(dst, "w").close()                                  # what shutil leaves on ENOSPC
+            raise OSError("No space left on device")
+        state.shutil.copy2 = _copy_dies
+        try:
+            for i in range(7):
+                with open(path("zz_nospace"), "w") as f:
+                    f.write("precious but corrupt %d" % i)
+                state.load("zz_nospace", list)
+                with state._LOCK:
+                    state._failing.pop("zz_nospace", None)          # a new episode each time
+        finally:
+            state.shutil.copy2 = real_copy2
+        check(not glob.glob(path("zz_nospace") + ".corrupt-*")
+              and all("NO copy kept: No space left" in d for k, n, d in seen if (k, n) == ("load", "zz_nospace")),
+              "state: a copy that fails leaves no empty file behind (five of those used to read as 'already kept')")
+        ok_save = state.save("zz_nospace", ["rebuilt"])
+        kept_now = glob.glob(path("zz_nospace") + ".unreadable-*")
+        check(ok_save and len(kept_now) == 1 and open(kept_now[0]).read() == "precious but corrupt 6"
+              and not any(k == "lost" for k, n, _d in seen if n == "zz_nospace"),
+              "state: …so the save that follows can still keep the real bytes (hard link), and nothing is reported lost")
+        for i in range(6):
+            with open(path("zz_future") + f".corrupt-20990101T00000000000{i}Z-{i + 1}", "w") as f:
+                f.write("stamped in the future %d" % i)
+        with open(path("zz_future"), "w") as f:
+            f.write("today's garbage")
+        state.load("zz_future", list)
+        check(len(glob.glob(path("zz_future") + ".corrupt-*")) == 7,
+              "state: kept copies stamped in the future do not block today's copy")
+        # kept-copy names never collide, even inside one clock tick
+        class _FrozenClock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 11, 10, 12, 0, 0, tzinfo=tz)
+        real_dt = state.datetime
+        state.datetime = _FrozenClock
+        try:
+            stamps = {state._stamp() for _ in range(50)}
+        finally:
+            state.datetime = real_dt
+        check(len(stamps) == 50, "state: 50 kept-copy names taken in the same instant are all different")
     finally:
         state._listeners.remove(listener)
 
@@ -926,6 +995,113 @@ def test_state_persistence():
             botmod._digest_started = False
             asyncio.run(_connect(1))
             check(h.kevin.dms == [], "startup: a correctly configured bot sends no startup alert at all")
+
+            # A storage alert is raised once, so it must not be lost when that one DM can't go
+            # out. (1) Discord unreachable at the first connect: the alert is held and delivered
+            # at the next reconnect — once.
+            for n in ("_failing", "_must_keep", "_stuck", "_ever_failed", "_preserved"):
+                getattr(state, n).clear()
+            with open(path("zz_held"), "w") as f:
+                f.write("<<garbage at boot>>")
+            state.load("zz_held", dict, cached=True)
+            alerts.reset()
+            botmod._pending_alerts.clear()
+            real_dm = h.kevin.send
+
+            async def _discord_down(text):
+                raise RuntimeError("discord 503")
+            h.kevin.send = _discord_down
+            botmod._digest_started = False
+            asyncio.run(_connect(1))
+            check(h.kevin.dms == [] and "state_load:zz_held" in botmod._pending_alerts,
+                  "startup alert whose DM failed: still held, not dropped")
+            h.kevin.send = real_dm
+            asyncio.run(_connect(1))                               # a reconnect
+            check(len(h.kevin.dms) == 1 and "zz_held.json" in h.kevin.dms[0] and "then restart me" in h.kevin.dms[0]
+                  and "state_load:zz_held" not in botmod._pending_alerts,
+                  "…and delivered at the next reconnect (it used to be lost for good)")
+            asyncio.run(_connect(2))
+            check(len(h.kevin.dms) == 1, "…once: later reconnects send nothing more")
+
+            # (2) fail -> recover -> fail again five minutes later: the second episode's only
+            # notification falls inside the 15-minute quiet window. It is held and goes out when
+            # the window has passed — saying what is true THEN (the store was rewritten meanwhile).
+            h.kevin.dms.clear()
+            alerts.reset()
+            botmod._pending_alerts.clear()
+
+            async def _two_episodes():
+                with open(path("zz_ep"), "w") as f:
+                    f.write("{ blip")
+                state.load("zz_ep", list)                           # episode 1
+                for _ in range(5):
+                    await asyncio.sleep(0)
+                first = len(h.kevin.dms)
+                with open(path("zz_ep"), "w") as f:
+                    json.dump(["five", "real", "rows"], f)
+                state.load("zz_ep", list)                           # recovered
+                with open(path("zz_ep"), "w") as f:
+                    f.write("{ really broken now")
+                rows = state.load("zz_ep", list)                    # episode 2, inside the window
+                state.save("zz_ep", rows + ["the only row left"])   # the bot's usual next move
+                for _ in range(5):
+                    await asyncio.sleep(0)
+                held = "state_load:zz_ep" in botmod._pending_alerts and "state_load:zz_ep" in botmod._pending_retry
+                return first, len(h.kevin.dms), held
+            first, second, held = asyncio.run(_two_episodes())
+            check((first, second) == (1, 1) and held,
+                  "second failure inside the quiet window: not DMed twice in a row, but held with a retry scheduled")
+            alerts._last_sent.clear()                               # …the quiet window passes
+            asyncio.run(botmod._send_pending("state_load:zz_ep"))   # what the scheduled retry does
+            check(len(h.kevin.dms) == 2 and "could not be read earlier" in h.kevin.dms[1]
+                  and "started from empty" in h.kevin.dms[1] and "state_load:zz_ep" not in botmod._pending_alerts,
+                  "…and delivered once the window has passed, describing the state at that moment")
+
+            # (3) a boot-time failure is still reported even if the store was SAVED before the
+            # first connect (the save clears every other trace of it)
+            for n in ("_failing", "_must_keep", "_stuck", "_ever_failed", "_preserved"):
+                getattr(state, n).clear()
+            h.kevin.dms.clear()
+            alerts.reset()
+            botmod._pending_alerts.clear()
+            with open(path("zz_early"), "w") as f:
+                f.write("<<garbage at boot>>")
+            state.load("zz_early", list)
+            state.save("zz_early", ["written before anyone was told"])
+            botmod._digest_started = False
+            asyncio.run(_connect(1))
+            check(len(h.kevin.dms) == 1 and "zz_early.json" in h.kevin.dms[0] and "started from empty" in h.kevin.dms[0],
+                  "a boot-time failure followed by an early save is still reported at the first connect")
+        # The four real load-once caches must be declared cached=True, or a failed read of one
+        # is described to Kevin as "restore it" when a restore without a restart is overwritten.
+        from botv2 import tickets as tickets_mod, vip as vip_mod
+        for n in ("_failing", "_must_keep", "_stuck", "_ever_failed", "_preserved"):
+            getattr(state, n).clear()
+        for mod, store in ((vip_mod, "vip_rates"), (tickets_mod, "ticket_channels")):
+            had = os.path.exists(path(store))
+            before = open(path(store)).read() if had else None
+            with open(path(store), "w") as f:
+                f.write("{ corrupt at import")
+            try:
+                importlib.reload(mod)                               # the module-level load runs again
+                check(state.stuck().get(store) == "corrupt",
+                      f"{store}: a failed read at import is marked as a load-once cache (stuck until restart)")
+            finally:
+                for junk in glob.glob(path(store) + ".corrupt-*"):
+                    os.unlink(junk)
+                if had:
+                    with open(path(store), "w") as f:
+                        f.write(before)
+                else:
+                    os.unlink(path(store))
+                for n in ("_failing", "_must_keep", "_stuck", "_ever_failed", "_preserved"):
+                    getattr(state, n).clear()
+                importlib.reload(mod)                               # back to the real contents
+        import inspect
+        bot_src = inspect.getsource(botmod)
+        check('state.load("welcomed", list, cached=True)' in bot_src
+              and 'state.load("channel_sheet", dict, cached=True)' in bot_src,
+              "bot.py: the welcomed and channel_sheet caches are declared load-once")
     finally:
         botmod._digest_started, botmod._web_runner = saved_started, saved_runner
         (botmod._payout_digest_loop, botmod._heartbeat_loop, botmod.tickets.sweep_overflow) = saved_loops
@@ -3949,9 +4125,14 @@ def test_alerts_and_lanes():
             cfg.DATA_DIR_IS_DEFAULT, cfg.PSA_FOLDER_ID, cfg.PRICE_MOCK = False, "a-real-folder-id", False
             for n in kept:
                 getattr(state_mod, n).clear()
+            saved_kevin, saved_save_failing, saved_write_ok = cfg.KEVIN_USER_ID, dict(state_mod._save_failing), state_mod._write_ok
+            cfg.KEVIN_USER_ID = 777
+            state_mod._save_failing.clear()
+            state_mod._write_ok = True
             f = status_flags()
-            check((f.get("data_dir_default"), f.get("psa_folder_blank"), f.get("unreadable_stores"), f.get("price_mock"))
-                  == (False, False, [], False) and canary.standing_problems(f) == [],
+            check((f.get("data_dir_default"), f.get("psa_folder_blank"), f.get("unreadable_stores"), f.get("price_mock"),
+                   f.get("stuck_stores"), f.get("unsaved_stores"), f.get("data_dir_writable"), f.get("kevin_dm"))
+                  == (False, False, [], False, [], [], True, True) and canary.standing_problems(f) == [],
                   "status + canary: a correctly configured bot reports no standing problem")
             cfg.DATA_DIR_IS_DEFAULT, cfg.PSA_FOLDER_ID, cfg.PRICE_MOCK = True, "  ", True
             with open(os.path.join(cfg.DATA_DIR, "zz_status_bad.json"), "w") as fh:
@@ -3963,18 +4144,41 @@ def test_alerts_and_lanes():
             with open(os.path.join(cfg.DATA_DIR, "zz_status_cached.json"), "w") as fh:
                 fh.write("{}")
             state_mod.load("zz_status_cached", dict)             # reads again — but the cache is still empty
+            # a save that fails (read-only volume) and an unset Kevin id are standing problems too
+            real_replace = state_mod.os.replace
+
+            def _read_only(src, dst):
+                raise OSError("Read-only file system")
+            state_mod.os.replace = _read_only
+            try:
+                state_mod.save("zz_status_unsaved", ["x"])
+            finally:
+                state_mod.os.replace = real_replace
+            cfg.KEVIN_USER_ID = 0
             f = status_flags()
             probs = canary.standing_problems(f)
             check(f.get("data_dir_default") is True and f.get("psa_folder_blank") is True
-                  and f.get("unreadable_stores") == ["zz_status_bad", "zz_status_cached"],
-                  "status: DATA_DIR unset, a blank folder id and unreadable / stuck stores are reported as flags")
-            check(len(probs) == 4 and any("FAKE" in x for x in probs) and any("DATA_DIR" in x for x in probs)
-                  and any("PSA_FOLDER_ID" in x for x in probs) and any("zz_status_bad, zz_status_cached" in x for x in probs),
-                  "canary: each standing problem fails the run until it is fixed (no age window)")
+                  and f.get("unreadable_stores") == ["zz_status_bad"] and f.get("stuck_stores") == ["zz_status_cached"]
+                  and f.get("unsaved_stores") == ["zz_status_unsaved"] and f.get("data_dir_writable") is False
+                  and f.get("kevin_dm") is False,
+                  "status: every standing condition is reported as its own flag (unreadable now / stuck until restart / unsaved / unwritable)")
+            check(len(probs) == 8 and any("FAKE" in x for x in probs) and any("DATA_DIR" in x for x in probs)
+                  and any("PSA_FOLDER_ID" in x for x in probs) and any("right now: zz_status_bad" in x for x in probs)
+                  and any("RESTARTED" in x and "zz_status_cached" in x for x in probs)
+                  and any("NOT on disk: zz_status_unsaved" in x for x in probs)
+                  and any("not writable" in x for x in probs) and any("KEVIN_USER_ID" in x for x in probs),
+                  "canary: each standing problem fails the run until it is fixed (no age window), and a stuck store says RESTART")
             check(canary.standing_problems(None) == [] and canary.standing_problems({"delivery_tracking": True}) == []
-                  and canary.standing_problems({"unreadable_stores": "tickets"}) == [],
+                  and canary.standing_problems({"unreadable_stores": "tickets", "data_dir_writable": None}) == [],
                   "canary: a bot that doesn't report these flags (an older build) is not failed for it")
+            check(state_mod.save("zz_status_unsaved", ["x"]) and status_flags().get("unsaved_stores") == []
+                  and status_flags().get("data_dir_writable") is True,
+                  "status: the next successful save clears the unsaved / unwritable flags by itself")
         finally:
+            cfg.KEVIN_USER_ID = saved_kevin
+            state_mod._save_failing.clear()
+            state_mod._save_failing.update(saved_save_failing)
+            state_mod._write_ok = saved_write_ok
             cfg.DATA_DIR_IS_DEFAULT, cfg.PSA_FOLDER_ID, cfg.PRICE_MOCK = saved
             for n, old_v in kept.items():
                 getattr(state_mod, n).clear()

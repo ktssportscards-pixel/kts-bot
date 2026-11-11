@@ -52,6 +52,11 @@ _stuck: dict = {}
 _ever_failed: dict = {}
 # name -> (mtime_ns, size) of the corrupt file this process already copied aside (fast path).
 _preserved: dict = {}
+# name -> why the MOST RECENT save of this store failed. Cleared by its next successful save.
+_save_failing: dict = {}
+# Result of the most recent attempt to write to DATA_DIR at all (the startup probe, or any
+# save): True / False, None before the first attempt.
+_write_ok = None
 
 
 def _path(name: str) -> str:
@@ -96,16 +101,19 @@ def _recent_kept(path: str) -> int:
     """How many copies of this store were kept inside the storm-guard window. The time is
     read from the stamp in the name (a hard link / copy keeps the ORIGINAL file's mtime); a
     name without a readable stamp is not one of ours from this window and is not counted."""
-    cutoff = datetime.now(timezone.utc) - _KEEP_WINDOW
+    now = datetime.now(timezone.utc)
+    cutoff = now - _KEEP_WINDOW
     n = 0
     for other in _kept_copies(path):
         try:
             stamp = os.path.basename(other)[len(os.path.basename(path)) + 1:].split("-")[1]
             when = datetime.strptime(stamp, _STAMP_FMT).replace(tzinfo=timezone.utc)
-        except (IndexError, ValueError):
+            if os.path.isfile(other) and os.path.getsize(other) == 0:
+                continue                  # an empty file keeps nothing (a copy that failed part-way)
+        except (IndexError, ValueError, OSError):
             continue
-        if when >= cutoff:
-            n += 1
+        if cutoff <= when <= now + timedelta(minutes=5):   # a stamp from the "future" (clock stepped
+            n += 1                                         # back) must not block copies forever
     return n
 
 
@@ -162,18 +170,34 @@ def failures_since_start() -> dict:
         return dict(_ever_failed)
 
 
+def save_failures() -> dict:
+    """{store name: reason} for stores whose MOST RECENT save failed: their latest change is
+    not on disk. An entry goes away with the next successful save of that store."""
+    with _LOCK:
+        return dict(_save_failing)
+
+
+def write_ok():
+    """Did the most recent attempt to write to DATA_DIR work (the startup probe or any
+    save)? True / False; None if nothing has been tried yet."""
+    return _write_ok
+
+
 def writable() -> bool:
     """True if a file can be created in DATA_DIR right now (a startup probe; leaves nothing
     behind). False means nothing the bot records is being saved."""
+    global _write_ok
     try:
         os.makedirs(config.DATA_DIR, exist_ok=True)
         probe = os.path.join(config.DATA_DIR, ".write-probe")
         with open(probe, "w") as f:
             f.write("ok")
         os.unlink(probe)
+        _write_ok = True
         return True
     except Exception as e:
         print(f"[state] DATA_DIR write probe failed: {e}")
+        _write_ok = False
         return False
 
 
@@ -224,6 +248,10 @@ def _load_problem(name: str, path: str, exc: Exception, cached: bool) -> None:
                         _preserved[name] = sig
                         fate = f"copy kept: {os.path.basename(copied)}"
                     except Exception as e:
+                        try:                        # shutil leaves a partial / empty file behind;
+                            os.unlink(copied)       # it keeps nothing and must not count as a copy
+                        except OSError:
+                            pass
                         copied = ""
                         fate = f"NO copy kept: {e}"
         else:
@@ -298,6 +326,7 @@ def _keep_aside(name: str, path: str) -> str:
 def save(name: str, data) -> bool:
     """Atomically persist a store. Returns True on success; logs, tells the listeners and
     returns False on failure (persistence is best-effort, never fatal to a live quote)."""
+    global _write_ok
     path = _path(name)
     tmp = path + ".tmp"
     not_kept = ""
@@ -322,6 +351,8 @@ def save(name: str, data) -> bool:
                 _must_keep.pop(name, None)
                 _failing.pop(name, None)
                 _preserved.pop(name, None)
+                _save_failing.pop(name, None)
+                _write_ok = True
             except Exception:
                 try:
                     os.unlink(tmp)                  # don't leave a partial temp file behind
@@ -330,6 +361,10 @@ def save(name: str, data) -> bool:
                 raise
     except Exception as e:
         print(f"[state] save {name!r} failed (non-fatal): {e}")
+        with _LOCK:
+            _save_failing[name] = str(e) or e.__class__.__name__
+        if isinstance(e, OSError):                  # the volume, not the data being saved
+            _write_ok = False
         _notify("save", name, str(e))
         return False
     if not_kept:                                    # the write worked, but what it replaced is gone
