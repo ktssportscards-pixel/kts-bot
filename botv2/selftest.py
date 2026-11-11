@@ -2753,6 +2753,115 @@ def test_ship_booking():
     tracking.record_accepted_ship(9211, lot("p1"))
     check(owed_row(9211)["tracking"] == "1ZEARLYEARLYEARLY3", "first lot: a number dropped before 'ship' is kept")
 
+    # The NEXT lot's tracking arrives before Kevin pays the first lot (the customer mailed it
+    # without typing ship — the case the new "NOT booked as owed" DM steers Kevin into): that
+    # number is the new lot's, and must show once the lot is booked.
+    tracking.record_quote(9212, lot("n1"), channel_name="nextlot")
+    tracking.record_accepted_ship(9212, lot("n1"))
+    tracking.record_tracking(9212, "1ZFIRSTBOXFIRSTBOX")
+    tracking.record_quote(9212, lot("n2"), channel_name="nextlot")           # lot 2: quoted, not booked
+    tracking.record_tracking(9212, "1ZSECONDBOXSECOND")                       # its package is moving
+    check(tracking.mark_paid(9212) and "paid_tracking" in owed_row(9212)
+          and owed_row(9212)["paid_tracking"] is None,
+          "paid with the next lot's number on file: that number is NOT filed under the paid lot")
+    tracking.record_accepted_ship(9212, lot("n2"))                            # Kevin books lot 2
+    o2 = owed_row(9212)
+    check(o2["paid"] is False and o2["payout"] == 90.0 and o2["tracking"] == "1ZSECONDBOXSECOND"
+          and "1ZSECONDBOXSECOND" in payout_digest.build_digest(),
+          "…so the booked second lot shows ITS tracking number (it showed 'no tracking yet')")
+    # but the FIRST number on a ticket is the booked lot's, even if other cards are quoted
+    tracking.record_quote(9213, lot("m1"), channel_name="firstnum")
+    tracking.record_accepted_ship(9213, lot("m1"))
+    tracking.record_quote(9213, lot("m2"), channel_name="firstnum")
+    tracking.record_tracking(9213, "1ZONLYBOXONLYBOX11")
+    tracking.mark_paid(9213)
+    tracking.record_accepted_ship(9213, lot("m2"))
+    check(owed_row(9213)["paid_tracking"] == "1ZONLYBOXONLYBOX11" and owed_row(9213)["tracking"] is None,
+          "the first number on a ticket is the booked lot's: a lot booked after the payment doesn't inherit it")
+    # a second number with nothing waiting to be booked is the same lot's second box
+    tracking.record_quote(9214, lot("b1"), channel_name="twoboxes")
+    tracking.record_accepted_ship(9214, lot("b1"))
+    tracking.record_tracking(9214, "1ZBOXONEBOXONE1111")
+    tracking.record_tracking(9214, "1ZBOXTWOBOXTWO2222")
+    tracking.mark_paid(9214)
+    check(owed_row(9214)["paid_tracking"] == "1ZBOXTWOBOXTWO2222",
+          "a second number with no unbooked cards belongs to the lot being paid")
+    # a number posted for the next lot AFTER the payment (row still paid) is kept on booking
+    tracking.record_quote(9215, lot("a1"), channel_name="afterpaid")
+    tracking.record_accepted_ship(9215, lot("a1"))
+    tracking.record_tracking(9215, "1ZPAIDLOTPAIDLOT11")
+    tracking.mark_paid(9215)
+    tracking.record_quote(9215, lot("a2"), channel_name="afterpaid")
+    tracking.record_tracking(9215, "1ZNEXTLOTNEXTLOT22")
+    tracking.record_accepted_ship(9215, lot("a2"))
+    check(owed_row(9215)["tracking"] == "1ZNEXTLOTNEXTLOT22", "a number posted after the payment is the new lot's")
+
+    # Rows PAID BEFORE this change have no paid_tracking: the number they hold is the paid
+    # lot's, so a new lot must not show it (it used to get today's date + last month's number).
+    legacy_row = lambda cid, user: {"id": f"owed_{cid}", "channel_id": cid, "user": user, "date": "2026-10-01",
+                                    "status": "accepted", "paid": True, "paid_date": "2026-10-09",
+                                    "certs": {}, "cert_payout": {}, "payout": 0, "comp": 0, "cards": 0,
+                                    "tracking": "1ZOLDOLDOLDOLDOLD1"}
+    rows = tracking.state.load("owed", list)
+    rows += [legacy_row(9216, "legacy"), legacy_row(9217, "legacy2")]
+    tracking.state.save("owed", rows)
+    tracking.record_quote(9216, lot("g2"), channel_name="legacy")
+    tracking.record_accepted_ship(9216, lot("g2"))
+    o6 = owed_row(9216)
+    check(o6["payout"] == 90.0 and o6["tracking"] is None and o6["date"] != "2026-10-01"
+          and o6.get("paid_tracking") == "1ZOLDOLDOLDOLDOLD1",
+          "row paid before this change: a new lot gets a fresh date and NOT the old lot's number")
+    tracking.record_accepted_ship(9216, lot("g2"))
+    check(owed_row(9216)["tracking"] is None, "…and the old number doesn't come back on the next projection")
+    tracking.record_quote(9217, lot("h2"), channel_name="legacy2")
+    tracking.record_tracking(9217, "1ZNEWBOXNEWBOX2222")                      # posted while the row is still paid
+    tracking.record_accepted_ship(9217, lot("h2"))
+    check(owed_row(9217)["tracking"] == "1ZNEWBOXNEWBOX2222" and owed_row(9217)["paid_tracking"] == "1ZOLDOLDOLDOLDOLD1",
+          "row paid before this change: a NEW number posted before booking is kept as the new lot's")
+
+    # an UNPAID balance that grows keeps its original ship date (only a re-OPENED row gets a new one)
+    tracking.record_quote(9218, lot("d1"), channel_name="grow")
+    tracking.record_accepted_ship(9218, lot("d1"))
+    rows = tracking.state.load("owed", list)
+    next(r for r in rows if r["id"] == "owed_9218")["date"] = "2026-10-20"
+    tracking.state.save("owed", rows)
+    tracking.record_quote(9218, lot("d2"), channel_name="grow")           # a second message: one more card
+    res = tracking.record_accepted_ship(9218, lot("d2"))                  # snapshot = that message only
+    check(owed_row(9218)["date"] == "2026-10-20" and owed_row(9218)["payout"] == 180.0,
+          "an unpaid balance that grows keeps its first ship date")
+    check(res and (res.get("payout"), res.get("cards")) == (90, 1)
+          and res.get("owed") == 180.0 and res.get("owed_cards") == 2,
+          "ship: the reported booked balance is the ticket's whole unpaid balance, not the last message's total")
+    tracking.mark_paid(9218)
+    one_more = {"username": "repeat", "comp": 100, "payout": 90, "cards": 1,
+                "certs": {"d3": 100}, "cert_offers": {"d3": 90}}
+    tracking.record_quote(9218, one_more, channel_name="grow")
+    res = tracking.record_accepted_ship(9218, one_more)
+    check(res and res.get("owed") == 90.0 and res.get("owed_cards") == 1,
+          "ship after a payment: the reported balance is only the new lot, not the paid one")
+
+    # Legacy rows (shipped before the per-card ledger existed) are carried as they are:
+    # a PAID one stays paid when its card is re-listed and "shipped" again (re-opening it
+    # would put an already-paid card back in the payout queue), and a row with a card list
+    # but no amount is still carried (its cards are known, so they are not booked twice).
+    rows = tracking.state.load("owed", list)
+    rows += [{"id": "owed_9219", "channel_id": 9219, "user": "oldpaid", "date": "2026-09-01", "status": "accepted",
+              "paid": True, "paid_date": "2026-09-05", "certs": {"X1": 100}, "payout": 90.0, "comp": 100.0, "cards": 1},
+             {"id": "owed_9221", "channel_id": 9221, "user": "certsonly", "date": "2026-09-01", "status": "accepted",
+              "paid": False, "certs": {"Y1": 100}, "payout": 0, "comp": 0, "cards": 1}]
+    tracking.state.save("owed", rows)
+    for cid, user, cert in ((9219, "oldpaid", "X1"), (9221, "certsonly", "Y1")):
+        again = {"username": user, "comp": 100, "payout": 90, "cards": 1, "certs": {cert: 100}, "cert_offers": {cert: 90}}
+        tracking.record_quote(cid, again, channel_name=user)
+        tracking.record_accepted_ship(cid, again)
+    tk = lambda cid: next(r for r in tracking.state.load("tickets", list) if r["id"] == f"tk_{cid}")
+    check(owed_row(9219)["paid"] is True and owed_row(9219)["payout"] == 0
+          and tk(9219).get("review_overlaps") == ["X1"] and tk(9219)["ledger"]["_carried"][0]["status"] == "paid",
+          "legacy PAID row: re-listing + shipping its card does not re-open it (flagged for review instead)")
+    check(owed_row(9221)["payout"] == 0 and tk(9221).get("review_overlaps") == ["Y1"]
+          and tk(9221)["ledger"]["_carried"][0]["certs"] == ["Y1"],
+          "legacy row with a card list but no amount is still carried (its card is not booked a second time)")
+
     # 6) Kevin-only visibility (no booking, no payout change):
     for st in ("tickets", "owed"):
         tracking.state.save(st, [])

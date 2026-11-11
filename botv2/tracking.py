@@ -129,7 +129,13 @@ def _project_owed(channel_id, ledger: dict, existing_owed: dict, base: dict, tic
     # keep the paid lot's ship date and tracking number, so Kevin's digest / `!owe` showed the
     # new balance with last time's date and number (and the stale check aged it from then).
     reopened = bool(eo.get("paid")) and payout > 0
-    paid_trk = eo.get("paid_tracking")               # the number on file when it was last paid
+    # paid_tracking = the number that belongs to the lot that was PAID (mark_paid writes the key
+    # every time, None when the number on file was not that lot's). A paid row WITHOUT the key
+    # was paid before the key existed: whatever number it holds is the paid lot's.
+    known = "paid_tracking" in eo
+    paid_trk = eo.get("paid_tracking")
+    if reopened and not known and eo.get("tracking"):
+        paid_trk, known = eo.get("tracking"), True
     trk = eo.get("tracking") or tk.get("tracking") or (tk.get("delivery") or {}).get("number")
     if payout > 0 and trk and paid_trk and trk == paid_trk:
         trk = None                                   # that number belongs to the already-paid lot
@@ -144,7 +150,7 @@ def _project_owed(channel_id, ledger: dict, existing_owed: dict, base: dict, tic
         "payout": payout, "comp": comp, "cards": cards,
         "tracking": trk,
     }
-    if paid_trk:
+    if known:
         row["paid_tracking"] = paid_trk
     row["paid_date"] = eo.get("paid_date") if row["paid"] else None
     return row
@@ -400,17 +406,31 @@ def record_tracking(channel_id, tracking_num: str) -> bool:
     local tracker + ops dashboard already read that. Never clobbers a 'delivered'
     state when the same number is re-dropped."""
     hit = False
+    unbooked = unbooked_quoted(channel_id)[0] > 0        # cards quoted on this ticket, not yet booked
     for store, key in (("tickets", f"tk_{channel_id}"), ("owed", f"owed_{channel_id}")):
         data = state.load(store, list)
         changed = False
         for r in data:
             if r.get("id") == key:
+                prev = r.get("tracking")
                 r["tracking"] = tracking_num
                 if store == "owed" and not r.get("paid"):
                     # A number posted while a balance is unpaid belongs to THAT lot — even if
                     # it equals the number the previous, paid lot shipped under (two batches
                     # in one box). Forget the "paid lot's number" so _project_owed keeps it.
                     r.pop("paid_tracking", None)
+                    # …unless it is a SECOND, different number while other cards on the ticket
+                    # are quoted but not booked: that is most likely the NEXT lot's package.
+                    # Remember it, so paying the booked lot doesn't file this number under it
+                    # (mark_paid) and then hide it when the next lot is booked.
+                    if prev and prev != tracking_num and unbooked:
+                        r["tracking_for_next"] = tracking_num
+                    else:
+                        r.pop("tracking_for_next", None)
+                elif store == "owed" and "paid_tracking" not in r:
+                    # Paid before paid_tracking existed, and the number is being replaced:
+                    # the one it replaces was the paid lot's.
+                    r["paid_tracking"] = prev
                 if store == "tickets":
                     d = r.get("delivery") or {}
                     # Only (re)open an in_transit record when the NUMBER actually changes.
@@ -595,8 +615,11 @@ def mark_paid(channel_id) -> bool:
         if r.get("id") == f"owed_{channel_id}":
             r["paid"] = True
             r["paid_date"] = date.today().isoformat()
-            if r.get("tracking"):                    # so a later lot on this ticket doesn't inherit it
-                r["paid_tracking"] = r["tracking"]
+            # Remember which number belongs to the lot being paid, so a later lot on this
+            # ticket doesn't inherit it. Always written (None = "the number on file is not this
+            # lot's": it was posted as a second number while the next lot was quoted, not booked).
+            nxt = r.pop("tracking_for_next", None)
+            r["paid_tracking"] = None if (nxt and nxt == r.get("tracking")) else r.get("tracking")
             hit = True
     if not hit:
         return False
