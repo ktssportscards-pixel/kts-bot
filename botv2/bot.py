@@ -258,8 +258,8 @@ async def _handle_tracking(channel, tnum, silent: bool = False) -> None:
         # payout queue (no digest line, no `!owe` packet) — tell Kevin; never auto-book here.
         n_q, amt_q = tracking.unbooked_quoted(channel.id)
         warn = (f" — ⚠️ {n_q} quoted card(s) (${amt_q:,.2f}) on this ticket are NOT booked as owed "
-                f"(no ship/proceed was handled). A `ship` message in the ticket books them — "
-                f"the bot answers it by posting the shipping address there again."
+                f"yet. A `ship` message in the ticket books them — the bot answers it by posting "
+                f"the shipping address there again."
                 if n_q else "")
     elif tracking.is_voided(channel.id):
         warn = (" — ⚠️ this channel's quote was VOIDED: no ticket/owed on record, so the number "
@@ -299,8 +299,8 @@ async def notify_delivered(channel_id, user: str = "") -> bool:
     except Exception:
         n_q, amt_q = 0, 0.0
     if n_q:                                            # delivered, but never booked as owed
-        kmsg += (f" ⚠️ {n_q} quoted card(s) (${amt_q:,.2f}) on this ticket are NOT booked as owed — "
-                 f"no ship/proceed was handled, so they're not in the payout queue.")
+        kmsg += (f" ⚠️ {n_q} quoted card(s) (${amt_q:,.2f}) on this ticket are NOT booked as owed "
+                 f"yet, so they're not in the payout queue.")
     await ping_kevin(kmsg)                             # always (Kevin's own DM)
     return posted
 
@@ -665,6 +665,16 @@ async def _handle_message(message) -> None:
         welcomed_now = await _welcome_if_new(message, channel)
         if welcomed_now and not cert_list:
             return
+
+    # A number labelled as another grader's (SGC / BGS / Beckett / TAG) is not priced. Tell
+    # Kevin — the seller gets no line for it in the quote (or no reply at all, if it was the
+    # only number), and nobody else would know a card was left out.
+    not_ours = certs.other_grader_serials(text)
+    if not_ours:
+        await ping_kevin(f"ℹ️ #{channel.name}: {len(not_ours)} number(s) labelled as another grader "
+                         f"were NOT priced (PSA / CGC only): " + ", ".join(not_ours[:20])
+                         + (" …" if len(not_ours) > 20 else "")
+                         + ". Nothing was said to the customer about them.")
 
     if not cert_list:
         # A short "Shipped! 1Z…" is BOTH agree-shaped and a tracking drop. It used to take the

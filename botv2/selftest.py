@@ -902,11 +902,46 @@ def test_certs():
           "a labelled mixed PSA/CGC list on separate lines is read in full")
     check(ec("psa psa psa psa is great 12345678") == [], "free-floating 'psa' words still count as chatter")
     check(ec("way too many random words here PSA 12345678") == [], "real chatter with one label is still ignored")
+    check(ec("PSA 12345678 PSA 23456789 PSA 34567890 thanks") == ["12345678", "23456789", "34567890"]
+          and ec("here you go PSA 12345678 PSA 23456789 PSA 34567890 PSA 45678901")
+          == ["12345678", "23456789", "34567890", "45678901"],
+          "labelled lists: 3 labels + one word, and 4 labels + three words, are submissions")
+    # …but ONLY lists. A sentence about a labelled card is read exactly as v1 reads it (the
+    # label counts as a word), so these stay ignored — the first version of this fix quoted
+    # them and built a new buying sheet each time.
+    for sentence in ("I already sold PSA 12345678", "remove PSA 12345678 from lot",
+                     "not sending PSA 12345678 anymore", "skip PSA 12345678 keep PSA 23456789",
+                     "can you check PSA 12345678", "can't take PSA 12345678 sorry"):
+        check(ec(sentence) == [], f"a sentence, not a submission: {sentence!r} is still ignored")
+    # …and never when a tracking number or a shipping word is in the message: certs win over
+    # tracking in the handler, so these would be re-quoted and the tracking number dropped.
+    for msg in ("Shipped PSA 12345678 tracking 1Z999AA10123456784",
+                "PSA 12345678 PSA 23456789 shipped today 1Z999AA10123456784",
+                "PSA 12345678\nPSA 23456789\nPSA 34567890\nPSA 45678901\nTracking: 9400111899223197428490",
+                "sent PSA 12345678 PSA 23456789 PSA 34567890 fedex 123456789012",
+                "PSA 12345678 PSA 23456789 PSA 34567890 PSA 45678901 1Z999AA10123456784"):
+        check(ec(msg) == [] and certs.extract_tracking(msg), f"labelled certs + tracking stays a tracking message: {msg[:44]!r}")
     # another grader's SHORT serial must not be quoted as a PSA cert
     check(ec("SGC 1234567") == [] and ec("BGS 12345678") == [] and ec("Beckett #12345678") == []
           and ec("TAG 1234567") == [], "7-9 digit BGS/SGC/TAG/Beckett serials are not PSA certs")
     check(ec("SGC 1234567 PSA 23456789 34567890") == ["23456789", "34567890"],
           "…while PSA-labelled and unlabelled numbers in the same message still are")
+    ogs = certs.other_grader_serials
+    check(ogs("SGC 1234567 PSA 23456789 34567890") == ["SGC 1234567"] and ogs("12345678 23456789") == []
+          and ogs("sgc 1234567\nBeckett #12345678\nTAG 2345678") == ["SGC 1234567", "BECKETT 12345678", "TAG 2345678"],
+          "skipped other-grader serials are reported (so Kevin can be told)")
+    # "tag" is also an ordinary word: only TAG in capitals is the grader
+    check(ec("price tag 12345678") == ["12345678"] and ec("tag 12345678") == ["12345678"]
+          and ec("Tag: 12345678 and 23456789") == ["12345678", "23456789"] and ogs("tag 12345678") == [],
+          "'tag' / 'Tag' as a word does not swallow a cert (only TAG in capitals is a grader label)")
+    # a number-FIRST line ("12345678 PSA …") is read as v1 reads it: the label regex binds a
+    # grader word to the number after it, which would drop the wrong card there
+    check(ec("12345678 PSA 1234567 SGC 23456789 PSA") == ["12345678", "1234567", "23456789"]
+          and ogs("12345678 PSA 1234567 SGC 23456789 PSA") == [],
+          "number-first line: nothing is skipped (no PSA cert dropped for the label that follows another number)")
+    check(ec("SGC 1234567 SGC 2345678\n12345678 SGC 3456789") == ["12345678", "3456789"]
+          and ogs("SGC 1234567 SGC 2345678\n12345678 SGC 3456789") == ["SGC 1234567", "SGC 2345678"],
+          "decided per line: a label-first line skips its SGC serials, a number-first line is left as v1")
     et = certs.extract_tracking
     check(et("1Z999AA10123456784") == "1Z999AA10123456784", "UPS tracking")
     check(et("here 9400111899223817200000 ok") == "9400111899223817200000", "USPS tracking")
@@ -2688,6 +2723,41 @@ def test_handlers_and_void_races():
               "plain 'proceed': one address message, no tracking handling")
         tracking.void_ticket(9109)
     lots.drop(9109)
+
+    # 5b-2) A labelled cert AND a tracking number in one short message ("Shipped PSA 12345678
+    #       tracking 1Z…") is a tracking drop, as it always was — not a re-quote that builds a
+    #       second buying sheet and throws the number away.
+    with _BotHarness(9115, name="lbltrk", rows=_rows, sheet_url=URL % 9115) as h:
+        h.say("12345678")
+        h.say("ship")
+        for msg_text in ("Shipped PSA 12345678 tracking 1Z999AA10123456784",
+                         "PSA 12345678\nPSA 23456789\nPSA 34567890\nPSA 45678901\nTracking: 9400111899223197428490"):
+            del h.channel.sent[:], h.kevin.dms[:], h.sheet_calls[:], h.tracking_saves[:]
+            h.say(msg_text)
+            want = certs.extract_tracking(msg_text)
+            t = tracking.find_tickets(channel_id=9115)[0]
+            check(not h.errors and not h.sheet_calls and "Total payout" not in "\n".join(h.channel.sent)
+                  and any("noted" in m for m in h.channel.sent) and t.get("tracking") == want
+                  and h.tracking_saves == [(URL % 9115, want)] and any("Tracking from" in d for d in h.kevin.dms),
+                  f"labelled cert(s) + tracking number: handled as tracking, no re-quote, no new sheet ({want[:6]}…)")
+        tracking.void_ticket(9115)
+    lots.drop(9115)
+    # Another grader's serial is not priced — and Kevin is told, since nobody else is.
+    with _BotHarness(9116, name="othergrader", rows=_rows, sheet_url=URL % 9116) as h:
+        h.say("SGC 1234567 PSA 23456789")
+        kd = "\n".join(h.kevin.dms)
+        check(not h.errors and h.sheet_calls == [("othergrader", ["23456789"])]
+              and "NOT priced" in kd and "SGC 1234567" in kd and "1234567" not in "\n".join(h.channel.sent),
+              "an SGC-labelled serial next to a PSA cert: only the PSA cert is quoted, and Kevin is told about the other")
+        del h.channel.sent[:], h.kevin.dms[:], h.sheet_calls[:]
+        h.say("BGS 12345678")
+        check(not h.channel.sent and not h.sheet_calls and any("BGS 12345678" in d and "NOT priced" in d for d in h.kevin.dms),
+              "a message with only another grader's serial: no reply (as designed) — but Kevin hears about it")
+        del h.kevin.dms[:]
+        h.say("12345678 34567890")
+        check(not any("NOT priced" in d for d in h.kevin.dms), "ordinary cert messages produce no such note")
+        tracking.void_ticket(9116)
+    lots.drop(9116)
 
     # 5c) a ticket quoted over TWO messages has TWO buying sheets. A void trashes only the
     #     latest (unchanged) — but it must tell Kevin the earlier one is still live. It used

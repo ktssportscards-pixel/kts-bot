@@ -7,11 +7,14 @@ The context guards (tracking/phone/payment words, Discord timestamps, GIF links,
 the 3-word chatter cap) are hard-won — getting extraction wrong is a broken bot,
 so this is a faithful port, not an approximation. Pure/stdlib-only → fully testable.
 
-Two DELIBERATE deviations from v1 (2026-11-10) — do not "restore" v1 here:
-  1. a "PSA" label attached to a number is not counted as chatter (a list of four or more
-     "PSA 12345678" lines used to be dropped in silence);
-  2. a 7–9 digit number labelled BGS / SGC / TAG / Beckett is another grader's serial, not
-     a PSA cert, and is skipped (it used to be priced as the PSA card with that number).
+Two DELIBERATE, NARROW deviations from v1 (2026-11-10) — do not "restore" v1 here:
+  1. In a LIST of labelled slabs, the "PSA" labels are not counted as chatter (four or more
+     "PSA 12345678" lines used to be dropped in silence). A list = four or more labelled
+     numbers, or labelled numbers with at most one other word — and no tracking number or
+     shipping/payment word in the message. Anything else is counted exactly as v1 did.
+  2. A 7–9 digit number labelled BGS / SGC / Beckett / TAG (upper case) is another grader's
+     serial, not a PSA cert, and is skipped (it used to be priced as the PSA card with that
+     number) — only on a line that starts label-first; see other_grader_serials().
 Everything else is v1's logic unchanged.
 """
 import re
@@ -79,39 +82,76 @@ def _strip_cert_noise(text: str) -> str:
 def extract_certs(text: str) -> list:
     """Cert tokens in a message, in order, deduped. (v1's logic, plus the two deviations
     listed in the module docstring.)"""
+    return _scan(text)[0]
+
+
+def other_grader_serials(text: str) -> list:
+    """Numbers in a message that were NOT read as certs because they carry another grader's
+    label, as display strings ('SGC 1234567'), in order. Only the 7–9 digit ones — the size
+    that would otherwise be priced as a PSA cert. The bot tells Kevin about them: skipping a
+    number without a word to anyone hides a card the seller thinks they submitted."""
+    return _scan(text)[1]
+
+
+def _scan(text: str) -> tuple:
+    """(cert tokens, skipped other-grader serials) for one message."""
     if not text:
-        return []
+        return [], []
     text = _strip_links(text)
     scan = _DISCORD_TS_RE.sub(lambda m: ' ' * len(m.group(0)), text)   # same offsets
-    found = [(m.group(2), (m.group(1) or '').lower(), m.start(2))
+    found = [(m.group(2), (m.group(1) or '').lower(), m.start(2), m.group(1) or '')
              for m in _CERT_NUMBER_RE.finditer(scan)]
     if not found:
-        return []
+        return [], []
     # Chatter guard: count alphabetic words on the link-stripped text.
     stripped = re.sub(r'\d', '', text).strip()
     words = [w for w in stripped.split() if re.search(r'[a-zA-Z]', w)]
     plain = [re.sub(r'[^a-z]', '', w.lower()) for w in words]
     # "CGC" labelling a cert isn't chatter — "CGC 1… CGC 2…" is certs, not words. The same
-    # goes for a "PSA" that sits directly in front of a number as its label: a customer who
-    # labels every slab ("PSA 12345678" four or more times) used to be ignored in silence.
-    # A free-floating "psa" (not attached to a number) still counts as a word.
-    psa_labels = sum(1 for _d, lab, _p in found if lab == 'psa')
-    chatter = sum(1 for p in plain if p != 'cgc') - min(psa_labels, plain.count('psa'))
-    if chatter > 3:
-        return []
+    # goes for "PSA" labels in a LIST of labelled slabs: a customer who labels every slab
+    # ("PSA 12345678" four or more times) used to be ignored in silence. Kept narrow on
+    # purpose, so every other message is counted exactly as v1 counts it (label = a word):
+    #   * a list = 4+ labelled numbers, or labelled numbers with at most ONE other word.
+    #     "remove PSA 12345678 from lot" / "I already sold PSA 12345678" are sentences, not
+    #     submissions — they stay ignored;
+    #   * never when the message also carries a tracking number or a shipping / payment word:
+    #     "Shipped PSA 12345678 tracking 1Z…" must stay a tracking message. Certs win over
+    #     tracking in the handler, so reading it as certs re-quoted the card and dropped the number.
+    # A free-floating "psa" (not attached to a number) always counts as a word.
     not_cert_ctx = any(p in _NOT_A_CERT_WORDS for p in plain)
+    psa_labels = min(sum(1 for _d, lab, _p, _r in found if lab == 'psa'), plain.count('psa'))
+    other_words = sum(1 for p in plain if p != 'cgc') - psa_labels
+    label_list = ((psa_labels >= 4 or other_words <= 1)
+                  and not not_cert_ctx and not extract_tracking(text))
+    chatter = other_words if label_list else other_words + psa_labels
+    if chatter > 3:
+        return [], []
     says_cgc = bool(re.search(r'cgc', text, re.I))
+    # Does each line start label-first ("SGC 1234567 …") or number-first ("12345678 PSA …")?
+    # The regex binds a grader word to the number AFTER it, which is wrong for a number-first
+    # line — so other graders' serials are only skipped on label-first lines; a number-first
+    # line is read exactly as v1 reads it.
+    label_first = {}
+    for _d, lab, pos, _r in found:
+        label_first.setdefault(scan.rfind('\n', 0, pos), bool(lab))
     seen = set()
     unique = []
-    for digits, label, pos in found:
+    skipped = []
+    for digits, label, pos, raw_label in found:
         n = len(digits)
         if n <= 9:
             # PSA: a standalone 7-9 digit number. A label glued on ("psa12345678")
             # was never a match before — keep it so.
             if pos > 0 and (scan[pos - 1].isalnum() or scan[pos - 1] == '_'):
                 continue
-            if label in ('bgs', 'sgc', 'tag', 'beckett'):
-                continue      # another grader's SHORT serial ("SGC 1234567") is not a PSA cert
+            # Another grader's SHORT serial ("SGC 1234567") is not a PSA cert. "tag" is also an
+            # ordinary word ("price tag 12345678"), so the grader is only TAG in capitals.
+            if ((label in ('bgs', 'sgc', 'beckett') or raw_label == 'TAG')
+                    and label_first[scan.rfind('\n', 0, pos)]):
+                shown = f"{raw_label.upper()} {digits}"
+                if shown not in skipped:
+                    skipped.append(shown)
+                continue
             tok = digits
         elif label == 'cgc':
             tok = cgc_cert(digits)
@@ -128,7 +168,7 @@ def extract_certs(text: str) -> list:
         if tok not in seen:
             seen.add(tok)
             unique.append(tok)
-    return unique
+    return unique, skipped
 
 
 _TRACKING_RE = re.compile(r'\b([0-9]{20,22}|1Z[A-Z0-9]{16}|[0-9]{12,15})\b', re.I)
