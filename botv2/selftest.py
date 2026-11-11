@@ -4522,8 +4522,11 @@ def test_canary_error_age():
             return 200, _json.dumps({"ok": True, "last_error": last_error, "flags": flags})
         canary._get, canary.KEY, canary.CERT = _fake_get, "selftestkey", ""
         del canary._fails[:]
+        import contextlib
+        import io
         try:
-            canary.main()
+            with contextlib.redirect_stdout(io.StringIO()):     # its "CANARY FAILED" lines are expected here
+                canary.main()
             return 0, list(canary._fails)
         except SystemExit as e:
             return e.code, list(canary._fails)
