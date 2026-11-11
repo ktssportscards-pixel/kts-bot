@@ -18,13 +18,29 @@ production variables exported (a Railway shell, a dev box with a real .env sourc
     the caller's shell and no real credential is ever loaded;
   * the network is disabled for the whole process, so no test can reach Discord, the
     portal (incl. /bot/claim), the Apps Script or Google Drive even if a guard regressed.
+
+All of that depends on this file running BEFORE any other botv2 module is imported (config is
+read at import). So it REFUSES to start in an interpreter where one already was (a REPL or
+script that did `import botv2.tracking` first): config would still hold the caller's real
+DATA_DIR, and the tests would blank the stores in it. Use a fresh process, as above.
+
+POSIX only (Linux CI / Railway, macOS): the in-process network kill replaces
+socket.connect, which Windows' asyncio needs to create an event loop.
 """
 import asyncio
 import os
 import socket
+import sys
 import tempfile
 
 # ── hermetic harness: must run BEFORE any botv2 module reads config at import time ──
+_PRELOADED = sorted(m for m in sys.modules if m.startswith("botv2.") and m != __name__)
+if _PRELOADED:
+    raise SystemExit(
+        "botv2 selftest: REFUSING to run — these botv2 modules were imported before the selftest "
+        "could isolate the environment: " + ", ".join(_PRELOADED[:6]) + ". They may hold the real "
+        "DATA_DIR and credentials, and the tests overwrite the data stores. Run it in a fresh "
+        "process:  python -m botv2.selftest")
 _INHERITED_DATA_DIR = os.environ.get("DATA_DIR")
 _CONFIG_ENV = (
     "DISCORD_BOT_TOKEN", "DISCORD_TOKEN", "KEVIN_USER_ID", "PORTAL_BASE_URL", "BOT_API_KEY",
@@ -230,7 +246,13 @@ class _BotHarness:
                 self.trash_calls.append(url)
                 return True
             sheets_mod.trash_sheet = _trash
-        botmod.bot.get_user = lambda _uid: self.kevin          # instance attr shadows the method
+        # Id-aware: only Kevin's id resolves to the fake Kevin. A handler that DMs some other
+        # user id gets nobody (and a loud error from fetch_user) instead of silently "reaching Kevin".
+        botmod.bot.get_user = lambda uid: self.kevin if uid == 777 else None   # instance attr shadows the method
+
+        async def _no_such_user(uid):
+            raise LookupError(f"selftest: no Discord user {uid} in the harness")
+        botmod.bot.fetch_user = _no_such_user
         tickets._known.add(self.cid)
         botmod._welcomed.add(self.cid)
         alerts.reset()
@@ -269,6 +291,7 @@ class _BotHarness:
          sheets_mod.save_tracking, sheets_mod.trash_sheet,
          sheets_mod.get_drive_service, sheets_mod.get_gspread_client) = self._saved
         botmod.bot.__dict__.pop("get_user", None)
+        botmod.bot.__dict__.pop("fetch_user", None)
         self.tickets._known.discard(self.cid)
         botmod._welcomed.discard(self.cid)
         botmod._last_quote.pop(self.cid, None)
@@ -1657,7 +1680,23 @@ def test_lanes_schedule():
     check(b._lanes_in_window(at(0, 2)), "mon 2am -> still open")
     check(not b._lanes_in_window(at(0, 3)), "mon 3am -> closed")
     check(not b._lanes_in_window(at(0, 10)), "mon 10am -> closed")
-    check(0 < b._seconds_until_lanes_open() <= 7 * 86400, "until-open is within a week")
+    # real seconds (86a71dd): across a clock change the wait is a week ± one hour, so the
+    # live-clock bound needs the extra hour — without it this check failed for the hour after
+    # Saturday 03:00 ET on the fall-back weekend, every year.
+    check(0 < b._seconds_until_lanes_open() <= 7 * 86400 + 3600, "until-open is within a week (+1 h across fall-back)")
+    from zoneinfo import ZoneInfo
+    ET = ZoneInfo("America/New_York")
+    real_now = b._now_et
+    try:
+        for label, now, want in (
+                ("plain week, Wed noon", datetime(2027, 6, 9, 12, 0, tzinfo=ET), 226800.0),
+                ("Sat 03:30 before the clocks fall back", datetime(2027, 11, 6, 3, 30, tzinfo=ET), 7 * 86400 - 1800 + 3600),
+                ("Sat 03:30 before the clocks spring forward", datetime(2027, 3, 13, 3, 30, tzinfo=ET), 7 * 86400 - 1800 - 3600),
+                ("one minute before opening", datetime(2027, 6, 12, 2, 59, tzinfo=ET), 60.0)):
+            b._now_et = lambda now=now: now
+            check(b._seconds_until_lanes_open() == want, f"lanes timer, {label}: {want:,.0f} real seconds")
+    finally:
+        b._now_et = real_now
 
 
 # ── owed ACCUMULATION across unpaid lots (the Codex/portal money-ledger fix) ──────
@@ -2286,6 +2325,11 @@ def test_handlers_and_void_races():
                   "quote: customer gets one quote message")
             check(cfg.AUTO_CLAIM is False and not claim_calls,
                   "quote: the claim client is not called while BOTV2_AUTO_CLAIM is off")
+            # what the handler sends to pricing decides the customer's rates. Pinned as it is
+            # today: the VIP match key is the cleaned-up CHANNEL NAME (see the review's item A —
+            # changing it changes what sellers are offered, so that is Kevin's decision).
+            check(h.price_args == {"certs": ["12345678", "23456789"], "customer": "normalq", "rate_override": None},
+                  "quote: certs + customer (channel name) + no manual override are what is sent to pricing")
             check(h.sheet_calls == [("normalq", ["12345678", "23456789"])] and h.fill_calls == [URL % 9100]
                   and botmod._channel_sheet.get("9100") == URL % 9100
                   and tracking.state.load("channel_sheet", dict).get("9100") == URL % 9100,
@@ -2296,7 +2340,18 @@ def test_handlers_and_void_races():
             # 2) tracking in a normal (shipped) ticket: stored, Kevin told, no warning suffix
             h.say("ship")
             del h.kevin.dms[:], h.channel.sent[:]
-            h.say("1Z999AA10123456784")
+            reg_calls = []
+            real_reg = portal_client.register_tracking
+
+            async def _reg_spy(cid, tnum):
+                reg_calls.append((cid, tnum))
+            portal_client.register_tracking = _reg_spy
+            try:
+                h.say("1Z999AA10123456784")
+            finally:
+                portal_client.register_tracking = real_reg
+            check(cfg.REGISTER_TRACKING is False and not reg_calls,
+                  "tracking: nothing is registered with the delivery watcher while BOTV2_REGISTER_TRACKING is off")
             check("noted" in h.channel.sent[-1] and any("Tracking from" in d and "⚠️" not in d for d in h.kevin.dms),
                   "tracking: normal ticket → ack + Kevin DM without a warning")
             check(h.tracking_saves == [(URL % 9100, "1Z999AA10123456784")]
@@ -3239,7 +3294,13 @@ def test_untested_guards():
     cfg.BOT_API_KEY = "selftestkey"
     try:
         with _BotHarness(9410, name="dlvcust") as h:
-            botmod.bot.get_channel = lambda _cid: h.channel
+            other = _fake_channel(9411, "dlvcust2")              # a second customer's ticket
+            chans = {9410: h.channel, 9411: other}
+            botmod.bot.get_channel = lambda cid: chans.get(int(cid))   # id-aware: a wrong id reaches nobody
+
+            async def _no_such_channel(cid):
+                raise LookupError(f"selftest: no channel {cid} in the harness")
+            botmod.bot.fetch_channel = _no_such_channel
             lot = {"username": "dlvcust", "comp": 100, "payout": 90, "cards": 1,
                    "certs": {"d1": 100}, "cert_offers": {"d1": 90}}
             tracking.record_quote(9410, lot, channel_name="dlvcust")
@@ -3281,20 +3342,35 @@ def test_untested_guards():
             tracking.record_quote(9411, {**lot, "username": "dlvcust2"}, channel_name="dlvcust2")
             tracking.record_tracking(9411, "1Z999AA10123456785")
             del h.kevin.dms[:]
-            r = body_of(post(webserver._delivery, {"tracking": "1Z999AA10123456785", "status": "out-for-delivery"}))
-            check(r.get("posted") is True and len(h.channel.sent) == 1 and "out for delivery" in h.channel.sent[0]
+            ofd = {"tracking": "1Z999AA10123456785", "status": "out-for-delivery"}
+            r = body_of(post(webserver._delivery, ofd))
+            check(r.get("posted") is True and len(other.sent) == 1 and "out for delivery" in other.sent[0]
                   and not h.kevin.dms, "/delivery OFD (flag ON): one customer heads-up, no Kevin DM")
+            check(not h.channel.sent, "/delivery: the heads-up goes to THAT package's ticket, not another customer's")
+            # a repeated carrier scan / webhook retry must not post it again (messaging ON —
+            # the earlier replay check ran with messaging off, where it could not fail)
+            r = body_of(post(webserver._delivery, ofd))
+            check(r.get("already") is True and r.get("posted") is False and len(other.sent) == 1,
+                  "/delivery OFD replay (flag ON): no second heads-up")
             r = body_of(post(webserver._delivery, {"tracking": "1Z999AA10123456785", "status": "delivered"}))
-            check(r.get("posted") is True and len(h.channel.sent) == 2 and "arrived" in h.channel.sent[1],
+            check(r.get("posted") is True and len(other.sent) == 2 and "arrived" in other.sent[1],
                   "/delivery delivered (flag ON): exactly one 'arrived' post")
-            check(not any(w in " ".join(h.channel.sent).lower() for w in cfg.CUSTOMER_FORBIDDEN_WORDS)
-                  and "$" not in " ".join(h.channel.sent),
+            n_dms = len(h.kevin.dms)
+            r1 = body_of(post(webserver._delivery, {"tracking": "1Z999AA10123456785", "status": "delivered"}))
+            r2 = body_of(post(webserver._delivery, ofd))             # a late out-for-delivery scan
+            check(r1.get("already") is True and r1.get("posted") is False and r2.get("posted") is False
+                  and len(other.sent) == 2 and len(h.kevin.dms) == n_dms and not h.channel.sent,
+                  "/delivery replays after 'arrived' (flag ON): nothing more is posted or DMed")
+            check(not any(w in " ".join(other.sent).lower() for w in cfg.CUSTOMER_FORBIDDEN_WORDS)
+                  and "$" not in " ".join(other.sent),
                   "/delivery customer posts: no forbidden word, no dollar figure")
             check(any("NOT booked as owed" in d for d in h.kevin.dms),
                   "/delivery delivered for a never-booked lot: Kevin's DM flags it")
             r = body_of(post(webserver._delivery, {"tracking": "1ZNOBODYNOBODY0000", "status": "delivered"}))
-            check(r.get("found") is False and len(h.channel.sent) == 2, "/delivery unknown package: clean miss, no post")
+            check(r.get("found") is False and len(other.sent) == 2 and not h.channel.sent,
+                  "/delivery unknown package: clean miss, no post")
             botmod.bot.__dict__.pop("get_channel", None)
+            botmod.bot.__dict__.pop("fetch_channel", None)
 
         # ── 3) POST /void input rules (strict force, exactly one target)
         tracking.record_quote(9420, {"username": "strict", "comp": 100, "payout": 90, "cards": 1,
@@ -3352,8 +3428,8 @@ def test_untested_guards():
                                    "rateOverride": {"pokemon": 95}},
               "price client: certs + customer + rateOverride + x-bot-key go on the wire as documented")
         check([r.cert for r in rows] == ["12345678", "cgc:6193949247"] and rows[1].vip and rows[0].customer_matched
-              and rows[0].offer == 90.0 and not hasattr(rows[0], "payoutCents"),
-              "price client: rows mapped in input order; confidential fields never reach PricedRow")
+              and rows[0].offer == 90.0,
+              "price client: rows mapped in input order (vip + customerMatched carried through)")
         sess = _Session(_Resp(200, {"rows": [row("12345678")]}))
         rows = run(portal_client._price_chunk(sess, ["12345678"]))
         check("customer" not in sess.calls[0]["json"] and "rateOverride" not in sess.calls[0]["json"]
@@ -3389,9 +3465,31 @@ def test_untested_guards():
         res = run(portal_client._claim_chunk(sess, cfg.UNCLAIM_ENDPOINT, ["12345678"], "chan-1"))
         check(sess.calls[0]["json"] == {"certs": ["12345678"], "idempotencyKey": "chan-1"}
               and res[0].skipped and not res[0].ok, "claim wire shape (fake session, UNCLAIM url): certs + idempotencyKey")
-        # register-tracking: what the bot sends today (channel_id as given — see the review notes)
         check(run(portal_client.register_tracking(1492170401608896533, "")) == {"ok": False, "error": "no tracking"},
               "register_tracking: an empty number is refused locally")
+        # register-tracking wire shape (mock mode returns before the request is built, so it
+        # is driven here with mock OFF and a fake session — no network). Pinned as it is
+        # today: channel_id goes out as given, i.e. a JSON NUMBER (the contract's own rule is
+        # "ids are strings"; changing it is a wire change for the portal side to agree first).
+        saved_mock = cfg.PRICE_MOCK
+        cfg.PRICE_MOCK = False
+        try:
+            sess = _Session(_Resp(200, {"ok": True, "registered": True}))
+            res = run(portal_client.register_tracking(1492170401608896533, " 1Z999AA10123456784 ", session=sess))
+            check(res == {"ok": True, "registered": True} and len(sess.calls) == 1
+                  and sess.calls[0]["url"] == cfg.REGISTER_TRACKING_ENDPOINT
+                  and sess.calls[0]["headers"].get("x-bot-key") == "wirekey"
+                  and sess.calls[0]["json"] == {"tracking": "1Z999AA10123456784", "channel_id": 1492170401608896533},
+                  "register_tracking: tracking (trimmed) + channel_id + x-bot-key go on the wire")
+            sess = _Session(_Resp(401, text="no"))
+            try:
+                run(portal_client.register_tracking(1, "1Z999AA10123456784", session=sess))
+                got = None
+            except Exception as e:
+                got = type(e)
+            check(got is PortalAuthError and len(sess.calls) == 1, "register_tracking: HTTP 401 → PortalAuthError, not retried")
+        finally:
+            cfg.PRICE_MOCK = saved_mock
     finally:
         cfg.BOT_API_KEY, cfg.PRICE_RETRY_BACKOFF_S = saved_cfg
 
@@ -3417,6 +3515,88 @@ def test_untested_guards():
     for st in ("channel_sheet", "channel_sheets", "void_cutoff"):
         tracking.state.save(st, {})
     alerts.reset()
+
+
+# ── gates: who the bot listens to, and who may run admin commands ───────────────
+def test_gates():
+    section("gates (admin commands, bot authors, non-ticket channels)")
+    import botv2.config as cfg
+    from botv2 import bot as botmod
+    buy_rows = lambda cl: [PricedRow(cert=c, cert_id=c, category="pokemon", market_value=100, value=100,
+                                     decision="BUY", offer=90, grader="PSA", grade="10") for c in cl]
+    snapshot = lambda: {n: tracking.state.load(n, (dict if n in ("payinfo", "vip_rates", "channel_sheet") else list))
+                        for n in ("tickets", "owed", "payinfo", "voided", "ticket_channels", "vip_rates", "channel_sheet")}
+
+    # 1) Every admin command, typed by someone who is NOT Kevin inside a ticket that has a real
+    #    unpaid balance: swallowed, with no reply, no DM, no change to any store, no pricing or
+    #    registration call. (`!owe` to a customer would DM every seller's payment details;
+    #    `!paid` would take their own balance out of the payout queue.)
+    with _BotHarness(8980, name="custticket", rows=buy_rows,
+                     sheet_url="https://docs.google.com/spreadsheets/d/G8980/edit") as h:
+        h.say("12345678")
+        h.say("ship")
+        tracking.set_payinfo("custticket", "wire 000111222")
+        calls = []
+        saved = (portal_client.fetch_allocation, portal_client.register_tracking)
+
+        async def _spy(*a, **k):
+            calls.append(a)
+            return {}
+        portal_client.fetch_allocation = portal_client.register_tracking = _spy
+        before = snapshot()
+        try:
+            for text in ("!adopt", "!paid", "!resolve", "!void id:8980", "!void custticket", "!void id:8980 force",
+                         "!bands", "!lanes", "!lanes post", "!stats", "!stalecheck", "!stale", "!owe",
+                         "!owe custticket", "!payinfo", "!payinfo set custticket wire 999", "!payinfo clear custticket",
+                         "!synctracking"):
+                customer = _FakeUser(uid=4242, name="custticket")
+                del h.channel.sent[:], h.kevin.dms[:]
+                msg = _FakeMessage(h.channel, text, author=customer)
+                handled = asyncio.run(commands.handle(None, msg))
+                check(handled is True and not customer.dms and not h.channel.sent and not h.kevin.dms
+                      and snapshot() == before and not calls,
+                      f"non-Kevin `{text}`: swallowed — no reply, no DM, nothing changed, nothing called")
+        finally:
+            portal_client.fetch_allocation, portal_client.register_tracking = saved
+        check(tracking.owed_entry(8980) and tracking.owed_entry(8980).get("paid") is False
+              and tracking.get_payinfo("custticket"), "…the unpaid balance and the stored payment info are untouched")
+        # the same commands DO work for Kevin (so the loop above isn't passing on a typo)
+        asyncio.run(commands.handle(None, _FakeMessage(h.channel, "!paid", author=h.kevin)))
+        check(tracking.owed_entry(8980).get("paid") is True, "Kevin's `!paid` in the same ticket does mark it paid")
+
+        # 2) The bot never answers a bot (itself included), whatever the message says.
+        del h.channel.sent[:], h.kevin.dms[:]
+        h.price_args = None
+        robot = _FakeUser(uid=5150, name="otherbot", is_bot=True)
+        for text in ("23456789 34567890", "ship", "1Z999AA10123456784", "!ping"):
+            h.say(text, author=robot)
+        check(not h.errors and not h.channel.sent and not h.kevin.dms and h.price_args is None,
+              "messages from a bot account: no quote, no ship reply, no ack, not even !ping")
+        tracking.void_ticket(8980)
+    lots.drop(8980)
+
+    # 3) Only ticket channels are read. A cert list, a ship or a tracking number in an
+    #    ordinary text channel gets nothing — and no pricing call is made for it.
+    with _BotHarness(8981, name="lobby", rows=buy_rows) as h:
+        h.tickets._known.discard(8981)                       # an ordinary channel, not a ticket
+        saved_fp = h.tickets.looks_like_ticket
+        h.tickets.looks_like_ticket = lambda ch: False
+        h.price_args = None
+        try:
+            for text in ("12345678 23456789", "ship", "1Z999AA10123456784"):
+                h.say(text)
+        finally:
+            h.tickets.looks_like_ticket = saved_fp
+        check(not h.errors and not h.channel.sent and not h.kevin.dms and h.price_args is None
+              and not tracking.find_tickets(channel_id=8981),
+              "a non-ticket channel is ignored: no quote, no reply, no pricing call, no ticket row")
+        # …while `!ping` (a public command) still answers there
+        h.say("!ping")
+        check(h.channel.sent == ["🏓 botv2 is up."], "!ping still answers in any channel")
+    for st in ("tickets", "owed", "voided"):
+        tracking.state.save(st, [])
+    for st in ("channel_sheet", "channel_sheets", "void_cutoff", "payinfo"):
+        tracking.state.save(st, {})
 
 
 # ── alerts that name the ticket; the lanes board on Discord errors ─────────────
@@ -3487,6 +3667,65 @@ def test_alerts_and_lanes():
               "price auth failure: Kevin's alert names the ticket that needs a re-quote")
         check(h.channel.sent == ["⚠️ Pricing is briefly unavailable — hang tight, I'll get your quote shortly."],
               "price auth failure: customer-facing text unchanged")
+
+    # Every per-ticket alert key, inside ONE alert window (the harness resets the limiter on
+    # entry, so a second ticket was never tried): a fault on ticket A must not silence the
+    # same fault on ticket B for 15 minutes. Covers the sheet-build, lot-rebuild,
+    # tracking-save and pricing-auth alerts (79bed0e / fa57ff5).
+    from botv2 import sheets as sheets_mod
+    buy_rows = lambda cl: [PricedRow(cert=c, cert_id=c, category="pokemon", market_value=100, value=100,
+                                     decision="BUY", offer=90, grader="PSA", grade="10") for c in cl]
+    with _BotHarness(8970, name="ticket-a", rows=buy_rows, sheet_url="https://docs.google.com/spreadsheets/d/A8970/edit") as h:
+        other = _fake_channel(8971, "ticket-b")
+        h.tickets._known.add(8971)
+        botmod._welcomed.add(8971)
+        both = lambda text: [asyncio.run(botmod._handle_message(_FakeMessage(ch, text)))
+                             for ch in (h.channel, other)]
+        try:
+            def _sheet_down(username, cert_tokens, folder_id=None):
+                raise RuntimeError("Apps Script down")
+            sheets_mod.create_psa_sheet = _sheet_down
+            both("12345678")
+            kd = "\n".join(h.kevin.dms)
+            check("buying sheet failed for #ticket-a" in kd and "buying sheet failed for #ticket-b" in kd,
+                  "sheet-build alert: both tickets are reported inside one alert window")
+            # lot rebuild on ship (no in-memory lot → Drive rebuild → the harness's Google stub raises)
+            lots.drop(8970), lots.drop(8971)
+            del h.kevin.dms[:]
+            both("ship")
+            kd = "\n".join(h.kevin.dms)
+            check("lot rebuild failed on ship (#ticket-a)" in kd and "lot rebuild failed on ship (#ticket-b)" in kd,
+                  "lot-rebuild alert: both tickets are reported inside one alert window")
+            # tracking sheet-save failing for both
+            botmod._channel_sheet["8970"] = botmod._channel_sheet["8971"] = "https://docs.google.com/spreadsheets/d/X/edit"
+
+            def _save_down(url, tnum):
+                raise RuntimeError("Apps Script down")
+            sheets_mod.save_tracking = _save_down
+            del h.kevin.dms[:]
+            both("1Z999AA10123456784")
+            kd = "\n".join(h.kevin.dms)
+            check("tracking sheet-save failed (#ticket-a)" in kd and "tracking sheet-save failed (#ticket-b)" in kd,
+                  "tracking-save alert: both tickets are reported inside one alert window")
+            real_price = portal_client.price_certs
+            portal_client.price_certs = _unauth
+            del h.kevin.dms[:]
+            try:
+                both("23456789")
+            finally:
+                portal_client.price_certs = real_price
+            kd = "\n".join(h.kevin.dms)
+            check("can't authenticate to pricing** in #ticket-a" in kd and "can't authenticate to pricing** in #ticket-b" in kd,
+                  "pricing-auth alert: both tickets are reported inside one alert window")
+        finally:
+            h.tickets._known.discard(8971)
+            botmod._welcomed.discard(8971)
+            botmod._channel_sheet.pop("8971", None)
+            botmod._last_quote.pop(8971, None)
+            lots.drop(8971)
+            for cid in (8970, 8971):
+                tracking.void_ticket(cid)
+    alerts.reset()
 
     # !bands typed in a guild channel: the channel ack carries no forbidden customer word
     with _BotHarness(8963, name="bandsroom") as h:
@@ -4009,14 +4248,22 @@ def main():
     print("botv2 selftest:")
     if _INHERITED_DATA_DIR:
         print("  (ignoring the inherited DATA_DIR — the selftest only ever writes to a temp dir)")
-    for t in (test_harness_is_hermetic, test_textsplit, test_state_persistence, test_certs, test_pricing, test_lots_shipping, test_tracking_digest,
+    # The isolation is checked FIRST and the run stops there if any part of it failed: every
+    # later test writes to DATA_DIR, so "record the failure and carry on" would be too late.
+    test_harness_is_hermetic()
+    if _fails:
+        print(f"\nFAILED — the test environment is NOT isolated; nothing else was run ({len(_fails)}):")
+        for f in _fails:
+            print("  ✗", f)
+        raise SystemExit(1)
+    for t in (test_textsplit, test_state_persistence, test_certs, test_pricing, test_lots_shipping, test_tracking_digest,
               test_payout_flow, test_vip_commands_client, test_psa_folder_guard,
               test_alerts_status, test_analytics, test_delivery, test_register_tracking,
               test_lanes_board, test_stale_tickets, test_delivery_resolution, test_delivery_ofd,
               test_webserver_auth, test_audit_fixes, test_lanes_schedule,
               test_owed_accumulation, test_void, test_void_callers, test_truthful_replies,
               test_handlers_and_void_races, test_lot_routing, test_ship_booking, test_untested_guards,
-              test_alerts_and_lanes,
+              test_gates, test_alerts_and_lanes,
               test_canary_error_age,
               test_schedule_dst):
         t()
