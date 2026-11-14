@@ -208,12 +208,21 @@ def rows_to_priced_rows(comp_rows: list[dict], grader: str = 'psa',
     is_cgc = grader.lower() == 'cgc'
     out: list[PricedRow] = []
 
+    # Match each result back to its submitted cert string by cert ID, not by
+    # position -- the comp helper dispatches batches with bounded concurrency,
+    # so comp_rows can come back in a different order than original_certs was
+    # submitted in. Indexing original_certs[i] here previously relabeled each
+    # result with whichever cert happened to be submitted at that position,
+    # keeping the correct price/decision but attaching it to the wrong cert.
+    orig_by_id: dict[str, str] = {}
+    if original_certs:
+        for oc in original_certs:
+            orig_by_id[re.sub(r'\D', '', str(oc))] = oc
+
     for i, r in enumerate(comp_rows):
         raw_cert = r.get('cert', '')
         cert_id = re.sub(r'\D', '', str(raw_cert))
-        cert = (f'cgc:{cert_id}' if is_cgc else cert_id)
-        if original_certs and i < len(original_certs):
-            cert = original_certs[i]
+        cert = orig_by_id.get(cert_id, f'cgc:{cert_id}' if is_cgc else cert_id)
 
         if not r.get('found'):
             note = r.get('note') or ''
