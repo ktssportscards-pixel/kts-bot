@@ -63,6 +63,7 @@ async def handle(bot, message) -> bool:
                      "• `!stalecheck` — DM you the stuck-ticket digest on demand (same as the daily 8am check)\n"
                      "• `!owe [user]` — DM you copy-paste payment packets for the unpaid queue\n"
                      "• `!payinfo` — store/view a seller's wire info (use in a DM; I scrub it from channels)\n"
+                     "• `!comp [psa|cgc] <certs>` — CardLadder comp lookup (paste cert #s)\n"
                      "• `!synctracking` — register open tickets' tracking #s with the delivery watcher\n"
                      "• VIP is managed in the KTS app's VIP section (portal is the source of truth)")
         await channel.send(base)
@@ -375,6 +376,56 @@ async def handle(bot, message) -> bool:
                 await channel.send("💸 Payment packet(s) sent to your DMs.")
             except Exception:
                 pass
+        return True
+
+    if cmd == "comp":
+        if not is_kevin:
+            return True
+        if not config.COMP_HELPER_URL:
+            await _dm_kevin_result(message, channel,
+                "⚠️ COMP_HELPER_URL not set.\n"
+                "Start the comp helper (npm start in psa-comp-helper/) and set COMP_HELPER_URL in Railway.\n"
+                "See COMP_HELPER_SETUP.md for how to expose it publicly via Tailscale Funnel.")
+            return True
+        from . import comp as comp_mod
+
+        # Parse args: optional grader prefix ("psa" / "cgc"), then cert numbers
+        raw_parts = parts[1:]
+        grader = 'psa'
+        if raw_parts and raw_parts[0].lower() in ('psa', 'cgc'):
+            grader = raw_parts[0].lower()
+            raw_parts = raw_parts[1:]
+
+        certs = comp_mod.parse_certs(' '.join(raw_parts))
+        if not certs:
+            await _dm_kevin_result(message, channel,
+                "**!comp** — look up CardLadder comps for PSA/CGC certs.\n"
+                "• `!comp <cert1> <cert2> …` — PSA (default)\n"
+                "• `!comp cgc <cert1> <cert2> …` — CGC\n"
+                "Cert numbers: 6–12 digits, one per arg or space/comma-separated.")
+            return True
+
+        # Ack in the channel for large batches (message will be deleted by _dm_kevin_result)
+        if len(certs) > 3 and getattr(channel, 'guild', None) is not None:
+            try:
+                await channel.send(f"🔍 Looking up {len(certs)} {grader.upper()} certs…")
+            except Exception:
+                pass
+
+        try:
+            rows = await comp_mod.lookup(certs, grader=grader)
+            body = comp_mod.format_results(rows, grader=grader)
+        except comp_mod.CompError as e:
+            body = f"⚠️ Comp helper error: {e}"
+        except Exception as e:
+            body = f"⚠️ Unexpected error: {e}"
+
+        header = f"**CL comps** ({grader.upper()}, {len(certs)} cert{'s' if len(certs) != 1 else ''})\n"
+        # Split into ≤1900-char messages if body is long (from comp.format_results blocks)
+        blocks = body.split('\n---\n')
+        for i, block in enumerate(blocks):
+            prefix = header if i == 0 else ''
+            await _dm_kevin_result(message, channel, prefix + block)
         return True
 
     if cmd == "synctracking":

@@ -159,6 +159,23 @@ WEB_PORT = int(os.environ.get("PORT", "8080"))
 # shown, so Kevin's payout math can never leak to a customer sheet or message.
 CONFIDENTIAL_ROW_FIELDS = ("payout", "payoutCents", "memberMultiplier", "source")
 
+# ── Comp helper (CardLadder vision comps via psa-comp-helper) ──────────────────
+# Public URL of the running comp helper (helper.js in ~/Downloads/psa-comp-helper).
+# Example: https://kevins-mac-mini.tail5476c8.ts.net:8443  (Tailscale Funnel)
+#          https://comp-helper.ktscollectibles.com          (cloudflared named tunnel)
+# If blank, !comp is disabled.
+COMP_HELPER_URL = os.environ.get("COMP_HELPER_URL", "")
+# Optional: the HELPER_API_KEY set in psa-comp-helper/.env (protects against
+# anyone else hitting your tunnel URL and burning your Anthropic credits).
+COMP_HELPER_KEY = os.environ.get("COMP_HELPER_KEY", "")
+# When on (COMP_PRICING_MODE=1), price_certs() routes through the comp helper
+# instead of the portal's /bot/price. Use while Triumph is unavailable.
+# Rates and gates are configured via /admin (comp_rules.json in DATA_DIR).
+COMP_PRICING_MODE = os.environ.get("COMP_PRICING_MODE", "").lower() in ("1", "true", "yes")
+# Secret for the /admin buying-rules editor (GET/POST /admin?key=ADMIN_KEY).
+# Bookmark the URL with the key in it — Kevin-only.
+ADMIN_KEY = os.environ.get("ADMIN_KEY", "")
+
 # Words that must never appear on customer-facing surfaces (buyer identities).
 CUSTOMER_FORBIDDEN_WORDS = ("triumph", "poketrader", "pixel", "allocation", "doral")
 

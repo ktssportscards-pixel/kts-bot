@@ -282,6 +282,172 @@ async def _void(req):
     return _json({"voided": False, "reason": "not_found"})
 
 
+def _admin_authed(req) -> bool:
+    key = req.query.get("key", "")
+    return bool(config.ADMIN_KEY) and key == config.ADMIN_KEY
+
+
+def _admin_forbidden():
+    return web.Response(text="403 Forbidden", status=403)
+
+
+def _build_admin_html(rules: dict, saved: bool = False, error: str = '') -> str:
+    from . import comp_rules as cr
+    sports = cr.SPORTS
+    labels = cr.SPORT_LABELS
+    s_rules = rules.get('sports', {})
+    cgc = rules.get('cgc', {})
+    mode_on = config.COMP_PRICING_MODE
+
+    mode_color = '#2a7a2a' if mode_on else '#5a3a1a'
+    mode_text = ('✅ COMP MODE ON — pricing via CardLadder direct'
+                 if mode_on else
+                 '⚠️ COMP MODE OFF — bot still using Triumph portal (set COMP_PRICING_MODE=1 to switch)')
+
+    saved_html = '<div class="banner ok">✅ Rules saved.</div>' if saved else ''
+    error_html = f'<div class="banner err">❌ {error}</div>' if error else ''
+
+    sport_rows = ''
+    for sp in sports:
+        r = s_rules.get(sp, {})
+        lbl = labels.get(sp, sp.title())
+        sport_rows += (
+            f'<tr><td class="sport-name">{lbl}</td>'
+            f'<td><input type="number" name="psa_{sp}_rate" value="{round(float(r.get("rate", 0.85)) * 100, 1)}" '
+            f'min="0" max="100" step="0.1" required></td>'
+            f'<td><input type="number" name="psa_{sp}_min" value="{float(r.get("minValue", 1))}" '
+            f'min="0" step="0.01" required></td>'
+            f'<td><input type="number" name="psa_{sp}_max" value="{float(r.get("maxValue", 250))}" '
+            f'min="0" step="1" required></td>'
+            f'<td><input type="number" name="psa_{sp}_grade" value="{int(r.get("minGrade", 7))}" '
+            f'min="1" max="10" step="1" required></td>'
+            f'<td><input type="number" name="psa_{sp}_age" value="{int(r.get("maxSaleAgeDays", 30))}" '
+            f'min="1" max="365" step="1" required></td>'
+            f'</tr>\n'
+        )
+
+    return f'''<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KTS Bot — Comp Rules</title>
+<style>
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{background:#111;color:#ddd;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:14px;padding:20px}}
+h1{{font-size:18px;margin-bottom:16px;color:#fff}}
+h2{{font-size:14px;font-weight:600;color:#aaa;text-transform:uppercase;letter-spacing:.05em;margin:20px 0 8px}}
+.mode-badge{{padding:8px 12px;border-radius:6px;font-size:13px;font-weight:500;margin-bottom:16px;background:{mode_color};color:#eee}}
+.banner{{padding:8px 12px;border-radius:6px;font-size:13px;margin-bottom:14px}}
+.banner.ok{{background:#1a3d1a;color:#8f8}}
+.banner.err{{background:#3d1a1a;color:#f88}}
+table{{border-collapse:collapse;width:100%;margin-bottom:4px}}
+th{{text-align:left;padding:7px 10px;background:#1e1e1e;color:#888;font-weight:500;font-size:12px;border-bottom:1px solid #2a2a2a}}
+td{{padding:5px 10px;border-bottom:1px solid #1e1e1e}}
+td.sport-name{{color:#ccc;font-weight:500;min-width:90px}}
+input[type=number]{{background:#1e1e1e;color:#eee;border:1px solid #333;border-radius:4px;padding:4px 6px;width:70px;font-size:13px}}
+input[type=number]:focus{{outline:none;border-color:#555}}
+.cgc-row{{display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:8px 0}}
+.cgc-row label{{color:#888;font-size:12px;display:flex;flex-direction:column;gap:4px}}
+.cgc-row input{{width:80px}}
+.save-btn{{margin-top:20px;background:#2a5a9a;color:#fff;border:none;border-radius:6px;padding:10px 24px;font-size:14px;font-weight:600;cursor:pointer}}
+.save-btn:hover{{background:#3a6aaa}}
+.note{{color:#666;font-size:12px;margin-top:6px}}
+</style>
+</head>
+<body>
+<h1>KTS Bot — Comp Buying Rules</h1>
+<div class="mode-badge">{mode_text}</div>
+{saved_html}{error_html}
+<form method="POST">
+<h2>PSA Rules</h2>
+<table>
+<thead><tr>
+<th>Sport</th><th>Rate %</th><th>Min $</th><th>Max $</th><th>Min Grade</th><th>Max Sale Age (days)</th>
+</tr></thead>
+<tbody>
+{sport_rows}
+</tbody>
+</table>
+<p class="note">Rate = % of CL market value · Grade gate is PSA-only · Max Sale Age = how fresh the last sale must be</p>
+
+<h2>CGC Rules</h2>
+<div class="cgc-row">
+<label>Rate %<input type="number" name="cgc_rate" value="{round(float(cgc.get('rate', 0.80)) * 100, 1)}" min="0" max="100" step="0.1" required></label>
+<label>Min $<input type="number" name="cgc_min" value="{float(cgc.get('minValue', 1))}" min="0" step="0.01" required></label>
+<label>Max $<input type="number" name="cgc_max" value="{float(cgc.get('maxValue', 500))}" min="0" step="1" required></label>
+<label>Max Sale Age (days)<input type="number" name="cgc_age" value="{int(cgc.get('maxSaleAgeDays', 30))}" min="1" max="365" step="1" required></label>
+</div>
+<p class="note">CGC rate is % of last sale price (not CL market value)</p>
+
+<button type="submit" class="save-btn">Save Rules</button>
+</form>
+</body>
+</html>'''
+
+
+async def _admin_get(req):
+    if not _admin_authed(req):
+        return _admin_forbidden()
+    from . import comp_rules
+    saved = req.query.get('saved') == '1'
+    rules = comp_rules.load()
+    return web.Response(text=_build_admin_html(rules, saved=saved),
+                        content_type='text/html')
+
+
+async def _admin_post(req):
+    if not _admin_authed(req):
+        return _admin_forbidden()
+    from . import comp_rules
+
+    try:
+        data = await req.post()
+    except Exception as e:
+        rules = comp_rules.load()
+        return web.Response(text=_build_admin_html(rules, error=f'parse error: {e}'),
+                            content_type='text/html')
+
+    def flt(key, default):
+        try:
+            return float(data.get(key, default))
+        except (TypeError, ValueError):
+            return float(default)
+
+    def intv(key, default):
+        try:
+            return int(data.get(key, default))
+        except (TypeError, ValueError):
+            return int(default)
+
+    new_rules: dict = {'sports': {}, 'cgc': {}}
+    for sp in comp_rules.SPORTS:
+        rate_pct = flt(f'psa_{sp}_rate', 85)
+        new_rules['sports'][sp] = {
+            'rate': round(max(0, min(100, rate_pct)) / 100, 4),
+            'minValue': round(flt(f'psa_{sp}_min', 1), 2),
+            'maxValue': round(flt(f'psa_{sp}_max', 250), 2),
+            'minGrade': max(1, min(10, intv(f'psa_{sp}_grade', 7))),
+            'maxSaleAgeDays': max(1, min(365, intv(f'psa_{sp}_age', 30))),
+        }
+    cgc_rate_pct = flt('cgc_rate', 80)
+    new_rules['cgc'] = {
+        'rate': round(max(0, min(100, cgc_rate_pct)) / 100, 4),
+        'minValue': round(flt('cgc_min', 1), 2),
+        'maxValue': round(flt('cgc_max', 500), 2),
+        'maxSaleAgeDays': max(1, min(365, intv('cgc_age', 30))),
+    }
+
+    ok = comp_rules.save(new_rules)
+    if not ok:
+        rules = comp_rules.load()
+        return web.Response(text=_build_admin_html(rules, error='save failed — check DATA_DIR'),
+                            content_type='text/html')
+
+    key = req.query.get('key', '')
+    raise web.HTTPFound(f'/admin?key={key}&saved=1')
+
+
 async def start():
     """Start the web server on $PORT. Returns the AppRunner (keep a reference)."""
     app = web.Application()
@@ -293,6 +459,8 @@ async def start():
         web.get("/analytics", _analytics),
         web.post("/delivery", _delivery),
         web.post("/void", _void),
+        web.get("/admin", _admin_get),
+        web.post("/admin", _admin_post),
     ])
     runner = web.AppRunner(app)
     await runner.setup()

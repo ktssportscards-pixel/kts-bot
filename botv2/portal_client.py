@@ -173,6 +173,8 @@ async def price_certs(certs: list[str],
         return []
     if config.PRICE_MOCK:
         return [_mock_row(c) for c in certs]
+    if config.COMP_PRICING_MODE:
+        return await _price_via_comp(certs)
 
     own_session = session is None
     if own_session:
@@ -186,6 +188,58 @@ async def price_certs(certs: list[str],
     finally:
         if own_session:
             await session.close()
+
+
+async def _price_via_comp(certs: list[str]) -> list[PricedRow]:
+    """Route pricing through the local comp helper (COMP_PRICING_MODE=1).
+    PSA certs and CGC certs (cgc:...) are batched separately; results are
+    re-ordered to match the original input.
+    Returns error PricedRows (never raises) so the bot can surface a clean
+    'comp helper unreachable' message instead of crashing mid-ticket."""
+    from . import comp as comp_mod
+    from .comp import CompError
+
+    if not config.COMP_HELPER_URL:
+        err = 'comp helper not configured (COMP_HELPER_URL missing)'
+        return [PricedRow(cert=c, cert_id=_digits(c), status='error', error=err)
+                for c in certs]
+
+    psa = [(i, c) for i, c in enumerate(certs) if not c.lower().startswith('cgc:')]
+    cgc = [(i, c) for i, c in enumerate(certs) if c.lower().startswith('cgc:')]
+
+    out: dict[int, PricedRow] = {}
+
+    try:
+        if psa:
+            idxs, psa_certs = zip(*psa)
+            rows = await comp_mod.lookup(list(psa_certs), grader='psa')
+            for idx, pr in zip(idxs, comp_mod.rows_to_priced_rows(
+                    rows, grader='psa', original_certs=list(psa_certs))):
+                out[idx] = pr
+
+        if cgc:
+            idxs, cgc_certs = zip(*cgc)
+            raw_nums = [re.sub(r'^cgc:', '', c, flags=re.IGNORECASE) for c in cgc_certs]
+            rows = await comp_mod.lookup(raw_nums, grader='cgc')
+            for idx, pr in zip(idxs, comp_mod.rows_to_priced_rows(
+                    rows, grader='cgc', original_certs=list(cgc_certs))):
+                out[idx] = pr
+
+    except CompError as e:
+        # Helper unreachable, auth failure, or bad response — surface cleanly
+        err = f'comp helper error: {e}'
+        print(f'[portal_client] comp mode failed: {e}')
+        return [PricedRow(cert=c, cert_id=_digits(c), status='error', error=err)
+                for c in certs]
+    except Exception as e:
+        err = f'comp helper unexpected error: {type(e).__name__}: {e}'
+        print(f'[portal_client] comp mode unexpected: {e}')
+        return [PricedRow(cert=c, cert_id=_digits(c), status='error', error=err)
+                for c in certs]
+
+    return [out.get(i, PricedRow(cert=c, cert_id=_digits(c),
+                                 status='error', error='no comp result'))
+            for i, c in enumerate(certs)]
 
 
 async def _price_chunk(session: aiohttp.ClientSession, chunk: list[str],
