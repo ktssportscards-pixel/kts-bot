@@ -403,8 +403,9 @@ async def _claim_call(endpoint, certs, idempotency_key, session):
     certs = [str(c).strip() for c in certs if str(c).strip()]
     if not certs:
         return []
-    if config.PRICE_MOCK:
-        return [_mock_claim(c) for c in certs]
+    if config.PRICE_MOCK or config.COMP_PRICING_MODE:
+        reason = '[mock] auto-claim off' if config.PRICE_MOCK else 'comp mode — Triumph bypassed'
+        return [ClaimResult(cert_id=_digits(c), skipped=reason) for c in certs]
     own = session is None
     if own:
         session = aiohttp.ClientSession()
@@ -474,6 +475,9 @@ async def fetch_allocation(session: Optional[aiohttp.ClientSession] = None) -> d
     are still Triumph's own figures — use only as a conservative near-full signal."""
     if config.PRICE_MOCK:
         return _mock_allocation()
+    if config.COMP_PRICING_MODE:
+        return {'categories': [], 'spendHidden': True, 'offline': True,
+                'reason': 'comp mode — Triumph bypassed, pricing via CardLadder direct'}
     headers = {"x-bot-key": config.BOT_API_KEY, "accept": "application/json",
                "accept-encoding": "gzip, deflate"}
     own = session is None

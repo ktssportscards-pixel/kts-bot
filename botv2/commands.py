@@ -210,6 +210,11 @@ async def handle(bot, message) -> bool:
     if cmd == "bands":
         if not is_kevin:
             return True
+        if config.COMP_PRICING_MODE:
+            await _dm_kevin_result(message, channel,
+                "⚠️ **Triumph bypassed** — bot is pricing via CardLadder direct (`COMP_PRICING_MODE=1`).\n"
+                "No allocation board available. Turn off `COMP_PRICING_MODE` to restore Triumph.")
+            return True
         from . import pricing, portal_client
         try:
             board = pricing.allocation_board(await portal_client.fetch_allocation())
@@ -238,6 +243,10 @@ async def handle(bot, message) -> bool:
         # auto-board posts), so he can eyeball/tweak the look before pointing it at a
         # customer channel. Kevin-only; the board itself carries no numbers/names.
         if not is_kevin:
+            return True
+        if config.COMP_PRICING_MODE:
+            await _dm_kevin_result(message, channel,
+                "⚠️ **Triumph bypassed** — lanes board unavailable in comp mode.")
             return True
         from . import pricing, portal_client
         try:
