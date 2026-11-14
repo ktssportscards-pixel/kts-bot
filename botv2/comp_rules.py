@@ -28,15 +28,15 @@ SPORT_LABELS = {
 
 DEFAULTS: dict = {
     'sports': {
-        'pokemon':    {'rate': 0.87, 'minValue': 1.0,  'maxValue': 200.0,  'minGrade': 7, 'maxSaleAgeDays': 30},
-        'basketball': {'rate': 0.85, 'minValue': 1.0,  'maxValue': 300.0,  'minGrade': 7, 'maxSaleAgeDays': 30},
-        'baseball':   {'rate': 0.85, 'minValue': 1.0,  'maxValue': 250.0,  'minGrade': 7, 'maxSaleAgeDays': 30},
-        'football':   {'rate': 0.85, 'minValue': 1.0,  'maxValue': 250.0,  'minGrade': 7, 'maxSaleAgeDays': 30},
-        'soccer':     {'rate': 0.85, 'minValue': 1.0,  'maxValue': 250.0,  'minGrade': 7, 'maxSaleAgeDays': 30},
-        'hockey':     {'rate': 0.85, 'minValue': 1.0,  'maxValue': 250.0,  'minGrade': 7, 'maxSaleAgeDays': 30},
-        'other':      {'rate': 0.85, 'minValue': 1.0,  'maxValue': 250.0,  'minGrade': 7, 'maxSaleAgeDays': 30},
+        'pokemon':    {'rate': 0.87, 'minValue': 1.0,  'maxValue': 200.0,  'minGrade': 7, 'maxSaleAgeDays': 30, 'minConf': 0},
+        'basketball': {'rate': 0.85, 'minValue': 1.0,  'maxValue': 300.0,  'minGrade': 7, 'maxSaleAgeDays': 30, 'minConf': 0},
+        'baseball':   {'rate': 0.85, 'minValue': 1.0,  'maxValue': 250.0,  'minGrade': 7, 'maxSaleAgeDays': 30, 'minConf': 0},
+        'football':   {'rate': 0.85, 'minValue': 1.0,  'maxValue': 250.0,  'minGrade': 7, 'maxSaleAgeDays': 30, 'minConf': 0},
+        'soccer':     {'rate': 0.85, 'minValue': 1.0,  'maxValue': 250.0,  'minGrade': 7, 'maxSaleAgeDays': 30, 'minConf': 0},
+        'hockey':     {'rate': 0.85, 'minValue': 1.0,  'maxValue': 250.0,  'minGrade': 7, 'maxSaleAgeDays': 30, 'minConf': 0},
+        'other':      {'rate': 0.85, 'minValue': 1.0,  'maxValue': 250.0,  'minGrade': 7, 'maxSaleAgeDays': 30, 'minConf': 0},
     },
-    'cgc': {'rate': 0.80, 'minValue': 1.0, 'maxValue': 500.0, 'maxSaleAgeDays': 30},
+    'cgc': {'rate': 0.80, 'minValue': 1.0, 'maxValue': 500.0, 'maxSaleAgeDays': 30, 'minConf': 0},
 }
 
 

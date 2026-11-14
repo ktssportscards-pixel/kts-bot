@@ -243,12 +243,14 @@ def rows_to_priced_rows(comp_rows: list[dict], grader: str = 'psa',
             rules = (comp_rules.get_cgc_rules() if is_cgc
                      else comp_rules.get_sport_rules(sport))
 
-        ok, skip_reason = _apply_rules(r, grader, rules, value)
+        conf = _compute_confidence(r)
+        ok, skip_reason = _apply_rules(r, grader, rules, value, conf)
 
         common = dict(cert=cert, cert_id=cert_id, grader=grader.upper(),
                       grade=grade_str, card_name=card_name, category=sport,
                       market_value=cl_value, last_sale=last_sale_price,
-                      value=value, value_basis=value_basis)
+                      value=value, value_basis=value_basis,
+                      confidence=float(conf))
 
         if not ok or value is None:
             out.append(PricedRow(**common, status='rejected', decision='PASS',
@@ -263,8 +265,14 @@ def rows_to_priced_rows(comp_rows: list[dict], grader: str = 'psa',
     return out
 
 
+def _compute_confidence(r: dict) -> int:
+    """0-100 confidence based on number of recent sales (each of 5 = 20pts)."""
+    sales = r.get('recentSales') or []
+    return min(len(sales), 5) * 20
+
+
 def _apply_rules(r: dict, grader: str, rules: dict,
-                 value: Optional[float]) -> tuple[bool, str]:
+                 value: Optional[float], confidence: int = 0) -> tuple[bool, str]:
     """Gate a comp result against the configured rules dict."""
     if value is None or value < 1:
         return False, 'no price found'
@@ -272,11 +280,14 @@ def _apply_rules(r: dict, grader: str, rules: dict,
     min_val = float(rules.get('minValue', 1))
     max_val = float(rules.get('maxValue', 9999))
     max_age = int(rules.get('maxSaleAgeDays', 30))
+    min_conf = int(rules.get('minConf', 0))
 
     if value < min_val:
         return False, f'${value:.2f} below ${min_val:.0f} min'
     if value > max_val:
         return False, f'${value:.2f} above ${max_val:.0f} max'
+    if min_conf > 0 and confidence < min_conf:
+        return False, f'confidence {confidence} < {min_conf} min'
 
     if grader.lower() == 'psa':
         min_grade = int(rules.get('minGrade', 7))

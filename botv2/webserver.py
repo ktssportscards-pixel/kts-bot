@@ -323,6 +323,8 @@ def _build_admin_html(rules: dict, saved: bool = False, error: str = '') -> str:
             f'min="1" max="10" step="1" required></td>'
             f'<td><input type="number" name="psa_{sp}_age" value="{int(r.get("maxSaleAgeDays", 30))}" '
             f'min="1" max="365" step="1" required></td>'
+            f'<td><input type="number" name="psa_{sp}_minconf" value="{int(r.get("minConf", 0))}" '
+            f'min="0" max="100" step="20" title="0=off, 20=1 sale, 40=2, 60=3, 80=4, 100=5"></td>'
             f'</tr>\n'
         )
 
@@ -363,13 +365,13 @@ input[type=number]:focus{{outline:none;border-color:#555}}
 <h2>PSA Rules</h2>
 <table>
 <thead><tr>
-<th>Sport</th><th>Rate %</th><th>Min $</th><th>Max $</th><th>Min Grade</th><th>Max Sale Age (days)</th>
+<th>Sport</th><th>Rate %</th><th>Min $</th><th>Max $</th><th>Min Grade</th><th>Max Sale Age (days)</th><th>Min Conf (0–100)</th>
 </tr></thead>
 <tbody>
 {sport_rows}
 </tbody>
 </table>
-<p class="note">Rate = % of CL market value · Grade gate is PSA-only · Max Sale Age = how fresh the last sale must be</p>
+<p class="note">Rate = % of CL market value · Grade gate is PSA-only · Max Sale Age = how fresh the last sale must be · Min Conf: 0=off, 20=1 sale, 40=2, 60=3, 80=4, 100=5 recent sales</p>
 
 <h2>CGC Rules</h2>
 <div class="cgc-row">
@@ -377,8 +379,9 @@ input[type=number]:focus{{outline:none;border-color:#555}}
 <label>Min $<input type="number" name="cgc_min" value="{float(cgc.get('minValue', 1))}" min="0" step="0.01" required></label>
 <label>Max $<input type="number" name="cgc_max" value="{float(cgc.get('maxValue', 500))}" min="0" step="1" required></label>
 <label>Max Sale Age (days)<input type="number" name="cgc_age" value="{int(cgc.get('maxSaleAgeDays', 30))}" min="1" max="365" step="1" required></label>
+<label>Min Conf (0–100)<input type="number" name="cgc_minconf" value="{int(cgc.get('minConf', 0))}" min="0" max="100" step="20" title="0=off, 20=1 sale, 40=2, 60=3, 80=4, 100=5"></label>
 </div>
-<p class="note">CGC rate is % of last sale price (not CL market value)</p>
+<p class="note">CGC rate is % of last sale price (not CL market value) · Min Conf: 0=off, 20=1 sale, 40=2, 60=3, 80=4, 100=5 recent sales</p>
 
 <button type="submit" class="save-btn">Save Rules</button>
 </form>
@@ -429,6 +432,7 @@ async def _admin_post(req):
             'maxValue': round(flt(f'psa_{sp}_max', 250), 2),
             'minGrade': max(1, min(10, intv(f'psa_{sp}_grade', 7))),
             'maxSaleAgeDays': max(1, min(365, intv(f'psa_{sp}_age', 30))),
+            'minConf': max(0, min(100, intv(f'psa_{sp}_minconf', 0))),
         }
     cgc_rate_pct = flt('cgc_rate', 80)
     new_rules['cgc'] = {
@@ -436,6 +440,7 @@ async def _admin_post(req):
         'minValue': round(flt('cgc_min', 1), 2),
         'maxValue': round(flt('cgc_max', 500), 2),
         'maxSaleAgeDays': max(1, min(365, intv('cgc_age', 30))),
+        'minConf': max(0, min(100, intv('cgc_minconf', 0))),
     }
 
     ok = comp_rules.save(new_rules)
